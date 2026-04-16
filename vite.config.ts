@@ -20,8 +20,20 @@ export default defineConfig({
     },
   },
   resolve: {
+    // Use "@/" (with trailing slash) so that scoped npm packages such as
+    // @vitest/ui or @types/node are never accidentally intercepted.
     alias: {
-      "@": resolve(__dirname, "src"),
+      "@/": resolve(__dirname, "src") + "/",
+    },
+  },
+  test: {
+    environment: "node",
+    include: ["src/**/*.test.ts"],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "lcov"],
+      include: ["src/**/*.ts"],
+      exclude: ["src/**/*.test.ts"],
     },
   },
 });
