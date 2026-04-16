@@ -1,0 +1,28 @@
+{
+  "name": "r-wipe-spaceship-game",
+  "version": "0.1.0",
+  "description": "R-Wipe: A fast-paced horizontally-scrolling arcade shooter built with Pixi.js and TypeScript",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "oxlint src",
+    "format": "prettier --write src"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "dependencies": {
+    "pixi.js": "^8.18.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@vitest/ui": "^4.1.4",
+    "oxlint": "^1.60.0",
+    "prettier": "^3.8.3",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.8",
+    "vitest": "^4.1.4"
+  }
+}
