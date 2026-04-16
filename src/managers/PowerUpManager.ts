@@ -187,9 +187,6 @@ export class PowerUpManager {
   private readonly collisionSystem: CollisionSystem;
   private readonly pendingFeedback: VisualFeedbackEvent[] = [];
 
-  /** Per-instance ID counter; reset on initialize() for test isolation. */
-  private nextId = 0;
-
   constructor() {
     this.collisionSystem = new CollisionSystem();
   }
@@ -202,8 +199,7 @@ export class PowerUpManager {
   initialize(): void {
     this.powerUps.length = 0;
     this.pendingFeedback.length = 0;
-    this.nextId = 0;
-    _globalNextId = 0; // keep global in sync for deterministic IDs across instances
+    _globalNextId = 0; // reset for deterministic IDs across instances
   }
 
   // ── Spawning ─────────────────────────────────────────────────────────────────
@@ -236,7 +232,6 @@ export class PowerUpManager {
    */
   spawnPowerUp(type: PowerUpType, x: number, y: number): void {
     const id = `powerup-${++_globalNextId}`;
-    this.nextId = _globalNextId;
     const powerUp: PowerUp = {
       id,
       type,
