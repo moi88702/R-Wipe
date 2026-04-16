@@ -187,6 +187,19 @@ export class PowerUpManager {
   private readonly collisionSystem: CollisionSystem;
   private readonly pendingFeedback: VisualFeedbackEvent[] = [];
 
+  /**
+   * Set to `true` by checkAndApply() whenever at least one power-up is
+   * collected.  The caller MUST call clearStatsDirty() after syncing the
+   * mutated RunStats object with StateManager.updateRunStats().
+   *
+   * checkAndApply() throws if this flag is still set on entry, which catches
+   * missing sync calls during development.
+   *
+   * Assumes one PowerUpManager per game instance (module-level _globalNextId
+   * also relies on this single-instance constraint).
+   */
+  private _statsDirty = false;
+
   constructor() {
     this.collisionSystem = new CollisionSystem();
   }
@@ -199,6 +212,7 @@ export class PowerUpManager {
   initialize(): void {
     this.powerUps.length = 0;
     this.pendingFeedback.length = 0;
+    this._statsDirty = false;
     _globalNextId = 0; // reset for deterministic IDs across instances
   }
 
@@ -289,20 +303,32 @@ export class PowerUpManager {
    *  2. Creates the appropriate PowerUpEffect.
    *  3. Calls `playerManager.applyPowerUp(effect)` to mutate player state.
    *  4. Reads the updated player state to record the correct post-effect values.
-   *  5. Updates the `runStats` object in-place (caller is responsible for
-   *     syncing with StateManager via updateRunStats() if needed).
+   *  5. Updates the `runStats` object in-place and sets the `_statsDirty` flag.
+   *     The caller MUST call clearStatsDirty() after syncing with StateManager
+   *     via StateManager.updateRunStats().  Failing to do so will cause the next
+   *     call to checkAndApply() to throw.
    *  6. Queues a VisualFeedbackEvent for the rendering layer.
    *
    * @param playerState   Current player state snapshot (for overlap bounds).
    * @param playerManager Player manager to apply effects through.
    * @param runStats      Mutable RunStats object to update (mutated in-place).
    * @returns             One CollectionResult per power-up collected this frame.
+   * @throws              If the previous call's stats have not been cleared via
+   *                      clearStatsDirty() (catches missing sync calls early).
    */
   checkAndApply(
     playerState: PlayerState,
     playerManager: PlayerManager,
     runStats: RunStats,
   ): CollectionResult[] {
+    if (this._statsDirty) {
+      throw new Error(
+        "PowerUpManager: stats from the previous checkAndApply() call have not " +
+        "been synced with StateManager. Call clearStatsDirty() after calling " +
+        "StateManager.updateRunStats().",
+      );
+    }
+
     const results: CollectionResult[] = [];
 
     for (const pu of this.powerUps) {
@@ -314,8 +340,12 @@ export class PowerUpManager {
       const effect = createEffect(pu.type);
       playerManager.applyPowerUp(effect);
 
-      // Read the UPDATED player state so stats reflect post-collection values
+      // Read the UPDATED player state so stats reflect post-collection values.
+      // Guard against an unexpected null return even though the declared return
+      // type is non-nullable (defensive against alternative implementations).
       const updatedState = playerManager.getState();
+      if (!updatedState) continue;
+      this._statsDirty = true;
       this.applyStatsUpdate(pu.type, updatedState, runStats);
 
       const feedback: VisualFeedbackEvent = {
@@ -377,6 +407,24 @@ export class PowerUpManager {
    */
   clearFeedback(): void {
     this.pendingFeedback.length = 0;
+  }
+
+  /**
+   * Returns `true` if checkAndApply() mutated `runStats` since the last
+   * clearStatsDirty() call.  The caller should sync the RunStats object with
+   * StateManager.updateRunStats() and then call clearStatsDirty().
+   */
+  isStatsDirty(): boolean {
+    return this._statsDirty;
+  }
+
+  /**
+   * Resets the stats-dirty flag.  Call this after syncing the RunStats object
+   * with StateManager.updateRunStats() so that the next checkAndApply() call
+   * does not throw.
+   */
+  clearStatsDirty(): void {
+    this._statsDirty = false;
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────────
