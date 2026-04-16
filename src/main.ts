@@ -1,4 +1,4 @@
-import { Application, Text, TextStyle } from "pixi.js";
+import { Application, Text, TextStyle, VERSION } from "pixi.js";
 
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 720;
@@ -40,7 +40,7 @@ async function init(): Promise<void> {
   console.log("R-Wipe: Pixi.js Application initialized", {
     width: CANVAS_WIDTH,
     height: CANVAS_HEIGHT,
-    pixiVersion: Application.version ?? "unknown",
+    pixiVersion: VERSION ?? "unknown",
   });
 
   // Game loop – Pixi ticker uses requestAnimationFrame internally
