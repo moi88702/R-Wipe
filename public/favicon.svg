@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="10" fill="#0a0a14"/>
+  <!-- Hull -->
+  <polygon points="10,24 42,24 54,32 42,40 10,40" fill="#00d4ff"/>
+  <!-- Nose tip highlight -->
+  <polygon points="42,26 52,32 42,38" fill="#ffaa33"/>
+  <!-- Cockpit -->
+  <circle cx="24" cy="32" r="4" fill="#0a0a14"/>
+  <!-- Engine glow -->
+  <rect x="6" y="28" width="6" height="8" fill="#ffaa33"/>
+  <rect x="2" y="30" width="4" height="4" fill="#fff1aa"/>
+</svg>
