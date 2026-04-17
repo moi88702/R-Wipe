@@ -440,12 +440,12 @@ export class PlayerManager {
     let vy = 0;
 
     if (input.touchTarget) {
-      // Mobile drag-to-move: glide the ship toward a point 50px to the right
+      // Mobile drag-to-move: glide the ship toward a point 150px to the right
       // of the finger so the thumb never occludes the ship — visibility of the
       // ship matters more than pixel-exact tracking. Movement is clamped to
       // keyboard speed so long distances don't teleport; when closer than one
       // step we scale down so the ship settles instead of oscillating.
-      const targetX = input.touchTarget.x + 50;
+      const targetX = input.touchTarget.x + 150;
       const targetY = input.touchTarget.y;
       const dx = targetX - this.state.position.x;
       const dy = targetY - this.state.position.y;
