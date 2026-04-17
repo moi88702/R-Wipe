@@ -24,6 +24,19 @@ async function init(): Promise<void> {
   // the API isn't available.
   const fsButton = document.getElementById("fullscreen-btn");
   if (fsButton) {
+    const ENTER_GLYPH = "⛶";
+    const EXIT_GLYPH = "✕";
+    const syncIcon = (): void => {
+      const active = document.fullscreenElement !== null;
+      fsButton.textContent = active ? EXIT_GLYPH : ENTER_GLYPH;
+      fsButton.setAttribute(
+        "aria-label",
+        active ? "Exit fullscreen" : "Enter fullscreen",
+      );
+    };
+    syncIcon();
+    document.addEventListener("fullscreenchange", syncIcon);
+
     const toggleFullscreen = async (): Promise<void> => {
       try {
         if (!document.fullscreenElement) {

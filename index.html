@@ -18,7 +18,12 @@
       html,
       body {
         width: 100%;
-        height: 100%;
+        /* `dvh` (dynamic viewport height) excludes the area hidden by mobile
+           browser chrome (URL bar, bottom nav). Using `100vh` here would let
+           the centred game-container overflow upward behind the URL bar and
+           clip the fullscreen button + top HUD row. `dvh` is supported on
+           iOS 15.4+, Chrome 108+, Firefox 101+. */
+        height: 100dvh;
         background-color: #0a0a14;
         display: flex;
         align-items: center;
@@ -31,8 +36,8 @@
          the rendered canvas so the whole playfield is always visible, even
          under browser chrome that eats vertical space. */
       #game-container {
-        width: min(100vw, calc(100vh * 16 / 9));
-        height: min(100vh, calc(100vw * 9 / 16));
+        width: min(100vw, calc(100dvh * 16 / 9));
+        height: min(100dvh, calc(100vw * 9 / 16));
         display: block;
         position: relative;
       }
@@ -49,31 +54,41 @@
         user-select: none;
       }
 
-      /* Fullscreen toggle — small overlay button anchored top-right. Visible
-         on all devices but chiefly useful on mobile to reclaim the ~80px of
-         browser chrome that otherwise squeezes the 16:9 playfield. */
+      /* Fullscreen toggle — overlay button anchored top-right. Anchored to
+         the body (not the game-container) so it always sits inside the
+         visible viewport even when the game-container is letterboxed, and
+         respects notch/safe-area insets so it isn't clipped by the browser
+         chrome on iOS/Android. */
       #fullscreen-btn {
-        position: absolute;
-        top: 8px;
-        right: 8px;
-        width: 36px;
-        height: 36px;
-        border: 1px solid rgba(255, 255, 255, 0.35);
-        background: rgba(10, 10, 20, 0.55);
+        position: fixed;
+        top: max(10px, env(safe-area-inset-top, 10px));
+        right: max(10px, env(safe-area-inset-right, 10px));
+        width: 48px;
+        height: 48px;
+        border: 1px solid rgba(255, 255, 255, 0.45);
+        background: rgba(10, 10, 20, 0.65);
         color: #fff;
-        font-size: 18px;
-        line-height: 36px;
+        font-size: 22px;
+        line-height: 48px;
         text-align: center;
         cursor: pointer;
-        z-index: 10;
+        z-index: 100;
         font-family: monospace;
-        border-radius: 4px;
+        border-radius: 6px;
         padding: 0;
         -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
       }
       #fullscreen-btn:hover,
       #fullscreen-btn:active {
-        background: rgba(40, 40, 60, 0.75);
+        background: rgba(40, 40, 60, 0.85);
+        border-color: rgba(255, 255, 255, 0.7);
+      }
+      /* When already in fullscreen, the button swaps to an "exit" glyph (set
+         by main.ts) — still visible so the user can toggle back out. */
+      :fullscreen #fullscreen-btn {
+        top: 10px;
+        right: 10px;
       }
       /* Rotation hint shown only when a phone is held in portrait. */
       #rotate-hint {
@@ -98,9 +113,8 @@
     </style>
   </head>
   <body>
-    <div id="game-container">
-      <button id="fullscreen-btn" type="button" aria-label="Toggle fullscreen">⛶</button>
-    </div>
+    <div id="game-container"></div>
+    <button id="fullscreen-btn" type="button" aria-label="Toggle fullscreen">⛶</button>
     <div id="rotate-hint">Rotate your device to landscape to play</div>
     <script type="module" src="/src/main.ts"></script>
   </body>
