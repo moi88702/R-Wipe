@@ -55,6 +55,33 @@ const INVULNERABILITY_MS = 1_000;
 /** Cooldown (ms) between manual B-key bomb drops. */
 const BOMB_COOLDOWN_MS = 2_500;
 
+/** Free bombs granted on respawn so the player can clear space immediately. */
+const RESPAWN_BOMB_CREDITS = 3;
+
+/**
+ * Damage multiplier applied to bomb-kind projectiles, relative to the
+ * player's current weapon damage. Bombs are AoE and meant to clear space
+ * around the player in a pinch, so they hit notably harder than bullets.
+ */
+const BOMB_DAMAGE_MULT = 4.4;
+/** Minimum damage for a B-key bomb regardless of weapon level. */
+const BOMB_MIN_DAMAGE = 36;
+
+/** Radius (px) of the panic-bomb blast, measured from the ship centre. */
+const PANIC_BOMB_BLAST_RADIUS = 220;
+
+/**
+ * Pending panic-bomb detonation request. Queued by PlayerManager when the
+ * player presses bomb; drained once per frame by GameManager which applies
+ * AoE damage and FX.
+ */
+export interface PanicBombEvent {
+  x: number;
+  y: number;
+  damage: number;
+  blastRadius: number;
+}
+
 // ── Weapon upgrade helpers ─────────────────────────────────────────────────
 
 /**
@@ -126,6 +153,14 @@ export class PlayerManager {
   private prevBombPressed = false;
   /** Dev-only: when true, takeDamage is a no-op. */
   private godMode = false;
+  /**
+   * Number of cooldown-bypassing bombs available. Granted on respawn so a
+   * dying player can immediately clear space. Each drop decrements one; when
+   * zero, the normal BOMB_COOLDOWN_MS applies again.
+   */
+  private bombCredits = 0;
+  /** Panic bombs waiting for GameManager to detonate this frame. */
+  private pendingPanicBombs: PanicBombEvent[] = [];
 
   /** Viewport dimensions used for out-of-bounds projectile culling. */
   private viewportWidth: number = 1_280;
@@ -153,6 +188,8 @@ export class PlayerManager {
     this.clockMs = FIRE_RATE_LEVEL_1_MS; // allow firing immediately
     this.bombCooldownMs = 0;
     this.prevBombPressed = false;
+    this.bombCredits = 0;
+    this.pendingPanicBombs = [];
   }
 
   /**
@@ -361,6 +398,8 @@ export class PlayerManager {
     this.clockMs = FIRE_RATE_LEVEL_1_MS;
     this.bombCooldownMs = 0;
     this.prevBombPressed = false;
+    this.bombCredits = RESPAWN_BOMB_CREDITS;
+    this.pendingPanicBombs = [];
   }
 
   /** End the current invulnerability window immediately. */
@@ -400,16 +439,31 @@ export class PlayerManager {
     let vx = 0;
     let vy = 0;
 
-    if (input.moveLeft) vx -= speed;
-    if (input.moveRight) vx += speed;
-    if (input.moveUp) vy -= speed;
-    if (input.moveDown) vy += speed;
+    if (input.touchTarget) {
+      // Mobile drag-to-move: glide the ship toward the finger at the same
+      // max speed as keyboard movement. Clamps to `speed` so long distances
+      // don't teleport; when closer than one step, we scale down so the
+      // ship settles under the finger instead of oscillating.
+      const dx = input.touchTarget.x - this.state.position.x;
+      const dy = input.touchTarget.y - this.state.position.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 0.5) {
+        const stepSpeed = Math.min(speed, dist / Math.max(dt, 1e-6));
+        vx = (dx / dist) * stepSpeed;
+        vy = (dy / dist) * stepSpeed;
+      }
+    } else {
+      if (input.moveLeft) vx -= speed;
+      if (input.moveRight) vx += speed;
+      if (input.moveUp) vy -= speed;
+      if (input.moveDown) vy += speed;
 
-    // Normalise diagonal so diagonal speed equals axis speed
-    if (vx !== 0 && vy !== 0) {
-      const inv = 1 / Math.SQRT2;
-      vx *= inv;
-      vy *= inv;
+      // Normalise diagonal so diagonal speed equals axis speed
+      if (vx !== 0 && vy !== 0) {
+        const inv = 1 / Math.SQRT2;
+        vx *= inv;
+        vy *= inv;
+      }
     }
 
     const newX = Math.max(BOUNDS.xMin, Math.min(BOUNDS.xMax, this.state.position.x + vx * dt));
@@ -472,15 +526,15 @@ export class PlayerManager {
           y: noseY,
           vx: 420,
           vy: 0,
-          damage: weapon.projectileDamage * 2.2,
+          damage: weapon.projectileDamage * BOMB_DAMAGE_MULT,
           owner: "player",
           kind: "prox-bomb",
           width: 16,
           height: 16,
           lifetimeMs: 3_000,
           health: 2,
-          proxTriggerRadius: 90,
-          proxBlastRadius: 110,
+          proxTriggerRadius: 120,
+          proxBlastRadius: 170,
         });
         break;
       }
@@ -501,41 +555,58 @@ export class PlayerManager {
   }
 
   /**
-   * Drops a proximity bomb on B-key press (edge-triggered). Independent of
-   * the equipped weapon so the player always has an emergency AoE option.
+   * Queues a panic-bomb detonation centred on the ship when B is pressed
+   * (edge-triggered). Panic bombs are independent of the equipped weapon:
+   * they clear a wide blast radius around the player, giving breathing
+   * room when surrounded. The actual damage + FX are applied by GameManager
+   * which drains {@link consumePendingPanicBombs} each frame.
    */
   private tryDropBomb(input: InputState): void {
     const pressed = input.bomb;
     const edge = pressed && !this.prevBombPressed;
     this.prevBombPressed = pressed;
     if (!edge) return;
-    if (this.bombCooldownMs > 0) return;
+    // Post-respawn free bombs bypass the cooldown so the player can panic-clear.
+    const useCredit = this.bombCredits > 0;
+    if (!useCredit && this.bombCooldownMs > 0) return;
 
-    const noseX = this.state.position.x + this.state.width / 2;
-    const noseY = this.state.position.y;
-    const dmg = Math.max(18, this.state.weapon.projectileDamage * 2.2);
-    this.projectilePool.spawnEx({
-      x: noseX,
-      y: noseY,
-      vx: 360,
-      vy: 0,
+    const dmg = Math.max(
+      BOMB_MIN_DAMAGE,
+      this.state.weapon.projectileDamage * BOMB_DAMAGE_MULT,
+    );
+    this.pendingPanicBombs.push({
+      x: this.state.position.x,
+      y: this.state.position.y,
       damage: dmg,
-      owner: "player",
-      kind: "prox-bomb",
-      width: 18,
-      height: 18,
-      lifetimeMs: 3_000,
-      health: 2,
-      proxTriggerRadius: 100,
-      proxBlastRadius: 130,
+      blastRadius: PANIC_BOMB_BLAST_RADIUS,
     });
-    this.bombCooldownMs = BOMB_COOLDOWN_MS;
+    if (useCredit) {
+      this.bombCredits -= 1;
+    } else {
+      this.bombCooldownMs = BOMB_COOLDOWN_MS;
+    }
+  }
+
+  /**
+   * Drain the panic-bomb queue. Returns bombs requested this frame and
+   * leaves the queue empty. Called once per frame by GameManager.
+   */
+  consumePendingPanicBombs(): PanicBombEvent[] {
+    if (this.pendingPanicBombs.length === 0) return [];
+    const out = this.pendingPanicBombs;
+    this.pendingPanicBombs = [];
+    return out;
   }
 
   /** 0..1 readiness of the B-key bomb cooldown (1 = ready, 0 = just fired). */
   getBombCooldownProgress(): number {
     if (BOMB_COOLDOWN_MS <= 0) return 1;
     return 1 - this.bombCooldownMs / BOMB_COOLDOWN_MS;
+  }
+
+  /** Number of free cooldown-bypassing panic bombs currently available. */
+  getBombCredits(): number {
+    return this.bombCredits;
   }
 
   // ── Dev-only setters (wired by src/dev/cheats.ts; inert in prod) ─────────

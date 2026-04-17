@@ -89,6 +89,14 @@ export class GameManager {
     this.renderer = new GameRenderer(app, opts.width, opts.height);
   }
 
+  /**
+   * Wire drag-to-move / hold-to-fire / double-tap-bomb / two-finger-pause
+   * gestures to the given element (typically the Pixi canvas).
+   */
+  enableTouchControls(element: HTMLElement): void {
+    this.input.attachTouch(element, this.width, this.height);
+  }
+
   // ── Public loop entry ────────────────────────────────────────────────────
 
   tick(deltaMs: number): void {
@@ -118,6 +126,11 @@ export class GameManager {
     this.prevDownPressed = input.moveDown;
 
     this.renderFrame(clamped);
+
+    // Clear one-frame touch pulses (bomb, menuConfirm, pause from a tap) so
+    // they don't leak into the next frame. Must come after every poll() caller
+    // in this tick has had a chance to see them.
+    this.input.endFrame();
   }
 
   // ── Menu input helpers ───────────────────────────────────────────────────
@@ -467,8 +480,23 @@ export class GameManager {
       }
     }
 
+    // ── Enemy homing-missile detonation (proximity OR lifetime expiry) ─────
+    const missileDamage = this.detonateEnemyMissiles(deltaMs);
+    if (missileDamage > 0) {
+      totalDamageReceived += missileDamage;
+      consecutiveHits = 0;
+      this.safeTimerMs = 0;
+      this.renderer.showHitFlash();
+      if (!this.player.getState().isAlive) {
+        didDie = true;
+      }
+    }
+
     // ── Proximity-bomb detonation ──────────────────────────────────────────
     this.detonateProximityBombs();
+
+    // ── Player panic-bomb detonation (B-key / bomb credit) ─────────────────
+    this.detonatePlayerPanicBombs();
 
     // ── Mega-laser continuous damage ──────────────────────────────────────
     if (playerState.megaLaserMs > 0) {
@@ -568,6 +596,42 @@ export class GameManager {
     }
   }
 
+  // ── Enemy homing missile detonation ──────────────────────────────────────
+
+  /**
+   * Walks active enemy projectiles; any homing missile that is either close
+   * enough to the player (within `proxTriggerRadius`) or has reached the end
+   * of its lifetime detonates. The blast kills the missile and damages the
+   * player if inside `proxBlastRadius`.
+   *
+   * Returns the raw damage dealt to the player (for run-stat bookkeeping).
+   */
+  private detonateEnemyMissiles(deltaMs: number): number {
+    const playerState = this.player.getState();
+    let damageDealt = 0;
+    for (const p of this.enemies.getProjectiles()) {
+      if (!p.isAlive || !p.isHoming) continue;
+      const trigger = p.proxTriggerRadius ?? 0;
+      const blast = p.proxBlastRadius ?? 0;
+      if (trigger <= 0 && blast <= 0) continue;
+
+      const dx = playerState.position.x - p.position.x;
+      const dy = playerState.position.y - p.position.y;
+      const distSq = dx * dx + dy * dy;
+      const inTrigger = trigger > 0 && distSq <= trigger * trigger;
+      const expiring = p.lifetime <= deltaMs;
+      if (!inTrigger && !expiring) continue;
+
+      if (blast > 0 && distSq <= blast * blast) {
+        const result = this.player.takeDamage(p.damage);
+        if (!result.blocked) damageDealt += p.damage;
+      }
+      this.enemies.killProjectile(p.id);
+      this.renderer.showExplosion(p.position.x, p.position.y, 0xff6633, blast * 1.3);
+    }
+    return damageDealt;
+  }
+
   // ── Proximity bombs ──────────────────────────────────────────────────────
 
   /**
@@ -621,6 +685,53 @@ export class GameManager {
     }
   }
 
+  // ── Player panic bomb ────────────────────────────────────────────────────
+
+  /**
+   * Drains any panic-bomb detonation requests the player queued this frame
+   * (B-key press or post-respawn credit) and applies them: damages every
+   * enemy inside `blastRadius` of the ship, sweeps incoming enemy projectiles
+   * out of the blast so the player actually gets breathing room, and cues
+   * the layered "1 large + 6 satellite" explosion FX.
+   */
+  private detonatePlayerPanicBombs(): void {
+    const bombs = this.player.consumePendingPanicBombs();
+    if (bombs.length === 0) return;
+    const enemies = this.enemies.getEnemies();
+    for (const b of bombs) {
+      const r2 = b.blastRadius * b.blastRadius;
+      for (const e of enemies) {
+        if (!e.isAlive) continue;
+        const dx = e.position.x - b.x;
+        const dy = e.position.y - b.y;
+        if (dx * dx + dy * dy > r2) continue;
+        const result = this.enemies.onProjectileHit(e.id, b.damage);
+        if (result.defeated) {
+          if (result.enemyType !== "boss") {
+            this.powerUps.onEnemyDefeated(result.position.x, result.position.y);
+          }
+          if (result.enemyType) {
+            this.renderer.showEnemyDefeated(
+              result.position.x,
+              result.position.y,
+              result.enemyType,
+            );
+          }
+        }
+      }
+      // Sweep enemy projectiles inside the blast so the player clears space.
+      for (const p of this.enemies.getProjectiles()) {
+        if (!p.isAlive) continue;
+        const dx = p.position.x - b.x;
+        const dy = p.position.y - b.y;
+        if (dx * dx + dy * dy > r2) continue;
+        this.enemies.killProjectile(p.id);
+        this.renderer.showExplosion(p.position.x, p.position.y, 0xffaa33, 26);
+      }
+      this.renderer.showPlayerBomb(b.x, b.y, b.blastRadius);
+    }
+  }
+
   // ── Mega-laser ───────────────────────────────────────────────────────────
 
   /**
@@ -647,10 +758,21 @@ export class GameManager {
 
     let scoreDelta = 0;
     let killed = 0;
+    // Spawn sparks at ~24/sec per hit enemy. Scales with frame time so it's
+    // framerate-independent.
+    const sparkChance = Math.min(1, (deltaMs / 1_000) * 24);
     for (const e of this.enemies.getEnemies()) {
       if (!e.isAlive) continue;
       if (!this.collisions.checkOverlap(beamBox, e)) continue;
       const r = this.enemies.onProjectileHit(e.id, dmg);
+      if (Math.random() < sparkChance) {
+        const sparkX = Math.max(beamStart, e.position.x - e.width / 2);
+        const sparkY = Math.max(
+          e.position.y - e.height / 2,
+          Math.min(e.position.y + e.height / 2, player.position.y),
+        );
+        this.renderer.showLaserSpark(sparkX, sparkY);
+      }
       if (r.defeated) {
         scoreDelta += r.bounty;
         if (r.enemyType !== "boss") {
@@ -722,6 +844,7 @@ export class GameManager {
       powerUps,
       menuSelection: this.menuSelection,
       lastRun: this.state.getLastRun(),
+      bombCredits: this.player.getBombCredits(),
     });
   }
 }

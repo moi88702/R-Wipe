@@ -19,10 +19,46 @@ async function init(): Promise<void> {
     container.appendChild(app.canvas);
   }
 
+  // Fullscreen toggle. Pointerup (not click) so iOS Safari treats it as a
+  // user gesture on the first tap. Falls back to a no-op on desktops where
+  // the API isn't available.
+  const fsButton = document.getElementById("fullscreen-btn");
+  if (fsButton) {
+    const toggleFullscreen = async (): Promise<void> => {
+      try {
+        if (!document.fullscreenElement) {
+          await document.documentElement.requestFullscreen?.();
+          type OrientationLock = (orientation: "landscape") => Promise<void>;
+          const lock = (screen.orientation as unknown as { lock?: OrientationLock })
+            ?.lock;
+          if (typeof lock === "function") {
+            await lock.call(screen.orientation, "landscape").catch(() => undefined);
+          }
+        } else {
+          await document.exitFullscreen?.();
+        }
+      } catch {
+        // Fullscreen denied or unsupported — fail silently.
+      }
+    };
+    fsButton.addEventListener("pointerup", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      void toggleFullscreen();
+    });
+    // Prevent the button's touch from being interpreted as a game tap.
+    fsButton.addEventListener("touchstart", (e) => e.stopPropagation(), {
+      passive: true,
+    });
+  }
+
   const game = new GameManager(app, {
     width: CANVAS_WIDTH,
     height: CANVAS_HEIGHT,
   });
+
+  // Drag-to-move, hold-to-fire, double-tap-bomb, two-finger-pause.
+  game.enableTouchControls(app.canvas);
 
   // Drive the game from Pixi's ticker — deltaMS is the real frame duration in ms.
   app.ticker.add((ticker) => {

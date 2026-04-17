@@ -109,7 +109,7 @@ export class ProjectilePool {
     p.height = opts.height ?? PROJECTILE_HEIGHT;
     p.kind = opts.kind ?? "bullet";
     p.isHoming = opts.isHoming ?? false;
-    p.homingTurnRate = opts.homingTurnRate ?? 2.2;
+    p.homingTurnRate = opts.homingTurnRate ?? 1.0;
     p.ageMs = 0;
     if (opts.health !== undefined) p.health = opts.health;
     else delete p.health;
@@ -189,7 +189,7 @@ export class ProjectilePool {
         let delta = desired - currentAngle;
         while (delta > Math.PI) delta -= Math.PI * 2;
         while (delta < -Math.PI) delta += Math.PI * 2;
-        const maxTurn = (p.homingTurnRate ?? 2.2) * dt;
+        const maxTurn = (p.homingTurnRate ?? 1.0) * dt;
         const clamped = Math.max(-maxTurn, Math.min(maxTurn, delta));
         const newAngle = currentAngle + clamped;
         p.velocity.x = Math.cos(newAngle) * speed;

@@ -54,6 +54,16 @@ interface RingPulse {
   maxRadius: number;
 }
 
+interface Spark {
+  x: number;
+  y: number;
+  age: number;
+  maxAge: number;
+  color: number;
+  size: number;
+  rot: number;
+}
+
 interface FloatingText {
   text: Text;
   age: number;
@@ -102,6 +112,7 @@ export class GameRenderer {
   private readonly stars: Star[] = [];
   private readonly explosions: Explosion[] = [];
   private readonly ringPulses: RingPulse[] = [];
+  private readonly sparks: Spark[] = [];
   private readonly floatingTexts: FloatingText[] = [];
   private hitFlashTimer = 0;
   private gameOverFadeMs = 0;
@@ -121,6 +132,7 @@ export class GameRenderer {
   private readonly hitsText: Text;
   private readonly weaponText: Text;
   private readonly healthText: Text;
+  private readonly bombsText: Text;
 
   // Menu text elements
   private readonly titleText: Text;
@@ -225,6 +237,12 @@ export class GameRenderer {
     this.weaponText.y = 44;
     this.hudLayer.addChild(this.weaponText);
 
+    this.bombsText = new Text({ text: "", style: hudStyle(COLOR.hudAmber, 18) });
+    this.bombsText.anchor.set(1, 0);
+    this.bombsText.x = width - 20;
+    this.bombsText.y = 68;
+    this.hudLayer.addChild(this.bombsText);
+
     // Menu text
     this.titleText = new Text({
       text: "R-WIPE",
@@ -251,7 +269,7 @@ export class GameRenderer {
     this.menuLayer.addChild(this.subtitleText);
 
     this.promptText = new Text({
-      text: "↑↓  TO  SELECT    ENTER  TO  CONFIRM",
+      text: "↑↓ SELECT   ENTER CONFIRM   TAP TO PLAY",
       style: hudStyle(COLOR.hudWhite, 16),
     });
     this.promptText.anchor.set(0.5, 0.5);
@@ -327,10 +345,13 @@ export class GameRenderer {
           fontFamily: "monospace",
           fontSize: 16,
           fill: COLOR.hudWhite,
-          align: "center",
+          align: "left",
           lineHeight: 22,
         }),
       });
+      // Anchor-x = 0.5 centers the block under the column header, while
+      // align: "left" keeps every row flush-left within that block so the
+      // padded label/value pairs render as a neat two-column table.
       t.anchor.set(0.5, 0);
       t.x = colWidth * col + colWidth / 2;
       t.y = colY + 36;
@@ -493,6 +514,7 @@ export class GameRenderer {
       powerUps: ReadonlyArray<PowerUp>;
       menuSelection: number;
       lastRun: Readonly<RunStats> | null;
+      bombCredits: number;
     },
   ): void {
     this.drawStarfield(deltaMs);
@@ -604,7 +626,7 @@ export class GameRenderer {
       this.fxGfx.rect(0, 0, this.width, this.height).fill({ color: 0xff2244, alpha });
     }
 
-    this.updateHud(state);
+    this.updateHud(state, extras.bombCredits);
   }
 
   // ── FX API ───────────────────────────────────────────────────────────────
@@ -703,9 +725,58 @@ export class GameRenderer {
     this.hitFlashTimer = 200;
   }
 
+  /**
+   * Panic-bomb FX centred on the ship: one massive layered core burst +
+   * six satellite bursts arranged in a hex ring + an expanding shockwave.
+   * Meant to make the player feel like they just cleared the airspace.
+   */
+  showPlayerBomb(x: number, y: number, radius: number): void {
+    // Layered core: hot white → amber → red-orange, overlapped so the
+    // blend looks like a single rolling fireball instead of a disc.
+    this.showExplosion(x, y, 0xffffff, radius * 0.95);
+    this.showExplosion(x, y, 0xffdd55, radius * 0.75);
+    this.showExplosion(x, y, 0xff6633, radius * 1.1);
+    // Six satellite bursts in a hex ring around the ship.
+    const satRadius = radius * 0.55;
+    const satSize = radius * 0.45;
+    const satColors = [0xffdd55, 0xff8844, 0xffffff, 0xffaa33, 0xff66aa, 0xffeeaa];
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * Math.PI * 2 + Math.PI / 12;
+      const sx = x + Math.cos(a) * satRadius;
+      const sy = y + Math.sin(a) * satRadius;
+      this.showExplosion(sx, sy, satColors[k] ?? 0xffaa33, satSize);
+    }
+    // Expanding shockwave.
+    this.ringPulses.push({
+      x,
+      y,
+      age: 0,
+      maxAge: 650,
+      color: 0xffdd55,
+      maxRadius: radius * 1.35,
+    });
+  }
+
+  /**
+   * Short-lived radiating spark for mega-laser impacts on enemy hulls.
+   * Hot white core + four spokes that grow + fade over ~170ms.
+   */
+  showLaserSpark(x: number, y: number, color = 0xffffaa): void {
+    this.sparks.push({
+      x,
+      y,
+      age: 0,
+      maxAge: 170,
+      color,
+      size: 14 + Math.random() * 6,
+      rot: Math.random() * Math.PI,
+    });
+  }
+
   resetFx(): void {
     this.explosions.length = 0;
     this.ringPulses.length = 0;
+    this.sparks.length = 0;
     for (const f of this.floatingTexts) f.text.destroy();
     this.floatingTexts.length = 0;
     this.hitFlashTimer = 0;
@@ -1427,6 +1498,32 @@ export class GameRenderer {
         .fill({ color: e.color, alpha: (1 - t) * 0.5 });
     }
 
+    // Laser-impact sparks: radiating spokes + hot core.
+    for (let i = this.sparks.length - 1; i >= 0; i--) {
+      const s = this.sparks[i]!;
+      s.age += deltaMs;
+      if (s.age >= s.maxAge) {
+        this.sparks.splice(i, 1);
+        continue;
+      }
+      const t = s.age / s.maxAge;
+      const alpha = 1 - t;
+      const len = s.size * (0.4 + t * 1.1);
+      // Four radiating spokes (× two perpendicular pairs rotated by s.rot).
+      for (let k = 0; k < 4; k++) {
+        const a = s.rot + k * (Math.PI / 2);
+        const ex = s.x + Math.cos(a) * len;
+        const ey = s.y + Math.sin(a) * len;
+        this.fxGfx
+          .moveTo(s.x, s.y)
+          .lineTo(ex, ey)
+          .stroke({ color: s.color, width: 2, alpha });
+      }
+      this.fxGfx
+        .circle(s.x, s.y, s.size * 0.35 * (1 - t * 0.5))
+        .fill({ color: 0xffffff, alpha: alpha * 0.9 });
+    }
+
     // Ring pulses
     for (let i = this.ringPulses.length - 1; i >= 0; i--) {
       const rp = this.ringPulses[i]!;
@@ -1482,7 +1579,7 @@ export class GameRenderer {
     }
   }
 
-  private updateHud(state: Readonly<GameState>): void {
+  private updateHud(state: Readonly<GameState>, bombCredits: number): void {
     const run = state.currentRunStats;
     const player = state.playerState;
     this.scoreText.text = `SCORE ${run.score}`;
@@ -1493,6 +1590,7 @@ export class GameRenderer {
     this.hitsText.text = `HITS ${run.consecutiveHits}`;
     const gun = "I".repeat(Math.max(1, Math.min(5, player.weapon.upgradeLevel)));
     this.weaponText.text = `GUN ${gun}`;
+    this.bombsText.text = bombCredits > 0 ? `BOMBS ${bombCredits}` : "";
   }
 
   /** Populates the 2-item main-menu list and highlights the selected one. */
@@ -1559,19 +1657,28 @@ export class GameRenderer {
   }
 }
 
+// Two-column table layout: labels pad to LABEL_W, values pad-start to VAL_W
+// so every row has the same monospace width and renders as a tidy grid.
+const LABEL_W = 14;
+const VAL_W = 7;
+
+function row(label: string, value: string | number): string {
+  return label.padEnd(LABEL_W) + String(value).padStart(VAL_W);
+}
+
 function formatRunStats(r: Readonly<RunStats>): string {
   const secs = Math.round(r.timeAliveMs / 1_000);
   return [
-    `SCORE          ${r.score}`,
-    `LEVEL          ${r.levelReached}`,
-    `TIME ALIVE     ${secs}s`,
-    `ENEMIES        ${r.enemiesKilled}`,
-    `BEST GUN       LV ${r.gunUpgradeAchieved}`,
-    `PEAK HITS      ${r.peakConsecutiveHits}`,
-    `SAFE TIME      ${Math.round(r.longestTimeWithoutDamageSec)}s`,
-    `DAMAGE TAKEN   ${r.totalDamageReceived}`,
-    `SHIELDS        ${r.shieldsCollected}`,
-    `LIVES GAINED   ${r.extraLivesCollected}`,
+    row("SCORE", r.score),
+    row("LEVEL", r.levelReached),
+    row("TIME ALIVE", `${secs}s`),
+    row("ENEMIES", r.enemiesKilled),
+    row("BEST GUN", `LV ${r.gunUpgradeAchieved}`),
+    row("PEAK HITS", r.peakConsecutiveHits),
+    row("SAFE TIME", `${Math.round(r.longestTimeWithoutDamageSec)}s`),
+    row("DAMAGE TAKEN", r.totalDamageReceived),
+    row("SHIELDS", r.shieldsCollected),
+    row("LIVES GAINED", r.extraLivesCollected),
   ].join("\n");
 }
 
@@ -1588,15 +1695,15 @@ function formatAllTimeStats(a: {
 }): string {
   const secs = Math.round(a.longestTimeAlive / 1_000);
   return [
-    `TOP SCORE      ${a.topScore}`,
-    `FURTHEST LVL   ${a.furthestLevel}`,
-    `BEST GUN       LV ${a.bestGunUpgrade}`,
-    `TOTAL KILLS    ${a.totalEnemiesKilled}`,
-    `GAMES PLAYED   ${a.totalGamesPlayed}`,
-    `LONGEST LIFE   ${secs}s`,
-    `LONGEST SAFE   ${Math.round(a.longestTimeSafeSec)}s`,
-    `AVG SCORE      ${Math.round(a.averageScore)}`,
-    `AVG LEVEL      ${a.averageLevelReached.toFixed(1)}`,
+    row("TOP SCORE", a.topScore),
+    row("FURTHEST LVL", a.furthestLevel),
+    row("BEST GUN", `LV ${a.bestGunUpgrade}`),
+    row("TOTAL KILLS", a.totalEnemiesKilled),
+    row("GAMES PLAYED", a.totalGamesPlayed),
+    row("LONGEST LIFE", `${secs}s`),
+    row("LONGEST SAFE", `${Math.round(a.longestTimeSafeSec)}s`),
+    row("AVG SCORE", Math.round(a.averageScore)),
+    row("AVG LEVEL", a.averageLevelReached.toFixed(1)),
   ].join("\n");
 }
 

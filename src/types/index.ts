@@ -18,6 +18,11 @@ export interface InputState {
   pause: boolean;
   menuConfirm: boolean;
   menuBack: boolean;
+  /**
+   * When set (mobile drag-to-move), the player moves toward this point in
+   * game-space each frame instead of using WASD. Null when no finger is down.
+   */
+  touchTarget?: { x: number; y: number } | null;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -1092,9 +1092,13 @@ export class EnemyManager {
           x: originX, y: originY,
           vx: (dx / len) * speed, vy: (dy / len) * speed,
           damage, owner, kind: "torpedo",
-          width: 20, height: 10, isHoming: true, homingTurnRate: 1.6,
+          width: 20, height: 10, isHoming: true, homingTurnRate: 0.8,
           lifetimeMs: 8_000,
           health: 15, // shootable
+          // Detonate near the player or on lifetime expiry — the blast
+          // deals damage to anything inside the larger radius.
+          proxTriggerRadius: 44,
+          proxBlastRadius: 110,
         });
         break;
       }
