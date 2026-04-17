@@ -14,6 +14,12 @@ import type {
   RunStats,
   ScreenType,
 } from "../types/index";
+import {
+  loadAllTimeStats,
+  loadLastRun,
+  saveAllTimeStats,
+  saveLastRun,
+} from "../services/StatsService";
 
 // ── Factories ─────────────────────────────────────────────────────────────
 
@@ -72,21 +78,30 @@ function createDefaultPlayerState(viewportHeight: number): PlayerState {
       lastFireTimeMs: 0,
       projectileDamage: 10,
       projectileSpeed: 10,
+      weaponType: "bullet",
     },
     invulnerabilityTimer: 0,
     isAlive: true,
     width: 50,
     height: 32,
+    speedMultiplier: 1,
+    speedBoostMs: 0,
+    megaLaserMs: 0,
   };
 }
 
 function createDefaultLevelState(levelNumber: number): LevelState {
-  const unlockedTypes: EnemyType[] =
-    levelNumber >= 7
-      ? ["grunt", "spinner", "stalker"]
-      : levelNumber >= 3
-        ? ["grunt", "spinner"]
-        : ["grunt"];
+  // Progressive unlock ladder. Mobile enemies (darter, orbiter) and the
+  // weapon-showcase enemies (lancer, torpedoer, cannoneer, pulsar) roll in
+  // at higher levels. LevelManager weights them with a lower per-spawn
+  // probability so early levels still feel like a warm-up.
+  const unlockedTypes: EnemyType[] = ["grunt"];
+  if (levelNumber >= 2) unlockedTypes.push("spinner");
+  if (levelNumber >= 3) unlockedTypes.push("darter");
+  if (levelNumber >= 4) unlockedTypes.push("stalker", "lancer");
+  if (levelNumber >= 5) unlockedTypes.push("cannoneer", "orbiter");
+  if (levelNumber >= 6) unlockedTypes.push("torpedoer");
+  if (levelNumber >= 7) unlockedTypes.push("pulsar");
 
   // Level duration scales from ~60 s (level 1) to ~600 s (level 10+)
   const targetDurationMs = Math.min(
@@ -119,19 +134,27 @@ function createDefaultLevelState(levelNumber: number): LevelState {
 export class StateManager {
   private state: GameState;
   private readonly viewportHeight: number;
+  /** Snapshot of the most-recently-completed run. Used by the stats screen. */
+  private lastRun: RunStats | null;
 
   constructor(viewportWidth: number, viewportHeight: number) {
     this.viewportHeight = viewportHeight;
+    const persistedAllTime = loadAllTimeStats();
+    this.lastRun = loadLastRun();
     this.state = {
       screen: "main-menu",
       currentRunStats: createDefaultRunStats(),
-      allTimeStats: createDefaultAllTimeStats(),
+      allTimeStats: persistedAllTime ?? createDefaultAllTimeStats(),
       playerState: createDefaultPlayerState(viewportHeight),
       levelState: createDefaultLevelState(1),
       isPaused: false,
       viewportWidth,
       viewportHeight,
     };
+  }
+
+  getLastRun(): Readonly<RunStats> | null {
+    return this.lastRun;
   }
 
   // ── Read-only accessors ────────────────────────────────────────────────
@@ -235,5 +258,10 @@ export class StateManager {
       currentRunStats: runStats,
       allTimeStats: updatedAllTime,
     };
+
+    // Persist to localStorage so the stats screen survives reloads.
+    this.lastRun = runStats;
+    saveLastRun(runStats);
+    saveAllTimeStats(updatedAllTime);
   }
 }

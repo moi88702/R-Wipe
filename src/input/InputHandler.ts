@@ -50,6 +50,7 @@ export class InputHandler {
       moveLeft: this.keysPressed.has("ArrowLeft"),
       moveRight: this.keysPressed.has("ArrowRight"),
       fire: this.keysPressed.has("Space"),
+      bomb: this.keysPressed.has("KeyB"),
       pause:
         this.keysPressed.has("Escape") || this.keysPressed.has("KeyP"),
       menuConfirm:

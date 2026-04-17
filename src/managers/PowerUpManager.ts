@@ -36,11 +36,12 @@ export const POWER_UP_HEIGHT = 24;
 export const POWER_UP_LIFETIME_MS = 5_000;
 
 /**
- * Float velocity applied to spawned power-ups for visual polish.
- * Drifts slightly left and upward from the enemy defeat position.
+ * Drift velocity for spawned power-ups. They fly leftward fast enough that
+ * they reach the player's movement band (x: 100–300) before expiring, so the
+ * player doesn't have to chase them beyond their own movement bounds.
  */
-export const FLOAT_VX = -20; // px/s
-export const FLOAT_VY = -30; // px/s
+export const FLOAT_VX = -160; // px/s
+export const FLOAT_VY = 0;
 
 /**
  * Weighted spawn probability table (cumulative thresholds):
@@ -53,10 +54,14 @@ export const SPAWN_WEIGHTS: ReadonlyArray<{
   type: PowerUpType;
   cumulative: number;
 }> = [
-  { type: "weapon-upgrade", cumulative: 0.4 },
-  { type: "shield", cumulative: 0.7 },
-  { type: "extra-life", cumulative: 0.9 },
-  { type: "health-recovery", cumulative: 1.0 },
+  { type: "weapon-upgrade", cumulative: 0.30 },
+  { type: "shield", cumulative: 0.48 },
+  { type: "extra-life", cumulative: 0.62 },
+  { type: "health-recovery", cumulative: 0.72 },
+  { type: "speed-boost", cumulative: 0.81 },
+  { type: "weapon-spread", cumulative: 0.88 },
+  { type: "weapon-bomb", cumulative: 0.95 },
+  { type: "mega-laser", cumulative: 1.0 }, // rare
 ];
 
 // ── Visual feedback types ──────────────────────────────────────────────────────
@@ -66,7 +71,10 @@ export type VisualFeedbackType =
   | "weapon-glow"   // cyan flash on ship (weapon upgrade)
   | "shield-ring"   // expanding ring animation (shield)
   | "life-pulse"    // lives counter pulse (extra life)
-  | "health-flash"; // green screen flash (health recovery)
+  | "health-flash"  // green screen flash (health recovery)
+  | "speed-trail"   // speed boost collected
+  | "weapon-swap"   // weapon type changed
+  | "mega-laser";   // mega-laser activated
 
 /** A queued visual effect event for the rendering layer to consume. */
 export interface VisualFeedbackEvent {
@@ -147,6 +155,40 @@ function makeHealthRecoveryEffect(): PowerUpEffect {
   };
 }
 
+/** Speed boost: sets a temporary multiplier on player speed. */
+function makeSpeedBoostEffect(): PowerUpEffect {
+  return {
+    type: "speed-boost",
+    apply(state: PlayerState): void {
+      state.speedMultiplier = 1.65;
+      state.speedBoostMs = 8_000;
+    },
+  };
+}
+
+/** Mega-laser: activates a full-width beam for 5-7 seconds. */
+function makeMegaLaserEffect(): PowerUpEffect {
+  return {
+    type: "mega-laser",
+    apply(state: PlayerState): void {
+      const durationMs = 5_000 + Math.floor(Math.random() * 2_001); // 5000–7000
+      state.megaLaserMs = Math.max(state.megaLaserMs, durationMs);
+    },
+  };
+}
+
+/** Weapon-switch: change the equipped weapon type. */
+function makeWeaponSwitchEffect(to: "spread" | "bomb"): PowerUpEffect {
+  return {
+    type: to === "spread" ? "weapon-spread" : "weapon-bomb",
+    apply(state: PlayerState): void {
+      state.weapon.weaponType = to;
+      // Reset fire timer so the new weapon can shoot immediately.
+      state.weapon.lastFireTimeMs = 0;
+    },
+  };
+}
+
 /** Returns a fresh PowerUpEffect for the given type. */
 export function createEffect(type: PowerUpType): PowerUpEffect {
   switch (type) {
@@ -158,6 +200,14 @@ export function createEffect(type: PowerUpType): PowerUpEffect {
       return makeExtraLifeEffect();
     case "health-recovery":
       return makeHealthRecoveryEffect();
+    case "speed-boost":
+      return makeSpeedBoostEffect();
+    case "weapon-spread":
+      return makeWeaponSwitchEffect("spread");
+    case "weapon-bomb":
+      return makeWeaponSwitchEffect("bomb");
+    case "mega-laser":
+      return makeMegaLaserEffect();
   }
 }
 
@@ -172,6 +222,13 @@ export function feedbackTypeFor(type: PowerUpType): VisualFeedbackType {
       return "life-pulse";
     case "health-recovery":
       return "health-flash";
+    case "speed-boost":
+      return "speed-trail";
+    case "weapon-spread":
+    case "weapon-bomb":
+      return "weapon-swap";
+    case "mega-laser":
+      return "mega-laser";
   }
 }
 
@@ -358,6 +415,43 @@ export class PowerUpManager {
       results.push({ powerUpId: pu.id, type: pu.type, effect, feedback });
     }
 
+    return results;
+  }
+
+  /**
+   * Force-collect a list of power-ups by id. Same side-effects as
+   * checkAndApply() (applies effect, mutates runStats in-place, queues a
+   * VisualFeedbackEvent), but driven by the caller rather than player-touch
+   * collision. Intended for "shoot-to-collect" gameplay.
+   *
+   * Does NOT toggle _statsDirty — the caller is expected to sync runStats
+   * once per frame regardless.
+   */
+  collectByIds(
+    ids: ReadonlyArray<string>,
+    playerManager: PlayerManager,
+    runStats: RunStats,
+  ): CollectionResult[] {
+    const results: CollectionResult[] = [];
+    for (const id of ids) {
+      const pu = this.powerUps.find((p) => p.id === id && !p.isCollected);
+      if (!pu) continue;
+      pu.isCollected = true;
+
+      const effect = createEffect(pu.type);
+      playerManager.applyPowerUp(effect);
+      const updatedState = playerManager.getState();
+      this.applyStatsUpdate(pu.type, updatedState, runStats);
+
+      const feedback: VisualFeedbackEvent = {
+        type: feedbackTypeFor(pu.type),
+        x: pu.position.x,
+        y: pu.position.y,
+      };
+      this.pendingFeedback.push(feedback);
+
+      results.push({ powerUpId: pu.id, type: pu.type, effect, feedback });
+    }
     return results;
   }
 

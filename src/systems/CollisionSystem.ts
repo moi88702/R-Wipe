@@ -28,7 +28,8 @@ import type { Enemy, PlayerState, PowerUp, Projectile } from "../types/index";
 export type CollisionEventType =
   | "player-hit-by-projectile"
   | "player-collected-power-up"
-  | "enemy-hit-by-projectile";
+  | "enemy-hit-by-projectile"
+  | "enemy-projectile-shot-down";
 
 export interface CollisionEvent {
   /** What kind of collision occurred. */
@@ -39,6 +40,8 @@ export interface CollisionEvent {
   enemyId?: string;
   /** Power-up involved (collected event). */
   powerUpId?: string;
+  /** For "enemy-projectile-shot-down": the enemy projectile that was hit. */
+  enemyProjectileId?: string;
   /**
    * Damage value to apply.  0 for power-up collection events (the caller
    * consults the PowerUpEffect for the actual effect to apply).
@@ -135,6 +138,23 @@ export class CollisionSystem {
             type: "enemy-hit-by-projectile",
             projectileId: proj.id,
             enemyId: enemy.id,
+            damage: proj.damage,
+          });
+        }
+      }
+    }
+
+    // ── 4. Player projectiles → enemy projectiles with HP (shoot-down) ─────
+    for (const proj of playerProjectiles) {
+      if (!proj.isAlive) continue;
+      for (const ep of enemyProjectiles) {
+        if (!ep.isAlive) continue;
+        if (ep.health === undefined) continue; // only shoot-downable ones
+        if (this.checkOverlap(proj, ep)) {
+          events.push({
+            type: "enemy-projectile-shot-down",
+            projectileId: proj.id,
+            enemyProjectileId: ep.id,
             damage: proj.damage,
           });
         }

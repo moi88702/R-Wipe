@@ -1,4 +1,5 @@
-import { Application, Text, TextStyle, VERSION } from "pixi.js";
+import { Application, VERSION } from "pixi.js";
+import { GameManager } from "./game/GameManager";
 
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 720;
@@ -18,35 +19,28 @@ async function init(): Promise<void> {
     container.appendChild(app.canvas);
   }
 
-  // Render "Hello R-Wipe" message
-  const style = new TextStyle({
-    fontFamily: "monospace",
-    fontSize: 48,
-    fill: 0x00ffff,
-    fontWeight: "bold",
-    dropShadow: {
-      color: 0x0000ff,
-      blur: 8,
-      distance: 4,
-    },
+  const game = new GameManager(app, {
+    width: CANVAS_WIDTH,
+    height: CANVAS_HEIGHT,
   });
 
-  const helloText = new Text({ text: "Hello R-Wipe", style });
-  helloText.anchor.set(0.5, 0.5);
-  helloText.x = CANVAS_WIDTH / 2;
-  helloText.y = CANVAS_HEIGHT / 2;
-  app.stage.addChild(helloText);
+  // Drive the game from Pixi's ticker — deltaMS is the real frame duration in ms.
+  app.ticker.add((ticker) => {
+    game.tick(ticker.deltaMS);
+  });
+
+  // Dev-only URL-param cheats. The `import.meta.env.DEV` literal is replaced
+  // with `false` by Vite in production, so the dynamic import and the whole
+  // `src/dev/cheats.ts` module are tree-shaken out of the prod bundle.
+  if (import.meta.env.DEV) {
+    const mod = await import("./dev/cheats");
+    mod.applyCheats(game, mod.parseCheats(window.location.search));
+  }
 
   console.log("R-Wipe: Pixi.js Application initialized", {
     width: CANVAS_WIDTH,
     height: CANVAS_HEIGHT,
     pixiVersion: VERSION ?? "unknown",
-  });
-
-  // Game loop – Pixi ticker uses requestAnimationFrame internally
-  app.ticker.add((ticker) => {
-    // Pulse the text to demonstrate 60 FPS rendering
-    helloText.alpha = 0.7 + 0.3 * Math.sin(ticker.lastTime * 0.002);
   });
 }
 

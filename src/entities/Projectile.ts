@@ -8,7 +8,7 @@
  * the frame's pixel delta via `deltaTimeMs / 1000`.
  */
 
-import type { Projectile } from "../types/index";
+import type { Projectile, WeaponKind } from "../types/index";
 
 // ── Projectile constants ───────────────────────────────────────────────────
 
@@ -16,8 +16,13 @@ import type { Projectile } from "../types/index";
 export const PROJECTILE_WIDTH = 10;
 export const PROJECTILE_HEIGHT = 4;
 
-/** Projectiles are automatically removed after this duration. */
-export const PROJECTILE_LIFETIME_MS = 3_000;
+/**
+ * Projectiles are automatically removed after this duration.
+ * Must be long enough for the slowest enemy/boss bullet to cross the full
+ * viewport width (≈1280px) — otherwise boss bullets expire mid-flight and
+ * never reach the player.
+ */
+export const PROJECTILE_LIFETIME_MS = 6_000;
 
 // ── ID generation ─────────────────────────────────────────────────────────
 
@@ -64,8 +69,56 @@ export class ProjectilePool {
       width: PROJECTILE_WIDTH,
       height: PROJECTILE_HEIGHT,
       isAlive: false,
+      kind: "bullet",
+      isHoming: false,
+      ageMs: 0,
     };
     this.pool.push(p);
+    return p;
+  }
+
+  /** Rich spawn: lets callers set weapon kind, homing, size, lifetime, HP, etc. */
+  spawnEx(opts: {
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    damage: number;
+    owner?: "player" | "enemy";
+    kind?: WeaponKind;
+    width?: number;
+    height?: number;
+    lifetimeMs?: number;
+    isHoming?: boolean;
+    homingTurnRate?: number;
+    /** HP — projectile can be shot down while > 0. Default: undefined (one-shot). */
+    health?: number;
+    proxTriggerRadius?: number;
+    proxBlastRadius?: number;
+  }): Projectile {
+    const p = this.acquire();
+    p.id = nextProjectileId();
+    p.owner = opts.owner ?? "enemy";
+    p.position.x = opts.x;
+    p.position.y = opts.y;
+    p.velocity.x = opts.vx;
+    p.velocity.y = opts.vy;
+    p.damage = opts.damage;
+    p.lifetime = opts.lifetimeMs ?? PROJECTILE_LIFETIME_MS;
+    p.width = opts.width ?? PROJECTILE_WIDTH;
+    p.height = opts.height ?? PROJECTILE_HEIGHT;
+    p.kind = opts.kind ?? "bullet";
+    p.isHoming = opts.isHoming ?? false;
+    p.homingTurnRate = opts.homingTurnRate ?? 2.2;
+    p.ageMs = 0;
+    if (opts.health !== undefined) p.health = opts.health;
+    else delete p.health;
+    if (opts.proxTriggerRadius !== undefined) p.proxTriggerRadius = opts.proxTriggerRadius;
+    else delete p.proxTriggerRadius;
+    if (opts.proxBlastRadius !== undefined) p.proxBlastRadius = opts.proxBlastRadius;
+    else delete p.proxBlastRadius;
+    p.isAlive = true;
+    if (!this.active.includes(p)) this.active.push(p);
     return p;
   }
 
@@ -119,22 +172,41 @@ export class ProjectilePool {
     deltaTimeMs: number,
     viewportWidth: number,
     viewportHeight: number,
+    target?: { x: number; y: number },
   ): void {
     const dt = deltaTimeMs / 1_000; // convert ms → seconds
 
     for (const p of this.active) {
       if (!p.isAlive) continue;
 
+      // Homing: bend velocity toward the target each frame.
+      if (p.isHoming && target) {
+        const vx = p.velocity.x;
+        const vy = p.velocity.y;
+        const speed = Math.hypot(vx, vy) || 1;
+        const currentAngle = Math.atan2(vy, vx);
+        const desired = Math.atan2(target.y - p.position.y, target.x - p.position.x);
+        let delta = desired - currentAngle;
+        while (delta > Math.PI) delta -= Math.PI * 2;
+        while (delta < -Math.PI) delta += Math.PI * 2;
+        const maxTurn = (p.homingTurnRate ?? 2.2) * dt;
+        const clamped = Math.max(-maxTurn, Math.min(maxTurn, delta));
+        const newAngle = currentAngle + clamped;
+        p.velocity.x = Math.cos(newAngle) * speed;
+        p.velocity.y = Math.sin(newAngle) * speed;
+      }
+
       p.position.x += p.velocity.x * dt;
       p.position.y += p.velocity.y * dt;
       p.lifetime -= deltaTimeMs;
+      p.ageMs = (p.ageMs ?? 0) + deltaTimeMs;
 
       if (
         p.lifetime <= 0 ||
-        p.position.x > viewportWidth ||
-        p.position.x < -p.width ||
-        p.position.y > viewportHeight ||
-        p.position.y < -p.height
+        p.position.x > viewportWidth + 60 ||
+        p.position.x < -p.width - 60 ||
+        p.position.y > viewportHeight + 60 ||
+        p.position.y < -p.height - 60
       ) {
         p.isAlive = false;
       }

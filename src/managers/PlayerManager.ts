@@ -16,6 +16,7 @@ import type {
   DamageResult,
   InputState,
   PlayerState,
+  PlayerWeaponType,
   PowerUpEffect,
   Projectile,
 } from "../types/index";
@@ -50,6 +51,9 @@ export const PROJECTILE_SPEED_PX_S = 600;
 
 /** How long (ms) the player is invulnerable after taking damage. */
 const INVULNERABILITY_MS = 1_000;
+
+/** Cooldown (ms) between manual B-key bomb drops. */
+const BOMB_COOLDOWN_MS = 2_500;
 
 // ── Weapon upgrade helpers ─────────────────────────────────────────────────
 
@@ -92,11 +96,15 @@ function makeDefaultState(): PlayerState {
       lastFireTimeMs: 0,
       projectileDamage: BASE_PROJECTILE_DAMAGE,
       projectileSpeed: PROJECTILE_SPEED_PX_S / 60, // stored as px/frame (legacy compat)
+      weaponType: "bullet",
     },
     invulnerabilityTimer: 0,
     isAlive: true,
     width: 50,
     height: 32,
+    speedMultiplier: 1,
+    speedBoostMs: 0,
+    megaLaserMs: 0,
   };
 }
 
@@ -112,6 +120,12 @@ export class PlayerManager {
    * Initialised to FIRE_RATE_LEVEL_1_MS so the player can fire immediately.
    */
   private clockMs: number = FIRE_RATE_LEVEL_1_MS;
+  /** ms remaining on the B-key bomb cooldown (0 = ready). */
+  private bombCooldownMs = 0;
+  /** Previous frame's bomb-key state, for edge-trigger detection. */
+  private prevBombPressed = false;
+  /** Dev-only: when true, takeDamage is a no-op. */
+  private godMode = false;
 
   /** Viewport dimensions used for out-of-bounds projectile culling. */
   private viewportWidth: number = 1_280;
@@ -137,6 +151,8 @@ export class PlayerManager {
     };
     this.projectilePool.clear();
     this.clockMs = FIRE_RATE_LEVEL_1_MS; // allow firing immediately
+    this.bombCooldownMs = 0;
+    this.prevBombPressed = false;
   }
 
   /**
@@ -149,6 +165,11 @@ export class PlayerManager {
       position: { x: 200, y: 360 },
       velocity: { x: 0, y: 0 },
       invulnerabilityTimer: 0,
+      // Stale lastFireTimeMs from the previous level's clock would make
+      // `clockMs - lastFireTimeMs` huge and negative once clockMs is reset,
+      // which passes the cooldown check only if fireRate is absurdly large.
+      // Zero it so the fresh clockMs allows firing immediately.
+      weapon: { ...this.state.weapon, lastFireTimeMs: 0 },
     };
     this.projectilePool.clear();
     this.clockMs = FIRE_RATE_LEVEL_1_MS;
@@ -166,10 +187,32 @@ export class PlayerManager {
     if (!this.state.isAlive) return;
 
     this.clockMs += deltaTimeMs;
+    this.bombCooldownMs = Math.max(0, this.bombCooldownMs - deltaTimeMs);
+    this.tickSpeedBoost(deltaTimeMs);
+    this.tickMegaLaser(deltaTimeMs);
     this.applyMovement(deltaTimeMs, input);
     this.tickInvulnerability(deltaTimeMs);
     this.tryFire(input);
+    this.tryDropBomb(input);
     this.projectilePool.update(deltaTimeMs, this.viewportWidth, this.viewportHeight);
+  }
+
+  private tickSpeedBoost(deltaTimeMs: number): void {
+    if (this.state.speedBoostMs <= 0) return;
+    const remaining = Math.max(0, this.state.speedBoostMs - deltaTimeMs);
+    this.state = {
+      ...this.state,
+      speedBoostMs: remaining,
+      speedMultiplier: remaining > 0 ? this.state.speedMultiplier : 1,
+    };
+  }
+
+  private tickMegaLaser(deltaTimeMs: number): void {
+    if (this.state.megaLaserMs <= 0) return;
+    this.state = {
+      ...this.state,
+      megaLaserMs: Math.max(0, this.state.megaLaserMs - deltaTimeMs),
+    };
   }
 
   // ── Damage & power-ups ───────────────────────────────────────────────────
@@ -187,6 +230,10 @@ export class PlayerManager {
   takeDamage(amount: number): DamageResult {
     if (!this.state.isAlive) {
       return { blocked: false, health: 0, died: false };
+    }
+
+    if (this.godMode) {
+      return { blocked: true, health: this.state.health, died: false };
     }
 
     // Ignore damage during invulnerability window
@@ -209,12 +256,15 @@ export class PlayerManager {
 
     if (died) {
       const newLives = this.state.lives - 1;
+      // Always mark dead on a lethal hit. The caller (GameManager) is
+      // responsible for running the death animation and calling respawn()
+      // when a life remains, or transitioning to game-over when not.
       this.state = {
         ...this.state,
-        health: newHealth,
+        health: 0,
         lives: newLives,
-        isAlive: newLives > 0,
-        invulnerabilityTimer: newLives > 0 ? INVULNERABILITY_MS : 0,
+        isAlive: false,
+        invulnerabilityTimer: 0,
       };
     } else {
       this.state = {
@@ -276,6 +326,59 @@ export class PlayerManager {
     return this.projectilePool.getActive();
   }
 
+  /**
+   * Bring the player back after a life has been lost.
+   * Restores full HP, weapon back to level 1, shield cleared, ship back at
+   * the starting position, and grants `invulnerabilityMs` of flicker-invuln
+   * (default 3 s) that the caller can cancel early via cancelInvulnerability().
+   */
+  respawn(
+    startX = 200,
+    startY: number = this.viewportHeight / 2,
+    invulnerabilityMs = 3_000,
+  ): void {
+    this.state = {
+      ...this.state,
+      position: { x: startX, y: startY },
+      velocity: { x: 0, y: 0 },
+      health: 100,
+      isAlive: true,
+      shield: { active: false, displayValue: 0, absorptionCapacity: 1 },
+      weapon: {
+        upgradeLevel: 1,
+        fireRateMs: FIRE_RATE_LEVEL_1_MS,
+        lastFireTimeMs: 0,
+        projectileDamage: BASE_PROJECTILE_DAMAGE,
+        projectileSpeed: PROJECTILE_SPEED_PX_S / 60,
+        weaponType: "bullet",
+      },
+      invulnerabilityTimer: invulnerabilityMs,
+      speedMultiplier: 1,
+      speedBoostMs: 0,
+    megaLaserMs: 0,
+    };
+    this.projectilePool.clear();
+    this.clockMs = FIRE_RATE_LEVEL_1_MS;
+    this.bombCooldownMs = 0;
+    this.prevBombPressed = false;
+  }
+
+  /** End the current invulnerability window immediately. */
+  cancelInvulnerability(): void {
+    if (this.state.invulnerabilityTimer <= 0) return;
+    this.state = { ...this.state, invulnerabilityTimer: 0 };
+  }
+
+  /** Marks a projectile in the player pool as dead (e.g. after a hit). */
+  killProjectile(id: string): void {
+    for (const p of this.projectilePool.getActive()) {
+      if (p.id === id) {
+        p.isAlive = false;
+        return;
+      }
+    }
+  }
+
   /** Teleports the ship to an exact position (bypasses bounds clamping). */
   setPosition(x: number, y: number): void {
     this.state = {
@@ -293,13 +396,14 @@ export class PlayerManager {
    */
   private applyMovement(deltaTimeMs: number, input: InputState): void {
     const dt = deltaTimeMs / 1_000; // ms → seconds
+    const speed = PLAYER_SPEED_PX_S * this.state.speedMultiplier;
     let vx = 0;
     let vy = 0;
 
-    if (input.moveLeft) vx -= PLAYER_SPEED_PX_S;
-    if (input.moveRight) vx += PLAYER_SPEED_PX_S;
-    if (input.moveUp) vy -= PLAYER_SPEED_PX_S;
-    if (input.moveDown) vy += PLAYER_SPEED_PX_S;
+    if (input.moveLeft) vx -= speed;
+    if (input.moveRight) vx += speed;
+    if (input.moveUp) vy -= speed;
+    if (input.moveDown) vy += speed;
 
     // Normalise diagonal so diagonal speed equals axis speed
     if (vx !== 0 && vy !== 0) {
@@ -345,18 +449,137 @@ export class PlayerManager {
     const noseX = this.state.position.x + this.state.width / 2;
     const noseY = this.state.position.y;
 
-    this.projectilePool.spawn(
-      noseX,
-      noseY,
-      PROJECTILE_SPEED_PX_S,
-      0, // rightward only
-      weapon.projectileDamage,
-      "player",
-    );
+    switch (weapon.weaponType) {
+      case "spread": {
+        // 3-way spread. Upgrade-level 3+ adds two tight outer barrels.
+        const speed = PROJECTILE_SPEED_PX_S;
+        const angles = weapon.upgradeLevel >= 3
+          ? [-0.22, -0.1, 0, 0.1, 0.22]
+          : [-0.15, 0, 0.15];
+        for (const a of angles) {
+          this.projectilePool.spawn(
+            noseX, noseY,
+            Math.cos(a) * speed, Math.sin(a) * speed,
+            weapon.projectileDamage, "player",
+          );
+        }
+        break;
+      }
+      case "bomb": {
+        // Proximity bomb — slower, larger, AoE on proximity.
+        this.projectilePool.spawnEx({
+          x: noseX,
+          y: noseY,
+          vx: 420,
+          vy: 0,
+          damage: weapon.projectileDamage * 2.2,
+          owner: "player",
+          kind: "prox-bomb",
+          width: 16,
+          height: 16,
+          lifetimeMs: 3_000,
+          health: 2,
+          proxTriggerRadius: 90,
+          proxBlastRadius: 110,
+        });
+        break;
+      }
+      case "bullet":
+      default:
+        this.projectilePool.spawn(
+          noseX, noseY,
+          PROJECTILE_SPEED_PX_S, 0,
+          weapon.projectileDamage, "player",
+        );
+        break;
+    }
 
     this.state = {
       ...this.state,
       weapon: { ...weapon, lastFireTimeMs: this.clockMs },
     };
+  }
+
+  /**
+   * Drops a proximity bomb on B-key press (edge-triggered). Independent of
+   * the equipped weapon so the player always has an emergency AoE option.
+   */
+  private tryDropBomb(input: InputState): void {
+    const pressed = input.bomb;
+    const edge = pressed && !this.prevBombPressed;
+    this.prevBombPressed = pressed;
+    if (!edge) return;
+    if (this.bombCooldownMs > 0) return;
+
+    const noseX = this.state.position.x + this.state.width / 2;
+    const noseY = this.state.position.y;
+    const dmg = Math.max(18, this.state.weapon.projectileDamage * 2.2);
+    this.projectilePool.spawnEx({
+      x: noseX,
+      y: noseY,
+      vx: 360,
+      vy: 0,
+      damage: dmg,
+      owner: "player",
+      kind: "prox-bomb",
+      width: 18,
+      height: 18,
+      lifetimeMs: 3_000,
+      health: 2,
+      proxTriggerRadius: 100,
+      proxBlastRadius: 130,
+    });
+    this.bombCooldownMs = BOMB_COOLDOWN_MS;
+  }
+
+  /** 0..1 readiness of the B-key bomb cooldown (1 = ready, 0 = just fired). */
+  getBombCooldownProgress(): number {
+    if (BOMB_COOLDOWN_MS <= 0) return 1;
+    return 1 - this.bombCooldownMs / BOMB_COOLDOWN_MS;
+  }
+
+  // ── Dev-only setters (wired by src/dev/cheats.ts; inert in prod) ─────────
+
+  setGodMode(on: boolean): void {
+    this.godMode = on;
+  }
+
+  setHealth(hp: number): void {
+    this.state = { ...this.state, health: Math.max(0, Math.min(100, hp)) };
+  }
+
+  setLives(lives: number): void {
+    this.state = { ...this.state, lives: Math.max(0, Math.floor(lives)) };
+  }
+
+  setWeaponType(type: PlayerWeaponType): void {
+    this.state = {
+      ...this.state,
+      weapon: { ...this.state.weapon, weaponType: type },
+    };
+  }
+
+  setShieldActive(active: boolean): void {
+    this.state = {
+      ...this.state,
+      shield: active
+        ? { active: true, displayValue: 1, absorptionCapacity: 1 }
+        : { active: false, displayValue: 0, absorptionCapacity: 1 },
+    };
+  }
+
+  setSpeedMultiplier(mult: number): void {
+    const clamped = Math.max(0.1, Math.min(10, mult));
+    this.state = {
+      ...this.state,
+      speedMultiplier: clamped,
+      // A permanent multiplier (dev cheat) shouldn't decay; a huge timer is
+      // effectively "forever" for a play session without changing the tick logic.
+      speedBoostMs: clamped !== 1 ? Number.MAX_SAFE_INTEGER : 0,
+    };
+  }
+
+  setMegaLaserMs(ms: number): void {
+    this.state = { ...this.state, megaLaserMs: Math.max(0, ms) };
   }
 }

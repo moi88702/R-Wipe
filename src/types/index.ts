@@ -13,6 +13,8 @@ export interface InputState {
   moveLeft: boolean;
   moveRight: boolean;
   fire: boolean;
+  /** Drops a proximity bomb regardless of currently equipped weapon. */
+  bomb: boolean;
   pause: boolean;
   menuConfirm: boolean;
   menuBack: boolean;
@@ -28,12 +30,17 @@ export interface ShieldState {
   absorptionCapacity: number; // 1 hit typically
 }
 
+/** Categorical player weapon — determines projectile behaviour and HUD/gun art. */
+export type PlayerWeaponType = "bullet" | "spread" | "bomb";
+
 export interface WeaponState {
   upgradeLevel: number; // 1–5
   fireRateMs: number; // ms between shots
   lastFireTimeMs: number;
   projectileDamage: number;
   projectileSpeed: number; // px/frame
+  /** Which player weapon is currently equipped. */
+  weaponType: PlayerWeaponType;
 }
 
 export interface PlayerState {
@@ -47,19 +54,63 @@ export interface PlayerState {
   isAlive: boolean;
   width: number; // 50px
   height: number; // 32px
+  /**
+   * Speed multiplier from the speed-boost pickup. 1 = default, 1.6 = boosted.
+   * Decays back to 1 over `speedBoostMs`.
+   */
+  speedMultiplier: number;
+  speedBoostMs: number;
+  /**
+   * Remaining ms on the mega-laser beam (0 = inactive). When > 0 the ship
+   * emits a full-screen-width beam and damages any overlapping enemies.
+   */
+  megaLaserMs: number;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Enemies
 // ──────────────────────────────────────────────────────────────────────────────
 
-export type EnemyType = "grunt" | "spinner" | "stalker";
+export type EnemyType =
+  | "grunt"
+  | "spinner"
+  | "stalker"
+  | "darter"       // fast evasive enemy
+  | "orbiter"      // circles around a point
+  | "lancer"       // fires lasers
+  | "torpedoer"    // fires homing torpedoes
+  | "cannoneer"    // fires slow cannon shots
+  | "pulsar";      // fires pulse bursts
+
+/** Categorical weapon type used by projectile rendering + tuning. */
+export type WeaponKind =
+  | "bullet"
+  | "laser"
+  | "torpedo"
+  | "cannon"
+  | "pulse-bolt"
+  | "charge-beam"
+  | "prox-bomb";
 
 export interface AttackPattern {
-  type: "straight" | "radial" | "homing" | "spread";
+  type:
+    | "straight"
+    | "radial"
+    | "homing"
+    | "spread"
+    | "laser"
+    | "torpedo"
+    | "cannon"
+    | "pulse"
+    | "multi-direction"
+    | "aimed-burst";
   bulletsPerShot: number;
   spreadAngleDegrees: number;
   projectileSpeed: number;
+  /** Optional: overrides damage per projectile (otherwise implementation default). */
+  damage?: number;
+  /** Optional visual / gameplay kind carried on the projectile. */
+  weaponKind?: WeaponKind;
 }
 
 export interface PatrolPattern {
@@ -89,6 +140,15 @@ export interface Enemy {
   attackPattern: AttackPattern;
   bounty: number; // points awarded on defeat
   isAlive: boolean;
+  /** Step counter used by multi-stage firing programs (grunt / spinner / etc.). */
+  fireStep?: number;
+  /** Used by "hop-back" enemies (spinner): negative velocity tweak per shot. */
+  hopBackTimer?: number;
+  /** Used by mobile enemies (darter / orbiter) to track behaviour state. */
+  aiTimer?: number;
+  aiPhase?: number;
+  /** Optional anchor point (orbit centre, dart base, etc.). */
+  anchor?: { x: number; y: number };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -105,13 +165,41 @@ export interface Projectile {
   width: number;
   height: number;
   isAlive: boolean;
+  /** Visual / gameplay weapon category. Defaults to "bullet". */
+  kind?: WeaponKind;
+  /** When true, the projectile gradually turns toward the player while in flight. */
+  isHoming?: boolean;
+  /** Max turn rate (radians per second) for homing projectiles. */
+  homingTurnRate?: number;
+  /** Accumulated age (ms) for effects that depend on time since spawn (pulse etc.). */
+  ageMs?: number;
+  /**
+   * Hit points — projectile can be shot down while > 0. Undefined = one-shot
+   * (normal bullets). Set by spawnEx for torpedoes / prox-bombs.
+   */
+  health?: number;
+  /**
+   * Proximity-bomb trigger radius (pixels). When the bomb closes within this
+   * distance of any enemy, it detonates and kills itself, dealing AoE damage.
+   */
+  proxTriggerRadius?: number;
+  /** AoE damage radius when a prox-bomb detonates. */
+  proxBlastRadius?: number;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Power-Ups
 // ──────────────────────────────────────────────────────────────────────────────
 
-export type PowerUpType = "weapon-upgrade" | "shield" | "extra-life" | "health-recovery";
+export type PowerUpType =
+  | "weapon-upgrade"
+  | "shield"
+  | "extra-life"
+  | "health-recovery"
+  | "speed-boost"
+  | "weapon-spread"
+  | "weapon-bomb"
+  | "mega-laser";
 
 export interface PowerUp {
   id: string;
@@ -151,12 +239,151 @@ export interface BossPhase {
   visualIntensity: "low" | "medium" | "high";
 }
 
+/**
+ * A single destructible / targetable sub-section of a boss. Bosses are
+ * composed of 1..N parts; each part has its own HP, hitbox, optional weapon,
+ * and "kind":
+ *  - "core":   the weak point. Killing it defeats the boss.
+ *  - "turret": a gun emplacement. Shoots. Destroyable, but boss keeps fighting.
+ *  - "armor":  durable plating. Must be destroyed to expose the core (some bosses).
+ */
+export interface BossPart {
+  id: string;
+  kind: "core" | "turret" | "armor";
+  /** Offset from the boss centre (before rotation). */
+  offset: { x: number; y: number };
+  /** Current hitbox centre in world space. Recomputed each frame. */
+  position: { x: number; y: number };
+  width: number;
+  height: number;
+  health: number;
+  maxHealth: number;
+  isAlive: boolean;
+  /** Optional weapon this part fires. Undefined → non-firing part. */
+  attackPattern?: AttackPattern;
+  fireRateMs?: number;
+  lastFireTimeMs?: number;
+  /** Primary fill colour used by the layered renderer. */
+  color: number;
+  /** Accent / stroke colour. */
+  accent: number;
+  /** If true, this part must be destroyed before the core takes damage. */
+  shieldsCore?: boolean;
+  /**
+   * Snapshot of the original shieldsCore flag. Phases may toggle shieldsCore
+   * off to expose the core as a weak point; this value is used to restore it
+   * when the phase ends.
+   */
+  originalShieldsCore?: boolean;
+}
+
+/**
+ * Boss movement pattern. Every phase picks one; the boss updateBoss routine
+ * translates `kind` into concrete velocity / position-driving behaviour.
+ *
+ *  - "hover"     : classic bob-in-place on the right third (default fallback)
+ *  - "square"    : traverses the four corners of a rectangle
+ *  - "vertical"  : tight up/down sweep (no horizontal motion)
+ *  - "wave"      : fast sine wave across a wider band
+ *  - "dart-in"   : briefly rushes toward the player then retreats
+ *  - "charge"    : freezes in place to telegraph a charge-beam (weak spot exposed)
+ *  - "mixed"     : concatenates sub-patterns at random each phase
+ */
+export type BossMovementKind =
+  | "hover"
+  | "square"
+  | "vertical"
+  | "wave"
+  | "dart-in"
+  | "charge"
+  | "mixed";
+
+export interface BossMovementPhase {
+  kind: BossMovementKind;
+  /** How long (ms) this phase runs. Clamped to ≤ 10 000 by the registry. */
+  durationMs: number;
+  /**
+   * Firing cadence during this phase. Uses the definition's current
+   * AttackPattern unless overridden.
+   */
+  fireRateMs?: number;
+  attackPattern?: AttackPattern;
+  /**
+   * Part id whose `shieldsCore` flag should be dropped while this phase is
+   * active — lets movement phases expose the core as a weak point.
+   */
+  exposesPartId?: string;
+  /**
+   * Charge-up window (ms) at the start of the phase. While charging: no
+   * firing, a visible charge aura grows, and `exposesPartId` (if set) is
+   * unshielded. Triggering the shot is handled in updateBoss.
+   */
+  chargeMs?: number;
+  /** When true the phase entry plays a brief invulnerability + shockwave FX. */
+  announce?: boolean;
+  /**
+   * If present, the boss spawns enemies from the given mix during this phase.
+   * Carrier-style behaviour.
+   */
+  spawnWave?: BossSpawnWave;
+}
+
+/** How a carrier-style boss releases enemy waves during a movement phase. */
+export interface BossSpawnWave {
+  /** Enemy types to draw from (weighted uniformly). */
+  mix: EnemyType[];
+  /** Enemies released per wave tick. */
+  count: number;
+  /**
+   * If set, spawns a wave of `count` every `intervalMs`. If omitted, releases
+   * a single wave at phase entry.
+   */
+  intervalMs?: number;
+}
+
 export interface BossState extends Enemy {
   phases: BossPhase[];
   currentPhase: number; // 0-indexed
   phaseHealthThresholds: number[]; // e.g. [100, 50, 0] for 2-phase boss
   transitionTimer: number; // ms, animation time
   isTransitioning: boolean;
+  /** Display name used by HUD + banners. Sourced from the boss definition. */
+  displayName?: string;
+  /** Primary fill colour (hex). Read by the renderer; falls back to defaults. */
+  colorPrimary?: number;
+  /** Accent / stroke colour (hex). */
+  colorAccent?: number;
+  /** Multi-part composition. Populated by the registry; [] for simple bosses. */
+  parts?: BossPart[];
+  /** Defeat rule: "core" = dies when core dies, "all" = dies when every part dies. */
+  defeatRule?: "core" | "all";
+  /**
+   * String-id of the art template the renderer should draw for this boss
+   * (look-up table lives in BossArt.ts).
+   */
+  artId?: string;
+  /** Boss rotation, used when rendering layered shapes. */
+  rotation?: number;
+  /** Movement phase plan. Cycled through during the fight. */
+  movementPhases?: BossMovementPhase[];
+  /** Index of the currently active movement phase. */
+  movementPhaseIdx?: number;
+  /** Elapsed ms in the current movement phase. */
+  movementPhaseMs?: number;
+  /** If true, movement phases pick randomly instead of sequentially. */
+  randomMovement?: boolean;
+  /** Whether this boss is mid-charge (see BossMovementPhase.chargeMs). */
+  isCharging?: boolean;
+  /** Elapsed charge-up time (ms). 0..chargeMs. */
+  chargeProgressMs?: number;
+  /** Anchor point the current phase aims its motion around. */
+  movementAnchor?: { x: number; y: number };
+  /** Transient sub-step index used by multi-corner patterns (square). */
+  movementStep?: number;
+  /** "Big" bosses drift slower. Set from BossDefinition; 1 = default, <1 = slower. */
+  speedMultiplier?: number;
+  /** Target position for the current phase tick. */
+  targetPos?: { x: number; y: number };
 }
 
 export interface LevelState {
@@ -219,6 +446,35 @@ export type ScreenType =
   | "game-over"
   | "stats"
   | "pause";
+
+/**
+ * Dev-only cheat payload parsed from URL query params. Every field is optional
+ * and unrecognised params are ignored. The parse + apply code lives in
+ * `src/dev/cheats.ts` and is tree-shaken out of production bundles by the
+ * `import.meta.env.DEV` guard in `main.ts`.
+ */
+export interface DevCheats {
+  /** Permanent damage immunity. */
+  god?: boolean;
+  /** Override starting lives. */
+  lives?: number;
+  /** Override starting HP. */
+  health?: number;
+  /** Force-equip a weapon type. */
+  weapon?: PlayerWeaponType;
+  /** Force-set the weapon upgrade level (1–5). */
+  weaponLevel?: number;
+  /** Start with the shield up. */
+  shield?: boolean;
+  /** Speed multiplier (e.g. 2 = twice as fast). */
+  speed?: number;
+  /** Mega-laser active window on spawn (ms). */
+  megaLaserMs?: number;
+  /** Start level number (1+). */
+  startLevel?: number;
+  /** When true, skip the main menu and drop straight into gameplay. */
+  autostart?: boolean;
+}
 
 export interface GameState {
   screen: ScreenType;
