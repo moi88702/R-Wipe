@@ -19,6 +19,7 @@ import type {
 } from "../types/index";
 import { ProjectilePool } from "../entities/Projectile";
 import {
+  getBossDefinitionById,
   getBossDefinitionForLevel,
   makeBossFromDefinition,
 } from "./BossRegistry";
@@ -167,8 +168,10 @@ function makeEnemy(
   return enemy;
 }
 
-function makeBoss(levelNumber: number): BossState {
-  const def = getBossDefinitionForLevel(levelNumber);
+function makeBoss(levelNumber: number, overrideId: string | null): BossState {
+  const def =
+    (overrideId && getBossDefinitionById(overrideId)) ||
+    getBossDefinitionForLevel(levelNumber);
   return makeBossFromDefinition(def, levelNumber, nextEnemyId);
 }
 
@@ -196,6 +199,8 @@ export class EnemyManager {
   private currentLevel: LevelState | null = null;
   /** Interval timer for the active boss phase's spawnWave (if any). */
   private bossWaveTimerMs = 0;
+  /** Dev cheat: when set, forces every boss spawn to use this id. */
+  private bossOverrideId: string | null = null;
 
   constructor(viewportWidth = 1_280, viewportHeight = 720) {
     this.viewportWidth = viewportWidth;
@@ -231,8 +236,31 @@ export class EnemyManager {
     this.enemies.push(enemy);
   }
 
+  /** Dev cheat: force every future boss spawn to use this id (null to clear). */
+  setBossOverride(id: string | null): void {
+    this.bossOverrideId = id;
+  }
+
+  /** Returns the boss id that will spawn at the given level (respects override). */
+  resolveBossIdForLevel(levelNumber: number): string {
+    if (this.bossOverrideId) {
+      const def = getBossDefinitionById(this.bossOverrideId);
+      if (def) return def.id;
+    }
+    return getBossDefinitionForLevel(levelNumber).id;
+  }
+
+  /** Display name + id for the boss that will spawn (respects override). */
+  resolveBossDefForLevel(levelNumber: number) {
+    if (this.bossOverrideId) {
+      const def = getBossDefinitionById(this.bossOverrideId);
+      if (def) return def;
+    }
+    return getBossDefinitionForLevel(levelNumber);
+  }
+
   spawnBoss(levelNumber: number): void {
-    this.boss = makeBoss(levelNumber);
+    this.boss = makeBoss(levelNumber, this.bossOverrideId);
     // If the boss defines parts, create minimal Enemy stubs for collision.
     this.bossPartStubs = [];
     if (this.boss.parts && this.boss.parts.length > 0) {
@@ -583,9 +611,15 @@ export class EnemyManager {
     if (boss.isCharging) {
       boss.chargeProgressMs = (boss.chargeProgressMs ?? 0) + deltaTimeMs;
       if ((boss.chargeProgressMs ?? 0) >= chargeMs) {
-        // Release the charge-beam shot.
+        // Release the charged shot. weaponKind picks the fire routine so
+        // different bosses can charge different weapons.
         boss.isCharging = false;
-        this.fireChargeBeam(boss, player, phase);
+        const kind = phase?.attackPattern?.weaponKind;
+        if (kind === "mega-missile") {
+          this.fireMegaMissile(boss, player, phase);
+        } else {
+          this.fireChargeBeam(boss, player, phase);
+        }
       }
     }
 
@@ -875,6 +909,41 @@ export class EnemyManager {
     });
   }
 
+  /**
+   * Releases a mega-missile aimed at the player. Heavy, slower than a
+   * charge-beam, shootable (large health pool), and detonates with an AoE
+   * blast on proximity or lifetime expiry.
+   */
+  private fireMegaMissile(
+    boss: BossState,
+    player: PlayerState,
+    phase?: BossMovementPhase,
+  ): void {
+    const originX = boss.position.x - boss.width / 2;
+    const originY = boss.position.y;
+    const dx = player.position.x - originX;
+    const dy = player.position.y - originY;
+    const len = Math.max(1, Math.hypot(dx, dy));
+    const ap = phase?.attackPattern;
+    const speed = ap?.projectileSpeed ?? 380;
+    const dmg = ap?.damage ?? 45;
+    this.projectilePool.spawnEx({
+      x: originX,
+      y: originY,
+      vx: (dx / len) * speed,
+      vy: (dy / len) * speed,
+      damage: dmg,
+      owner: "enemy",
+      kind: "mega-missile",
+      width: 90,
+      height: 26,
+      lifetimeMs: 6_000,
+      health: 60,
+      proxTriggerRadius: 80,
+      proxBlastRadius: 180,
+    });
+  }
+
   /** Recomputes world-space positions of each boss part and mirrors to stubs. */
   private syncBossPartStubs(): void {
     if (!this.boss || !this.boss.parts) return;
@@ -1108,11 +1177,13 @@ export class EnemyManager {
         const len = Math.max(1, Math.hypot(dx, dy));
         // Cannon shots are heavy + slow (0.55x speed). Lifetime must cover
         // the full viewport at that speed — 12s gives ~1400px at 120 px/s.
+        // `health: 15` lets the player shoot them down — ~3 level-3 bullets.
         this.projectilePool.spawnEx({
           x: originX, y: originY,
           vx: (dx / len) * speed * 0.55, vy: (dy / len) * speed * 0.55,
           damage, owner, kind: "cannon",
           width: 30, height: 30, lifetimeMs: 12_000,
+          health: 15,
         });
         break;
       }

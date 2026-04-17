@@ -95,6 +95,7 @@ export type WeaponKind =
   | "cannon"
   | "pulse-bolt"
   | "charge-beam"
+  | "mega-missile"
   | "prox-bomb";
 
 export interface AttackPattern {
@@ -479,6 +480,8 @@ export interface DevCheats {
   startLevel?: number;
   /** When true, skip the main menu and drop straight into gameplay. */
   autostart?: boolean;
+  /** Force a specific boss id regardless of level. */
+  boss?: string;
 }
 
 export interface GameState {

@@ -7,7 +7,7 @@
  */
 
 import type { Application } from "pixi.js";
-import type { DevCheats, PowerUp, Projectile, ScreenType } from "../types/index";
+import type { DevCheats, EnemyType, PowerUp, Projectile, ScreenType } from "../types/index";
 import { InputHandler } from "../input/InputHandler";
 import { StateManager } from "../managers/StateManager";
 import { PlayerManager } from "../managers/PlayerManager";
@@ -16,7 +16,6 @@ import { LevelManager } from "../managers/LevelManager";
 import { PowerUpManager } from "../managers/PowerUpManager";
 import { CollisionSystem } from "../systems/CollisionSystem";
 import { GameRenderer } from "../rendering/GameRenderer";
-import { getBossDefinitionForLevel } from "../managers/BossRegistry";
 
 /** Menu item ids used by updateMenu / updatePause. */
 type MainMenuItem = "play" | "stats";
@@ -281,7 +280,7 @@ export class GameManager {
     this.powerUps.initialize();
     this.renderer.resetFx();
     // Re-show a short arrival banner for the new level, naming the upcoming boss.
-    const nextBoss = getBossDefinitionForLevel(nextLevelNumber);
+    const nextBoss = this.enemies.resolveBossDefForLevel(nextLevelNumber);
     this.renderer.showLevelBanner(
       `LEVEL ${nextLevelNumber}`,
       `BOSS: ${nextBoss.displayName}`,
@@ -454,6 +453,9 @@ export class GameManager {
         consecutiveHits += 1;
         if (consecutiveHits > peakConsecutiveHits) peakConsecutiveHits = consecutiveHits;
       } else if (ev.type === "player-hit-by-projectile" && ev.projectileId) {
+        // Look up the projectile BEFORE killing so kind-specific impact FX
+        // can read its position.
+        const hit = this.enemies.getProjectiles().find((p) => p.id === ev.projectileId);
         this.enemies.killProjectile(ev.projectileId);
         const dmgResult = this.player.takeDamage(ev.damage);
         if (!dmgResult.blocked) {
@@ -461,6 +463,9 @@ export class GameManager {
           consecutiveHits = 0;
           this.safeTimerMs = 0;
           this.renderer.showHitFlash();
+          if (hit?.kind === "cannon") {
+            this.renderer.showCannonImpact(hit.position.x, hit.position.y);
+          }
         }
         if (dmgResult.died && !this.player.getState().isAlive) {
           didDie = true;
@@ -796,6 +801,8 @@ export class GameManager {
    * gameplay pick them up on the next frame.
    */
   applyDevCheats(cheats: DevCheats): void {
+    // Must run BEFORE autostart/startLevel so the first boss spawned honours it.
+    if (cheats.boss !== undefined) this.enemies.setBossOverride(cheats.boss);
     if (cheats.autostart) {
       this.startNewRun();
     }
@@ -852,12 +859,28 @@ export class GameManager {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function makeLevelState(levelNumber: number) {
-  const unlocked: ("grunt" | "spinner" | "stalker")[] =
-    levelNumber >= 7
-      ? ["grunt", "spinner", "stalker"]
-      : levelNumber >= 3
-        ? ["grunt", "spinner"]
-        : ["grunt"];
+  // Widen the enemy pool as levels climb so the "cool" specialist types
+  // that the Carrier boss summons also appear in regular waves. Weights
+  // in LevelManager.pickEnemyType downweight specialists at low levels.
+  const progression: Record<number, EnemyType[]> = {
+    1: ["grunt"],
+    2: ["grunt", "darter"],
+    3: ["grunt", "darter", "spinner"],
+    4: ["grunt", "spinner", "darter", "orbiter", "stalker"],
+    5: ["grunt", "spinner", "stalker", "orbiter", "lancer"],
+    6: ["grunt", "spinner", "stalker", "lancer", "pulsar", "orbiter"],
+  };
+  const unlocked: EnemyType[] = progression[levelNumber] ?? [
+    "grunt",
+    "spinner",
+    "stalker",
+    "darter",
+    "orbiter",
+    "lancer",
+    "pulsar",
+    "torpedoer",
+    "cannoneer",
+  ];
 
   return {
     levelNumber,

@@ -562,10 +562,26 @@ export const BOSS_REGISTRY: readonly BossDefinition[] = [
       ];
     },
     defeatRule: "all",
-    // Dreadnought is huge and slow; predictable pattern.
+    // Dreadnought is huge and slow; predictable pattern. One phase charges a
+    // heavy mega-missile: long tell, big blast radius, but the missile itself
+    // is shootable so an alert player can detonate it early.
     makeMovementPhases: () => [
       { kind: "hover", durationMs: 7_000, announce: true },
       { kind: "vertical", durationMs: 6_500 },
+      {
+        kind: "charge",
+        durationMs: 4_500,
+        chargeMs: 2_800,
+        attackPattern: {
+          type: "laser",
+          bulletsPerShot: 1,
+          spreadAngleDegrees: 0,
+          projectileSpeed: 380,
+          damage: 45,
+          weaponKind: "mega-missile",
+        },
+        announce: true,
+      },
       { kind: "square", durationMs: 9_000 },
       { kind: "wave", durationMs: 6_000 },
     ],
@@ -885,6 +901,18 @@ export function getBossDefinitionForLevel(levelNumber: number): BossDefinition {
   const n = Math.max(1, levelNumber);
   const idx = (n - 1) % BOSS_REGISTRY.length;
   return BOSS_REGISTRY[idx]!;
+}
+
+/** Returns the boss by id (case-insensitive), or null if no match. */
+export function getBossDefinitionById(id: string): BossDefinition | null {
+  const needle = id.trim().toLowerCase();
+  if (!needle) return null;
+  return BOSS_REGISTRY.find((b) => b.id.toLowerCase() === needle) ?? null;
+}
+
+/** Every registered boss id, lowercased. Useful for cheat validation. */
+export function listBossIds(): string[] {
+  return BOSS_REGISTRY.map((b) => b.id);
 }
 
 /** Builds a BossState from the given definition for the given level. */

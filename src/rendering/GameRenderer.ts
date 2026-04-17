@@ -758,6 +758,50 @@ export class GameRenderer {
   }
 
   /**
+   * Cannon round impact FX — two overlapping shockwave rings (white outer,
+   * red inner) + a starburst of red spokes. Different silhouette from
+   * the generic bullet hit flash so the player can tell the heavy round
+   * apart from regular fire.
+   */
+  showCannonImpact(x: number, y: number): void {
+    this.ringPulses.push({
+      x,
+      y,
+      age: 0,
+      maxAge: 520,
+      color: 0xffffff,
+      maxRadius: 70,
+    });
+    this.ringPulses.push({
+      x,
+      y,
+      age: 0,
+      maxAge: 640,
+      color: 0xff3344,
+      maxRadius: 95,
+    });
+    // Six red spokes via the spark FX, longer + hotter than a laser spark.
+    this.sparks.push({
+      x,
+      y,
+      age: 0,
+      maxAge: 260,
+      color: 0xff4466,
+      size: 28,
+      rot: 0,
+    });
+    this.sparks.push({
+      x,
+      y,
+      age: 0,
+      maxAge: 260,
+      color: 0xffffff,
+      size: 22,
+      rot: Math.PI / 4,
+    });
+  }
+
+  /**
    * Short-lived radiating spark for mega-laser impacts on enemy hulls.
    * Hot white core + four spokes that grow + fade over ~170ms.
    */
@@ -1193,6 +1237,102 @@ export class GameRenderer {
         .stroke({ color: accent, width: 3 });
     }
 
+    // 1b. Charge-up tell. If the current phase defines a chargeMs window and
+    // the boss is actively charging, render a big growing + flashing aura at
+    // the weapon muzzle (left side of the boss, since bosses face the player).
+    // The aura grows 40% → 130% of its max radius across the charge window,
+    // warms yellow → red as it nears firing, and strobes in brightness so the
+    // player can't miss the tell even in chaotic moments.
+    const phase = b.movementPhases?.[b.currentPhase];
+    const chargeMs = phase?.chargeMs;
+    if (b.isCharging && chargeMs && chargeMs > 0) {
+      const t = Math.min(1, (b.chargeProgressMs ?? 0) / chargeMs);
+      const muzzleX = b.position.x - b.width / 2;
+      const muzzleY = b.position.y;
+      const strobe = 0.55 + 0.45 * Math.sin(time * 26);
+      const isMegaMissile = phase?.attackPattern?.weaponKind === "mega-missile";
+
+      if (isMegaMissile) {
+        // Slowly assemble the missile at the muzzle: body extends outward,
+        // warhead tip slides into place, exhaust halo brightens as it nears
+        // firing. Uses t to drive length, brightness, and the warhead glow.
+        const missileFullLen = 110 + b.width * 0.25;
+        const thick = 22;
+        const currentLen = missileFullLen * (0.25 + 0.9 * t);
+        const bodyAlpha = 0.5 + 0.5 * t;
+        const bodyCol = 0xaa2244;
+        const warmCol = t < 0.5
+          ? 0xffcc44
+          : mixColor(0xffcc44, 0xff3333, (t - 0.5) * 2);
+
+        // Tail exhaust halo builds
+        this.fxGfx
+          .circle(muzzleX + currentLen * 0.4, muzzleY, thick * (0.4 + t * 0.9))
+          .fill({ color: 0xffaa33, alpha: 0.25 + 0.4 * t * strobe });
+
+        // Body rectangle — anchor pivot at muzzleX (tip aims left at -π)
+        const bodyCenterX = muzzleX - currentLen * 0.5;
+        drawRotatedRect(
+          this.fxGfx,
+          bodyCenterX,
+          muzzleY,
+          currentLen,
+          thick,
+          Math.PI,
+          { color: bodyCol, alpha: bodyAlpha },
+          { color: 0xffffff, width: 2, alpha: bodyAlpha },
+        );
+        // Warhead triangle tip — fades in / glows strobe
+        const noseX = muzzleX - currentLen;
+        drawTriangle(
+          this.fxGfx,
+          noseX,
+          muzzleY,
+          thick * 1.1,
+          Math.PI,
+          { color: warmCol, alpha: 0.6 + 0.4 * strobe },
+          { color: 0xffffff, width: 2, alpha: bodyAlpha },
+        );
+        // Inner warhead pulse
+        this.fxGfx
+          .circle(noseX + thick * 0.2, muzzleY, thick * 0.45 * (0.6 + 0.6 * t * strobe))
+          .fill({ color: 0xffffff, alpha: 0.3 + 0.6 * t * strobe });
+        // Loading rail bars that fade as missile approaches full length
+        const railAlpha = 0.7 * (1 - t) + 0.2;
+        for (let k = -1; k <= 1; k += 2) {
+          this.fxGfx
+            .moveTo(muzzleX, muzzleY + k * (thick * 0.9))
+            .lineTo(muzzleX - missileFullLen * 1.05, muzzleY + k * (thick * 0.9))
+            .stroke({ color: warmCol, width: 2, alpha: railAlpha * strobe });
+        }
+      } else {
+        // Generic charge aura: growing ring + starburst spikes + strobing core.
+        const maxR = 60 + b.width * 0.35;
+        const outerR = maxR * (0.4 + t * 0.9);
+        const warmCol = t < 0.5
+          ? 0xffee66
+          : mixColor(0xffee66, 0xff3333, (t - 0.5) * 2);
+        this.fxGfx
+          .circle(muzzleX, muzzleY, outerR)
+          .stroke({
+            color: warmCol,
+            width: 3 + t * 2,
+            alpha: 0.4 + 0.5 * strobe,
+          });
+        this.fxGfx
+          .circle(muzzleX, muzzleY, outerR * 0.45 * (0.85 + strobe * 0.2))
+          .fill({ color: 0xffffff, alpha: 0.25 + 0.55 * strobe });
+        for (let k = 0; k < 8; k++) {
+          const a = (k / 8) * Math.PI * 2 + time * 1.5;
+          const len = outerR * 1.1;
+          this.fxGfx
+            .moveTo(muzzleX, muzzleY)
+            .lineTo(muzzleX + Math.cos(a) * len, muzzleY + Math.sin(a) * len)
+            .stroke({ color: warmCol, width: 2, alpha: 0.25 + 0.4 * strobe });
+        }
+      }
+    }
+
     // 2. Parts (turrets / armor / core). Each carries its own HP + visual cue.
     if (b.parts && b.parts.length > 0) {
       for (const part of b.parts) {
@@ -1355,6 +1495,48 @@ export class GameRenderer {
         this.entityGfx
           .circle(x + Math.cos(angle) * len * 0.5, y + Math.sin(angle) * len * 0.5, 6)
           .fill({ color: 0xffffff, alpha: 0.85 });
+        break;
+      }
+      case "mega-missile": {
+        // Heavy missile: long body, glowing warhead tip, exhaust flame trail.
+        const bodyCol = 0xaa2244;
+        const warheadCol = 0xffee66;
+        const t = performance.now() * 0.004;
+        const flicker = 0.7 + 0.3 * Math.sin(t * 8);
+        const len = Math.max(p.width, 80);
+        const thick = Math.max(p.height, 22);
+        // Exhaust halo trailing the tail
+        const tailX = x - Math.cos(angle) * len * 0.5;
+        const tailY = y - Math.sin(angle) * len * 0.5;
+        this.entityGfx
+          .circle(tailX, tailY, thick * 1.1 * flicker)
+          .fill({ color: 0xffaa33, alpha: 0.35 });
+        this.entityGfx
+          .circle(tailX, tailY, thick * 0.65 * flicker)
+          .fill({ color: 0xffffdd, alpha: 0.7 });
+        // Body
+        drawRotatedRect(this.entityGfx, x, y, len * 0.85, thick, angle,
+          { color: bodyCol }, { color: 0xffffff, width: 2 });
+        // Warhead nose (bright triangle pointing in velocity direction)
+        const noseX = x + Math.cos(angle) * len * 0.42;
+        const noseY = y + Math.sin(angle) * len * 0.42;
+        drawTriangle(this.entityGfx, noseX, noseY, thick * 1.1, angle,
+          { color: warheadCol }, { color: 0xffffff, width: 2 });
+        // Warhead inner glow
+        this.entityGfx
+          .circle(noseX - Math.cos(angle) * thick * 0.2, noseY - Math.sin(angle) * thick * 0.2, thick * 0.45 * flicker)
+          .fill({ color: 0xffffff, alpha: 0.85 });
+        // Fins — two small rectangles perpendicular near tail
+        const finOffX = Math.cos(angle + Math.PI / 2) * thick * 0.9;
+        const finOffY = Math.sin(angle + Math.PI / 2) * thick * 0.9;
+        const finBaseX = x - Math.cos(angle) * len * 0.3;
+        const finBaseY = y - Math.sin(angle) * len * 0.3;
+        drawRotatedRect(this.entityGfx, finBaseX + finOffX, finBaseY + finOffY,
+          thick * 0.6, thick * 0.3, angle,
+          { color: bodyCol }, { color: 0xffffff, width: 1 });
+        drawRotatedRect(this.entityGfx, finBaseX - finOffX, finBaseY - finOffY,
+          thick * 0.6, thick * 0.3, angle,
+          { color: bodyCol }, { color: 0xffffff, width: 1 });
         break;
       }
       case "prox-bomb": {

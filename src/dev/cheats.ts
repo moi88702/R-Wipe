@@ -13,6 +13,7 @@
  */
 
 import type { GameManager } from "../game/GameManager";
+import { listBossIds } from "../managers/BossRegistry";
 import type { DevCheats, PlayerWeaponType } from "../types/index";
 
 const WEAPON_VALUES: ReadonlySet<PlayerWeaponType> = new Set([
@@ -76,7 +77,18 @@ export function parseCheats(search: string): DevCheats {
   const autostart = asBool(params.get("autostart"));
   if (autostart !== undefined) cheats.autostart = autostart;
 
+  const boss = asBoss(params.get("boss"));
+  if (boss !== undefined) cheats.boss = boss;
+
   return cheats;
+}
+
+function asBoss(raw: string | null): string | undefined {
+  if (raw === null) return undefined;
+  const v = raw.trim().toLowerCase();
+  if (!v) return undefined;
+  const valid = new Set(listBossIds().map((id) => id.toLowerCase()));
+  return valid.has(v) ? v : undefined;
 }
 
 /** True iff at least one cheat field is set. */
