@@ -16,15 +16,19 @@ import { LevelManager } from "../managers/LevelManager";
 import { PowerUpManager } from "../managers/PowerUpManager";
 import { OverworldManager } from "../managers/OverworldManager";
 import { missionToLevelState } from "../managers/MissionManager";
+import { BlueprintStore } from "../managers/BlueprintStore";
 import { CollisionSystem } from "../systems/CollisionSystem";
 import { GameRenderer } from "../rendering/GameRenderer";
-import type { MissionId, NodeId } from "../types/campaign";
+import type { BlueprintId, MissionId, NodeId } from "../types/campaign";
+import type { Blueprint } from "../types/shipBuilder";
 import { STARTER_SECTOR } from "./campaign/StarterSector";
+import { PARTS_REGISTRY, DEFAULT_UNLOCKED_PARTS } from "./parts/registry";
+import { computeShipStats } from "./parts/stats";
 
 /** Menu item ids used by updateMenu / updatePause. */
-type MainMenuItem = "play" | "campaign" | "stats";
+type MainMenuItem = "play" | "campaign" | "shipyard" | "stats";
 type PauseMenuItem = "continue" | "stats" | "quit";
-const MAIN_MENU_ITEMS: readonly MainMenuItem[] = ["play", "campaign", "stats"];
+const MAIN_MENU_ITEMS: readonly MainMenuItem[] = ["play", "campaign", "shipyard", "stats"];
 const PAUSE_MENU_ITEMS: readonly PauseMenuItem[] = ["continue", "stats", "quit"];
 
 export interface GameManagerOptions {
@@ -48,6 +52,7 @@ export class GameManager {
   private readonly collisions: CollisionSystem;
   private readonly renderer: GameRenderer;
   private readonly overworld: OverworldManager;
+  private readonly blueprints: BlueprintStore;
 
   private safeTimerMs = 0;
   private menuDebounceMs = 0;
@@ -60,6 +65,8 @@ export class GameManager {
   private activeMissionId: MissionId | null = null;
   /** Starmap selection index into `overworld.getSector().nodes`. */
   private starmapSelection = 0;
+  /** Shipyard list selection (index into saved blueprints, -1 for vanilla). */
+  private shipyardSelection = -1;
 
   // Edge-triggered menu input tracking. `prev*` mirrors last frame's poll.
   private prevPausePressed = false;
@@ -107,6 +114,38 @@ export class GameManager {
       // Corrupt / incompatible save — start fresh rather than crashing.
       this.overworld.clearSaved();
     }
+
+    this.blueprints = new BlueprintStore();
+    try {
+      this.blueprints.load();
+    } catch {
+      this.blueprints.clearSaved();
+    }
+    // Seed a sensible starter blueprint the first time campaign is opened
+    // so the shipyard always has at least one option to equip.
+    this.seedStarterBlueprintIfMissing();
+  }
+
+  /**
+   * On first campaign launch the player has no saved ships. Drop a fully
+   * wired "Standard" blueprint into the store so the shipyard has something
+   * to equip before the builder UI lands.
+   */
+  private seedStarterBlueprintIfMissing(): void {
+    if (this.blueprints.list().length > 0) return;
+    const starter: Blueprint = {
+      id: "bp-starter",
+      name: "Standard",
+      parts: [
+        { id: "r", partId: "hull-standard-t1", parentId: null, parentSocketId: null, colourId: null },
+        { id: "c", partId: "cockpit-standard-t1", parentId: "r", parentSocketId: "s-nose", colourId: null },
+        { id: "wL", partId: "wing-standard-l-t1", parentId: "r", parentSocketId: "s-wingL", colourId: null },
+        { id: "wR", partId: "wing-standard-r-t1", parentId: "r", parentSocketId: "s-wingR", colourId: null },
+        { id: "e", partId: "engine-standard-t1", parentId: "r", parentSocketId: "s-tail", colourId: null },
+      ],
+    };
+    this.blueprints.upsert(starter);
+    this.blueprints.save();
   }
 
   /**
@@ -137,6 +176,8 @@ export class GameManager {
       this.updateGameOver();
     } else if (screen === "starmap") {
       this.updateStarmap();
+    } else if (screen === "shipyard") {
+      this.updateShipyard();
     }
 
     // Commit edge-trigger prev-state AFTER all update*() have consumed edges.
@@ -203,6 +244,8 @@ export class GameManager {
         this.startNewRun();
       } else if (pick === "campaign") {
         this.openStarmap();
+      } else if (pick === "shipyard") {
+        this.openShipyard();
       } else {
         this.openStats("main-menu");
       }
@@ -262,6 +305,57 @@ export class GameManager {
     if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
       this.state.setScreen("main-menu");
       this.menuSelection = 0;
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+    }
+  }
+
+  // ── Screen: shipyard (ship builder) ──────────────────────────────────────
+
+  /**
+   * Open the shipyard browser. The current selection lands on the equipped
+   * blueprint so the player sees their active ship first.
+   */
+  private openShipyard(): void {
+    const equipped = this.overworld.getState().inventory.equippedBlueprintId;
+    const list = this.blueprints.list();
+    const idx = equipped ? list.findIndex((b) => b.id === equipped) : -1;
+    this.shipyardSelection = idx;
+    this.menuSelection = 0;
+    this.menuDebounceMs = MENU_DEBOUNCE_MS;
+    this.state.setScreen("shipyard");
+  }
+
+  private updateShipyard(): void {
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.state.setScreen("main-menu");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+
+    const list = this.blueprints.list();
+    const itemCount = list.length;
+    if (itemCount === 0) return;
+
+    const input = this.input.poll();
+    const upEdge = input.moveUp && !this.prevUpPressed;
+    const downEdge = input.moveDown && !this.prevDownPressed;
+    if (upEdge) {
+      this.shipyardSelection = (this.shipyardSelection - 1 + itemCount) % itemCount;
+    } else if (downEdge) {
+      this.shipyardSelection = (this.shipyardSelection + 1) % itemCount;
+    }
+    if (this.shipyardSelection < 0) this.shipyardSelection = 0;
+
+    if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
+      const target = list[this.shipyardSelection];
+      if (target) {
+        this.overworld.equipBlueprintForced(target.id);
+        try {
+          this.overworld.save();
+        } catch {
+          // Best-effort — keep the in-memory equip even if persistence fails.
+        }
+      }
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
     }
   }
@@ -337,12 +431,32 @@ export class GameManager {
     // and difficulty survive that reset.
     this.state.updateLevelState(levelState);
     this.level.startLevel(this.state.getGameState().levelState, this.enemies);
+    // Apply equipped blueprint's hitbox + HP override so a heavier ship
+    // actually feels heavier in combat.
+    this.applyEquippedBlueprint();
     const bossDef = this.enemies.resolveBossDefForLevel(levelState.levelNumber);
     this.renderer.showLevelBanner(
       result.spec.name.toUpperCase(),
       `BOSS: ${bossDef.displayName}`,
       1_400,
     );
+  }
+
+  /**
+   * If the player has a blueprint equipped, fold its computed stats onto
+   * the fresh-run PlayerState: larger hitbox, adjusted HP ceiling. Speed /
+   * damage / fireRate aren't wired here yet — the builder ships with
+   * conservative overrides so the arcade baseline still drives feel.
+   */
+  private applyEquippedBlueprint(): void {
+    const equipped = this.overworld.getState().inventory.equippedBlueprintId;
+    if (!equipped) return;
+    const bp = this.blueprints.get(equipped);
+    if (!bp) return;
+    const stats = computeShipStats(bp);
+    this.player.setHitbox(stats.hitbox.width, stats.hitbox.height);
+    this.player.setMaxHealth(stats.hp);
+    this.state.updatePlayerState(this.player.getState());
   }
 
   /**
@@ -994,7 +1108,57 @@ export class GameManager {
       lastRun: this.state.getLastRun(),
       bombCredits: this.player.getBombCredits(),
       starmap: state.screen === "starmap" ? this.buildStarmapExtras() : null,
+      shipyard: state.screen === "shipyard" ? this.buildShipyardExtras() : null,
     });
+  }
+
+  /** Collects the data the renderer needs for the shipyard browser. */
+  private buildShipyardExtras(): {
+    blueprints: ReadonlyArray<{
+      id: BlueprintId;
+      name: string;
+      selected: boolean;
+      equipped: boolean;
+      hp: number;
+      speed: number;
+      damage: number;
+      hitboxW: number;
+      hitboxH: number;
+      cost: number;
+      partCount: number;
+    }>;
+    unlockedPartCount: number;
+    totalPartCount: number;
+    credits: number;
+  } {
+    const equipped = this.overworld.getState().inventory.equippedBlueprintId;
+    const list = this.blueprints.list();
+    const rows = list.map((bp, i) => {
+      const stats = computeShipStats(bp);
+      return {
+        id: bp.id,
+        name: bp.name,
+        selected: i === this.shipyardSelection,
+        equipped: bp.id === equipped,
+        hp: stats.hp,
+        speed: stats.speed,
+        damage: stats.damage,
+        hitboxW: stats.hitbox.width,
+        hitboxH: stats.hitbox.height,
+        cost: stats.cost,
+        partCount: bp.parts.length,
+      };
+    });
+
+    const unlocked = new Set<string>(this.overworld.getState().inventory.unlockedParts);
+    for (const id of DEFAULT_UNLOCKED_PARTS) unlocked.add(id);
+
+    return {
+      blueprints: rows,
+      unlockedPartCount: unlocked.size,
+      totalPartCount: Object.keys(PARTS_REGISTRY).length,
+      credits: this.overworld.getState().inventory.credits,
+    };
   }
 
   /** Collects the data the renderer needs to draw the starmap screen. */

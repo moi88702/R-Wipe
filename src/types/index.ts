@@ -452,7 +452,8 @@ export type ScreenType =
   | "game-over"
   | "stats"
   | "pause"
-  | "starmap";
+  | "starmap"
+  | "shipyard";
 
 /**
  * Dev-only cheat payload parsed from URL query params. Every field is optional

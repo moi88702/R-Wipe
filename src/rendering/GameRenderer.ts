@@ -71,6 +71,25 @@ interface FloatingText {
   vy: number;
 }
 
+export interface ShipyardRenderData {
+  readonly blueprints: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly selected: boolean;
+    readonly equipped: boolean;
+    readonly hp: number;
+    readonly speed: number;
+    readonly damage: number;
+    readonly hitboxW: number;
+    readonly hitboxH: number;
+    readonly cost: number;
+    readonly partCount: number;
+  }>;
+  readonly unlockedPartCount: number;
+  readonly totalPartCount: number;
+  readonly credits: number;
+}
+
 export interface StarmapRenderData {
   readonly sectorName: string;
   readonly nodes: ReadonlyArray<{
@@ -252,6 +271,13 @@ export class GameRenderer {
   private readonly starmapCreditsText: Text;
   private readonly starmapPrompt: Text;
   private readonly starmapNodeLabels: Text[] = [];
+
+  // Shipyard overlay elements.
+  private readonly shipyardTitle: Text;
+  private readonly shipyardStatsText: Text;
+  private readonly shipyardSummaryText: Text;
+  private readonly shipyardPrompt: Text;
+  private readonly shipyardRowTexts: Text[] = [];
 
   constructor(app: Application, width: number, height: number) {
     this.app = app;
@@ -615,6 +641,58 @@ export class GameRenderer {
     this.starmapPrompt.visible = false;
     this.menuLayer.addChild(this.starmapPrompt);
 
+    // Shipyard overlay
+    this.shipyardTitle = new Text({
+      text: "SHIPYARD",
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: 40,
+        fill: COLOR.hudAmber,
+        fontWeight: "bold",
+      }),
+    });
+    this.shipyardTitle.anchor.set(0.5, 0);
+    this.shipyardTitle.x = width / 2;
+    this.shipyardTitle.y = 24;
+    this.shipyardTitle.visible = false;
+    this.menuLayer.addChild(this.shipyardTitle);
+
+    this.shipyardStatsText = new Text({
+      text: "",
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: 16,
+        fill: COLOR.hudWhite,
+        align: "left",
+        lineHeight: 22,
+      }),
+    });
+    this.shipyardStatsText.anchor.set(0, 0);
+    this.shipyardStatsText.x = width * 0.55;
+    this.shipyardStatsText.y = 110;
+    this.shipyardStatsText.visible = false;
+    this.menuLayer.addChild(this.shipyardStatsText);
+
+    this.shipyardSummaryText = new Text({
+      text: "",
+      style: hudStyle(COLOR.hudCyan, 16),
+    });
+    this.shipyardSummaryText.anchor.set(0.5, 0);
+    this.shipyardSummaryText.x = width / 2;
+    this.shipyardSummaryText.y = 76;
+    this.shipyardSummaryText.visible = false;
+    this.menuLayer.addChild(this.shipyardSummaryText);
+
+    this.shipyardPrompt = new Text({
+      text: "↑↓ SELECT   ENTER  EQUIP   ESC  BACK",
+      style: hudStyle(COLOR.hudWhite, 14),
+    });
+    this.shipyardPrompt.anchor.set(0.5, 1);
+    this.shipyardPrompt.x = width / 2;
+    this.shipyardPrompt.y = height - 20;
+    this.shipyardPrompt.visible = false;
+    this.menuLayer.addChild(this.shipyardPrompt);
+
     this.initStarfield();
   }
 
@@ -664,6 +742,7 @@ export class GameRenderer {
       lastRun: Readonly<RunStats> | null;
       bombCredits: number;
       starmap: StarmapRenderData | null;
+      shipyard: ShipyardRenderData | null;
     },
   ): void {
     this.drawStarfield(deltaMs);
@@ -679,10 +758,11 @@ export class GameRenderer {
     const isMenu = screen === "main-menu";
     const isGameOver = screen === "game-over";
     const isStarmap = screen === "starmap";
+    const isShipyard = screen === "shipyard";
     // Gameplay entities stay visible behind the pause overlay.
     const drawsEntities = isGameplay || isPause;
 
-    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap;
+    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard;
     this.titleText.visible = isMenu;
     this.subtitleText.visible = isMenu;
     this.promptText.visible = isMenu || isPause;
@@ -707,6 +787,12 @@ export class GameRenderer {
     this.starmapPrompt.visible = isStarmap;
     for (const t of this.starmapNodeLabels) t.visible = isStarmap;
     if (!isStarmap) this.starmapGfx.clear();
+    // Shipyard overlay toggles
+    this.shipyardTitle.visible = isShipyard;
+    this.shipyardStatsText.visible = isShipyard;
+    this.shipyardSummaryText.visible = isShipyard;
+    this.shipyardPrompt.visible = isShipyard;
+    for (const t of this.shipyardRowTexts) t.visible = isShipyard;
     // Menu list items: used by main-menu (3) and pause (3); hidden on stats / starmap.
     const showList = isMenu || isPause;
     for (const t of this.menuItemTexts) t.visible = showList;
@@ -729,6 +815,11 @@ export class GameRenderer {
 
     if (isStarmap && extras.starmap) {
       this.drawStarmap(extras.starmap);
+      return;
+    }
+
+    if (isShipyard && extras.shipyard) {
+      this.drawShipyard(extras.shipyard);
       return;
     }
 
@@ -2054,10 +2145,71 @@ export class GameRenderer {
     }
   }
 
+  /**
+   * Draws the shipyard browser: a scrollable list of saved blueprints with
+   * a stats panel for the current selection. Selection is amber, equipped
+   * is tagged [EQUIPPED], others are white.
+   */
+  private drawShipyard(data: ShipyardRenderData): void {
+    // Text pool grows to match the blueprint count.
+    while (this.shipyardRowTexts.length < data.blueprints.length) {
+      const t = new Text({
+        text: "",
+        style: new TextStyle({
+          fontFamily: "monospace",
+          fontSize: 18,
+          fill: COLOR.hudWhite,
+          fontWeight: "bold",
+        }),
+      });
+      t.anchor.set(0, 0);
+      t.x = 60;
+      this.menuLayer.addChild(t);
+      this.shipyardRowTexts.push(t);
+    }
+
+    const rowY0 = 110;
+    const rowSpacing = 28;
+    for (let i = 0; i < this.shipyardRowTexts.length; i++) {
+      const t = this.shipyardRowTexts[i]!;
+      const row = data.blueprints[i];
+      if (!row) {
+        t.visible = false;
+        continue;
+      }
+      t.visible = true;
+      const prefix = row.selected ? "> " : "  ";
+      const suffix = row.equipped ? "  [EQUIPPED]" : "";
+      t.text = `${prefix}${row.name.toUpperCase()}${suffix}`;
+      t.style.fill = row.selected
+        ? COLOR.hudAmber
+        : row.equipped ? COLOR.hudCyan : COLOR.hudWhite;
+      t.y = rowY0 + i * rowSpacing;
+    }
+
+    // Right column: stat sheet for the current selection.
+    const sel = data.blueprints.find((b) => b.selected);
+    if (sel) {
+      this.shipyardStatsText.text = [
+        `HP          ${sel.hp}`,
+        `SPEED       ${sel.speed}`,
+        `DAMAGE      ${sel.damage}`,
+        `HITBOX      ${sel.hitboxW}×${sel.hitboxH}`,
+        `PARTS       ${sel.partCount}`,
+        `COST        ${sel.cost}¢`,
+      ].join("\n");
+    } else {
+      this.shipyardStatsText.text = "— NO BLUEPRINT SELECTED —";
+    }
+
+    this.shipyardSummaryText.text =
+      `UNLOCKED PARTS  ${data.unlockedPartCount}/${data.totalPartCount}      CREDITS  ${data.credits}`;
+  }
+
   /** Populates the 3-item main-menu list and highlights the selected one. */
   private updateMainMenu(selectedIdx: number): void {
-    const items = ["PLAY", "CAMPAIGN", "STATS"];
-    this.renderMenuList(items, selectedIdx, this.height / 2 + 70, 42);
+    const items = ["PLAY", "CAMPAIGN", "SHIPYARD", "STATS"];
+    this.renderMenuList(items, selectedIdx, this.height / 2 + 60, 40);
   }
 
   /** Populates the 3-item pause-menu list and highlights the selected one. */
