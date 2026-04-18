@@ -87,11 +87,66 @@ const COLOR = {
   hudCyan: 0x33ffff,
   hudRed: 0xff4455,
   hudWhite: 0xffffff,
-  powerUpWeapon: 0xffdd33,
-  powerUpShield: 0x33ccff,
-  powerUpLife: 0xff3366,
-  powerUpHealth: 0x33ff66,
+  powerUpWeapon: 0xffcc33,   // gold — weapon-upgrade
+  powerUpShield: 0x99ccff,   // pale blue — shield
+  powerUpLife: 0xff3377,     // crimson/pink — extra-life
+  powerUpHealth: 0xbbffdd,   // mint — health-recovery
+  powerUpSpeed: 0xaa66ff,    // violet — speed-boost
+  powerUpSpread: 0xff9933,   // orange — weapon-spread
+  powerUpBomb: 0xcc2244,     // dark red — weapon-bomb
+  powerUpMegaLaser: 0xff4466, // pink-red — matches the beam halo in drawMegaLaser
 } as const;
+
+/**
+ * Per-type visual defs for power-ups. Drives both drop rendering (drawPowerUp)
+ * and the collection FX (showPowerUpCollected) so pickups read the same way
+ * everywhere they appear.
+ *
+ * `pulseHz` — cycles per second of the glow's sine pulse.
+ * `pulseShape` — `"sine"` default breathe, `"double"` heartbeat (two quick
+ *   pulses then rest), `"flicker"` faster wobble, `"strobe"` square wave.
+ */
+type PowerUpPulseShape = "sine" | "double" | "flicker" | "strobe";
+interface PowerUpVisualDef {
+  readonly color: number;
+  readonly pulseHz: number;
+  readonly pulseShape: PowerUpPulseShape;
+}
+const POWER_UP_VISUAL: Readonly<Record<PowerUpType, PowerUpVisualDef>> = {
+  "extra-life":      { color: COLOR.powerUpLife,      pulseHz: 1.6, pulseShape: "double" },
+  "health-recovery": { color: COLOR.powerUpHealth,    pulseHz: 0.8, pulseShape: "sine" },
+  "shield":          { color: COLOR.powerUpShield,    pulseHz: 0.6, pulseShape: "sine" },
+  "weapon-upgrade":  { color: COLOR.powerUpWeapon,    pulseHz: 2.4, pulseShape: "flicker" },
+  "weapon-spread":   { color: COLOR.powerUpSpread,    pulseHz: 2.2, pulseShape: "flicker" },
+  "weapon-bomb":     { color: COLOR.powerUpBomb,      pulseHz: 1.2, pulseShape: "sine" },
+  "mega-laser":      { color: COLOR.powerUpMegaLaser, pulseHz: 5.0, pulseShape: "strobe" },
+  "speed-boost":     { color: COLOR.powerUpSpeed,     pulseHz: 3.0, pulseShape: "flicker" },
+};
+
+/** Returns a [0, 1] pulse intensity for the given shape at time `tSec`. */
+function pulseIntensity(shape: PowerUpPulseShape, hz: number, tSec: number): number {
+  const phase = (tSec * hz) % 1;
+  switch (shape) {
+    case "sine":
+      return 0.5 + 0.5 * Math.sin(phase * Math.PI * 2);
+    case "double": {
+      // Heartbeat: two quick bumps (0.0 and 0.2 of the cycle), then rest.
+      const bump = (p: number): number => {
+        const d = Math.min(Math.abs(phase - p), Math.abs(phase - p - 1));
+        return Math.max(0, 1 - d * 8);
+      };
+      return Math.max(bump(0.0), bump(0.2));
+    }
+    case "flicker": {
+      // Sine layered with a higher-frequency wobble — never quite settles.
+      const base = 0.5 + 0.5 * Math.sin(phase * Math.PI * 2);
+      const wob = 0.25 * Math.sin(phase * Math.PI * 6);
+      return Math.min(1, Math.max(0, base + wob));
+    }
+    case "strobe":
+      return phase < 0.5 ? 1 : 0.25;
+  }
+}
 
 export class GameRenderer {
   readonly app: Application;
@@ -656,39 +711,31 @@ export class GameRenderer {
 
   /** Collection FX: expanding ring + floating label. */
   showPowerUpCollected(x: number, y: number, type: PowerUpType): void {
-    let color: number = COLOR.powerUpWeapon;
+    const color: number = POWER_UP_VISUAL[type].color;
     let label = "";
     switch (type) {
       case "weapon-upgrade":
-        color = COLOR.powerUpWeapon;
         label = "GUN+";
         break;
       case "shield":
-        color = COLOR.powerUpShield;
         label = "SHIELD";
         break;
       case "extra-life":
-        color = COLOR.powerUpLife;
         label = "+LIFE";
         break;
       case "health-recovery":
-        color = COLOR.powerUpHealth;
         label = "+HP";
         break;
       case "speed-boost":
-        color = 0x99ffff;
         label = "SPEED!";
         break;
       case "weapon-spread":
-        color = 0xffaa33;
         label = "SPREAD";
         break;
       case "weapon-bomb":
-        color = 0xff6699;
         label = "BOMB";
         break;
       case "mega-laser":
-        color = 0xff4466;
         label = "MEGA LASER!!";
         break;
     }
@@ -1567,98 +1614,140 @@ export class GameRenderer {
 
   private drawPowerUp(pu: Readonly<PowerUp>): void {
     const { x, y } = pu.position;
-    const half = pu.width / 2;
-    const t = performance.now() * 0.004;
-    const pulse = 0.7 + 0.3 * Math.sin(t);
+    const def = POWER_UP_VISUAL[pu.type];
+    const tSec = performance.now() / 1000;
+    const intensity = pulseIntensity(def.pulseShape, def.pulseHz, tSec);
 
-    let col: number = COLOR.powerUpWeapon;
+    this.drawPulseGlow(x, y, def.color, intensity);
+
     switch (pu.type) {
-      case "weapon-upgrade":
-        col = COLOR.powerUpWeapon;
-        break;
-      case "shield":
-        col = COLOR.powerUpShield;
-        break;
       case "extra-life":
-        col = COLOR.powerUpLife;
+        this.drawHeartPowerUp(x, y, def.color);
         break;
       case "health-recovery":
-        col = COLOR.powerUpHealth;
+        this.drawCrossPowerUp(x, y, def.color);
         break;
-      case "speed-boost":
-        col = 0x99ffff;
+      case "shield":
+        this.drawPentagonPowerUp(x, y, def.color, tSec);
+        break;
+      case "weapon-upgrade":
+        this.drawChevronPowerUp(x, y, def.color);
         break;
       case "weapon-spread":
-        col = 0xffaa33;
+        this.drawTridentPowerUp(x, y, def.color);
         break;
       case "weapon-bomb":
-        col = 0xff6699;
+        this.drawCrosshairPowerUp(x, y, def.color);
         break;
       case "mega-laser":
-        col = 0xff4466;
+        this.drawDiamondPowerUp(x, y, def.color, intensity);
+        break;
+      case "speed-boost":
+        this.drawDoubleChevronPowerUp(x, y, def.color);
         break;
     }
+  }
 
-    this.entityGfx
-      .rect(x - half - 2, y - half - 2, pu.width + 4, pu.height + 4)
-      .fill({ color: col, alpha: 0.25 * pulse });
-    this.entityGfx
-      .rect(x - half, y - half, pu.width, pu.height)
-      .fill({ color: col, alpha: 0.95 })
-      .stroke({ color: 0xffffff, width: 2 });
+  /** Shared pulsing halo behind every power-up icon. */
+  private drawPulseGlow(x: number, y: number, color: number, intensity: number): void {
+    const rOuter = 18 + intensity * 6;
+    const rInner = 12 + intensity * 3;
+    this.entityGfx.circle(x, y, rOuter).fill({ color, alpha: 0.08 + intensity * 0.12 });
+    this.entityGfx.circle(x, y, rInner).fill({ color, alpha: 0.18 + intensity * 0.18 });
+  }
 
-    // Tiny pictogram per type so pickups read at a glance.
-    switch (pu.type) {
-      case "speed-boost":
-        // chevron trio
-        for (let i = 0; i < 3; i++) {
-          this.entityGfx
-            .poly([
-              x - 6 + i * 3, y - 5,
-              x + i * 3, y,
-              x - 6 + i * 3, y + 5,
-            ])
-            .fill({ color: 0xffffff, alpha: 0.9 });
-        }
-        break;
-      case "weapon-spread":
-        // three diverging bars
-        for (let i = -1; i <= 1; i++) {
-          this.entityGfx
-            .rect(x - 1, y - 6, 2, 12)
-            .fill({ color: 0xffffff, alpha: 0.9 });
-          this.entityGfx
-            .rect(x - 1 + i * 4, y - 5, 2, 10)
-            .fill({ color: 0xffffff, alpha: 0.7 });
-        }
-        break;
-      case "weapon-bomb":
-        this.entityGfx
-          .circle(x, y + 1, 5)
-          .fill({ color: 0xffffff, alpha: 0.9 });
-        this.entityGfx
-          .rect(x - 1, y - 6, 2, 3)
-          .fill({ color: 0xffffff, alpha: 0.95 });
-        break;
-      case "mega-laser":
-        // A long beam pictogram across the pickup.
-        this.entityGfx
-          .rect(x - 8, y - 1, 16, 2)
-          .fill({ color: 0xffffff, alpha: 0.95 });
-        this.entityGfx
-          .rect(x - 8, y - 3, 16, 1)
-          .fill({ color: 0xffdd99, alpha: 0.8 });
-        this.entityGfx
-          .rect(x - 8, y + 2, 16, 1)
-          .fill({ color: 0xffdd99, alpha: 0.8 });
-        this.entityGfx
-          .circle(x - 8, y, 3)
-          .fill({ color: 0xffff88, alpha: 0.95 });
-        break;
-      default:
-        this.entityGfx
-          .rect(x - 4, y - 6, 8, 12)
-          .fill({ color: 0xffffff, alpha: 0.9 });
+  private drawHeartPowerUp(x: number, y: number, color: number): void {
+    // Heart = two circles + a downward-pointing triangle. Position tuned so
+    // the two lobes read clearly at 24x24.
+    this.entityGfx.circle(x - 4, y - 3, 5).fill({ color });
+    this.entityGfx.circle(x + 4, y - 3, 5).fill({ color });
+    this.entityGfx
+      .poly([x - 8, y - 1, x + 8, y - 1, x, y + 9])
+      .fill({ color });
+    // Highlight spark on the upper-left lobe for depth.
+    this.entityGfx.circle(x - 5, y - 4, 1.5).fill({ color: 0xffffff, alpha: 0.85 });
+  }
+
+  private drawCrossPowerUp(x: number, y: number, color: number): void {
+    // Medical cross — two rectangles forming a plus sign.
+    const arm = 3;
+    const len = 10;
+    this.entityGfx.rect(x - arm, y - len, arm * 2, len * 2).fill({ color });
+    this.entityGfx.rect(x - len, y - arm, len * 2, arm * 2).fill({ color });
+    // Thin stroke in white for contrast on dark bg.
+    this.entityGfx
+      .rect(x - arm, y - len, arm * 2, len * 2)
+      .stroke({ color: 0xffffff, width: 1, alpha: 0.6 });
+    this.entityGfx
+      .rect(x - len, y - arm, len * 2, arm * 2)
+      .stroke({ color: 0xffffff, width: 1, alpha: 0.6 });
+  }
+
+  private drawPentagonPowerUp(x: number, y: number, color: number, tSec: number): void {
+    // Slowly rotating pentagon with an inner ring — shield identity.
+    const rot = tSec * 0.6;
+    const r = 10;
+    const pts: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const a = rot + i * ((Math.PI * 2) / 5) - Math.PI / 2;
+      pts.push(x + Math.cos(a) * r, y + Math.sin(a) * r);
+    }
+    this.entityGfx.poly(pts).fill({ color, alpha: 0.85 });
+    this.entityGfx.poly(pts).stroke({ color: 0xffffff, width: 1.5, alpha: 0.9 });
+    this.entityGfx.circle(x, y, 4).stroke({ color: 0xffffff, width: 1.5, alpha: 0.9 });
+  }
+
+  private drawChevronPowerUp(x: number, y: number, color: number): void {
+    // Up-chevron (weapon upgrade = tier up). Two stacked triangles.
+    this.entityGfx
+      .poly([x - 9, y + 2, x, y - 7, x + 9, y + 2, x + 5, y + 2, x, y - 2, x - 5, y + 2])
+      .fill({ color });
+    this.entityGfx
+      .poly([x - 9, y + 8, x, y - 1, x + 9, y + 8, x + 5, y + 8, x, y + 4, x - 5, y + 8])
+      .fill({ color, alpha: 0.85 });
+  }
+
+  private drawTridentPowerUp(x: number, y: number, color: number): void {
+    // Three-prong fan — spread shot identity.
+    for (let i = -1; i <= 1; i++) {
+      const tipX = x + i * 6;
+      this.entityGfx
+        .poly([tipX - 2, y + 8, tipX + 2, y + 8, tipX, y - 9])
+        .fill({ color });
+    }
+    this.entityGfx.rect(x - 7, y + 6, 14, 3).fill({ color });
+  }
+
+  private drawCrosshairPowerUp(x: number, y: number, color: number): void {
+    // Circle + crosshair reticle — bomb identity.
+    this.entityGfx.circle(x, y, 9).stroke({ color, width: 2 });
+    this.entityGfx.circle(x, y, 5).fill({ color, alpha: 0.7 });
+    this.entityGfx.rect(x - 10, y - 0.5, 7, 1.5).fill({ color });
+    this.entityGfx.rect(x + 3, y - 0.5, 7, 1.5).fill({ color });
+    this.entityGfx.rect(x - 0.5, y - 10, 1.5, 7).fill({ color });
+    this.entityGfx.rect(x - 0.5, y + 3, 1.5, 7).fill({ color });
+  }
+
+  private drawDiamondPowerUp(x: number, y: number, color: number, intensity: number): void {
+    // Rotated square (diamond) with a beam stripe — mega-laser identity.
+    const r = 10;
+    this.entityGfx
+      .poly([x, y - r, x + r, y, x, y + r, x - r, y])
+      .fill({ color, alpha: 0.3 + intensity * 0.5 });
+    this.entityGfx
+      .poly([x, y - r, x + r, y, x, y + r, x - r, y])
+      .stroke({ color: 0xffffff, width: 1.5 });
+    // Horizontal beam stripe through the centre.
+    this.entityGfx.rect(x - r, y - 1, r * 2, 2).fill({ color: 0xffffff, alpha: 0.9 });
+  }
+
+  private drawDoubleChevronPowerUp(x: number, y: number, color: number): void {
+    // Double chevron "≫" — speed identity.
+    for (let i = 0; i < 2; i++) {
+      const ox = -5 + i * 6;
+      this.entityGfx
+        .poly([x + ox - 4, y - 7, x + ox + 4, y, x + ox - 4, y + 7, x + ox - 1, y, x + ox - 4, y - 3])
+        .fill({ color });
     }
   }
 
