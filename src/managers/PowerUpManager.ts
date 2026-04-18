@@ -2,8 +2,7 @@
  * PowerUpManager.ts – Manages power-up lifecycle, collision detection, and effect application.
  *
  * Responsibilities:
- *  - Spawn power-ups on enemy defeat using weighted probability:
- *      weapon-upgrade 40%, shield 30%, extra-life 20%, health-recovery 10%
+ *  - Spawn power-ups on enemy defeat using weighted probability (see SPAWN_WEIGHTS).
  *  - Advance power-up positions each frame with a slight upward float velocity.
  *  - Despawn uncollected power-ups after 5 seconds.
  *  - Detect player–power-up collisions via CollisionSystem.
@@ -11,6 +10,8 @@
  *  - Call playerManager.applyPowerUp() on collection.
  *  - Track shieldsCollected, extraLivesCollected, and gunUpgradeAchieved in RunStats.
  *  - Emit VisualFeedbackEvents for the rendering layer to consume.
+ *
+ * RNG can be injected via the constructor for deterministic tests; defaults to Math.random.
  *
  * This module has NO dependency on Pixi.js and is safe to use in the Node test environment.
  * Pixi.js rendering for power-ups lives in src/rendering/PowerUpRenderer.ts.
@@ -44,25 +45,54 @@ export const FLOAT_VX = -160; // px/s
 export const FLOAT_VY = 0;
 
 /**
- * Weighted spawn probability table (cumulative thresholds):
- *   weapon-upgrade  → 40%  (roll < 0.40)
- *   shield          → 30%  (roll < 0.70)
- *   extra-life      → 20%  (roll < 0.90)
- *   health-recovery → 10%  (roll < 1.00)
+ * Weighted spawn probability table.
+ *
+ * `weight` values are non-negative numbers that are normalised per-roll — they
+ * don't have to sum to 1. This lets us adjust a single entry (e.g. boosting
+ * extra-life via the pity mechanic) without rebalancing all the others.
+ *
+ * Declared weights (sum to 1.0 for readability):
+ *   weapon-upgrade   22%
+ *   shield           18%
+ *   health-recovery  15%
+ *   weapon-spread    10%
+ *   weapon-bomb      10%
+ *   speed-boost      10%
+ *   mega-laser        8%
+ *   extra-life        7%  (can be boosted by pity — see PITY_*)
  */
 export const SPAWN_WEIGHTS: ReadonlyArray<{
   type: PowerUpType;
-  cumulative: number;
+  weight: number;
 }> = [
-  { type: "weapon-upgrade", cumulative: 0.30 },
-  { type: "shield", cumulative: 0.48 },
-  { type: "extra-life", cumulative: 0.62 },
-  { type: "health-recovery", cumulative: 0.72 },
-  { type: "speed-boost", cumulative: 0.81 },
-  { type: "weapon-spread", cumulative: 0.88 },
-  { type: "weapon-bomb", cumulative: 0.95 },
-  { type: "mega-laser", cumulative: 1.0 }, // rare
+  { type: "weapon-upgrade", weight: 0.22 },
+  { type: "shield", weight: 0.18 },
+  { type: "health-recovery", weight: 0.15 },
+  { type: "weapon-spread", weight: 0.10 },
+  { type: "weapon-bomb", weight: 0.10 },
+  { type: "speed-boost", weight: 0.10 },
+  { type: "mega-laser", weight: 0.08 },
+  { type: "extra-life", weight: 0.07 },
 ];
+
+/**
+ * After this many milliseconds without an extra-life spawn, the extra-life
+ * weight is linearly scaled up on each roll until one drops. Prevents true-RNG
+ * droughts in long runs without making extra-life common in short ones.
+ */
+export const PITY_EXTRA_LIFE_THRESHOLD_MS = 90_000;
+
+/**
+ * Maximum multiplier applied to the extra-life weight once pity has been
+ * accumulating for PITY_EXTRA_LIFE_FULL_MS past the threshold.
+ */
+export const PITY_EXTRA_LIFE_MAX_MULTIPLIER = 5;
+
+/** Full-pity point: threshold + this many ms = max multiplier. */
+export const PITY_EXTRA_LIFE_FULL_MS = 60_000;
+
+/** Injectable random source; must return a value in [0, 1). */
+export type Rng = () => number;
 
 // ── Visual feedback types ──────────────────────────────────────────────────────
 
@@ -243,6 +273,13 @@ export class PowerUpManager {
   private readonly powerUps: PowerUp[] = [];
   private readonly collisionSystem: CollisionSystem;
   private readonly pendingFeedback: VisualFeedbackEvent[] = [];
+  private readonly rng: Rng;
+
+  /**
+   * Time since the last extra-life was spawned. Drives the pity multiplier in
+   * onEnemyDefeated. Reset to 0 whenever an extra-life actually drops.
+   */
+  private msSinceLastExtraLifeSpawn = 0;
 
   /**
    * Set to `true` by checkAndApply() whenever at least one power-up is
@@ -257,8 +294,9 @@ export class PowerUpManager {
    */
   private _statsDirty = false;
 
-  constructor() {
+  constructor(rng: Rng = Math.random) {
     this.collisionSystem = new CollisionSystem();
+    this.rng = rng;
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────────
@@ -270,6 +308,7 @@ export class PowerUpManager {
     this.powerUps.length = 0;
     this.pendingFeedback.length = 0;
     this._statsDirty = false;
+    this.msSinceLastExtraLifeSpawn = 0;
     _globalNextId = 0; // reset for deterministic IDs across instances
   }
 
@@ -279,22 +318,52 @@ export class PowerUpManager {
    * Called when an enemy is defeated.  Randomly selects a power-up type
    * based on the weighted table and spawns it at the enemy's position.
    *
-   * The random roll always hits one of the four types (total probability = 1.0),
-   * so a power-up is guaranteed on every enemy defeat.
+   * A power-up is guaranteed on every enemy defeat. Extra-life weight is
+   * scaled up by the pity mechanic once `msSinceLastExtraLifeSpawn` exceeds
+   * PITY_EXTRA_LIFE_THRESHOLD_MS, ramping to PITY_EXTRA_LIFE_MAX_MULTIPLIER
+   * over PITY_EXTRA_LIFE_FULL_MS. Pity resets when an extra-life drops.
    *
    * To skip spawning (e.g. boss defeats that use a different drop table),
    * the caller simply doesn't invoke this method.
    */
   onEnemyDefeated(x: number, y: number): void {
-    const roll = Math.random();
+    const type = this.rollType();
+    this.spawnPowerUp(type, x, y);
+  }
+
+  /**
+   * Picks a PowerUpType from SPAWN_WEIGHTS using the injected RNG, with
+   * extra-life pity scaling applied. Exposed for testability.
+   */
+  rollType(): PowerUpType {
+    const pityMult = this.extraLifePityMultiplier();
+
+    let total = 0;
     for (const entry of SPAWN_WEIGHTS) {
-      if (roll < entry.cumulative) {
-        this.spawnPowerUp(entry.type, x, y);
-        return;
-      }
+      total += entry.type === "extra-life" ? entry.weight * pityMult : entry.weight;
     }
-    // Fallback — should never trigger with a full-coverage table
-    this.spawnPowerUp("health-recovery", x, y);
+
+    const roll = this.rng() * total;
+    let accum = 0;
+    for (const entry of SPAWN_WEIGHTS) {
+      const w = entry.type === "extra-life" ? entry.weight * pityMult : entry.weight;
+      accum += w;
+      if (roll < accum) return entry.type;
+    }
+    // Floating-point safety net — roll should never land beyond `total`.
+    return SPAWN_WEIGHTS[SPAWN_WEIGHTS.length - 1]!.type;
+  }
+
+  /**
+   * Current extra-life weight multiplier driven by the pity timer. 1 while
+   * below the threshold, then linearly ramps to PITY_EXTRA_LIFE_MAX_MULTIPLIER
+   * over PITY_EXTRA_LIFE_FULL_MS.
+   */
+  private extraLifePityMultiplier(): number {
+    const over = this.msSinceLastExtraLifeSpawn - PITY_EXTRA_LIFE_THRESHOLD_MS;
+    if (over <= 0) return 1;
+    const t = Math.min(1, over / PITY_EXTRA_LIFE_FULL_MS);
+    return 1 + (PITY_EXTRA_LIFE_MAX_MULTIPLIER - 1) * t;
   }
 
   /**
@@ -314,6 +383,10 @@ export class PowerUpManager {
       isCollected: false,
     };
     this.powerUps.push(powerUp);
+
+    if (type === "extra-life") {
+      this.msSinceLastExtraLifeSpawn = 0;
+    }
   }
 
   // ── Per-frame update ─────────────────────────────────────────────────────────
@@ -335,6 +408,7 @@ export class PowerUpManager {
       pu.position.y += pu.velocity.y * dt;
       pu.lifetime -= deltaTimeMs;
     }
+    this.msSinceLastExtraLifeSpawn += deltaTimeMs;
     this.despawnExpired();
   }
 
