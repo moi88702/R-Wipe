@@ -71,6 +71,30 @@ interface FloatingText {
   vy: number;
 }
 
+export interface StarmapRenderData {
+  readonly sectorName: string;
+  readonly nodes: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly kind: string;
+    readonly x: number;
+    readonly y: number;
+    readonly unlocked: boolean;
+    readonly completed: boolean;
+    readonly current: boolean;
+    readonly selected: boolean;
+  }>;
+  readonly edges: ReadonlyArray<{
+    readonly fromX: number;
+    readonly fromY: number;
+    readonly toX: number;
+    readonly toY: number;
+    readonly unlocked: boolean;
+  }>;
+  readonly credits: number;
+  readonly selectedMissionLabel: string | null;
+}
+
 const COLOR = {
   bg: 0x0a0a14,
   player: 0x00ffff,
@@ -219,6 +243,15 @@ export class GameRenderer {
 
   // Boss name label (shown next to the boss health bar during a boss fight)
   private readonly bossNameText: Text;
+
+  // Starmap (campaign) overlay elements.
+  private readonly starmapGfx: Graphics;
+  private readonly starmapTitle: Text;
+  private readonly starmapSelectedName: Text;
+  private readonly starmapMissionLabel: Text;
+  private readonly starmapCreditsText: Text;
+  private readonly starmapPrompt: Text;
+  private readonly starmapNodeLabels: Text[] = [];
 
   constructor(app: Application, width: number, height: number) {
     this.app = app;
@@ -522,6 +555,66 @@ export class GameRenderer {
     this.bannerSubText.visible = false;
     this.fxLayer.addChild(this.bannerSubText);
 
+    // Starmap overlay — drawn into its own Graphics layer that lives under
+    // the text labels. Nodes + edges are rebuilt every frame from extras.
+    this.starmapGfx = new Graphics();
+    this.menuLayer.addChild(this.starmapGfx);
+
+    this.starmapTitle = new Text({
+      text: "",
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: 40,
+        fill: COLOR.hudCyan,
+        fontWeight: "bold",
+      }),
+    });
+    this.starmapTitle.anchor.set(0.5, 0);
+    this.starmapTitle.x = width / 2;
+    this.starmapTitle.y = 24;
+    this.starmapTitle.visible = false;
+    this.menuLayer.addChild(this.starmapTitle);
+
+    this.starmapSelectedName = new Text({
+      text: "",
+      style: hudStyle(COLOR.hudAmber, 22),
+    });
+    this.starmapSelectedName.anchor.set(0.5, 1);
+    this.starmapSelectedName.x = width / 2;
+    this.starmapSelectedName.y = height - 76;
+    this.starmapSelectedName.visible = false;
+    this.menuLayer.addChild(this.starmapSelectedName);
+
+    this.starmapMissionLabel = new Text({
+      text: "",
+      style: hudStyle(COLOR.hudWhite, 18),
+    });
+    this.starmapMissionLabel.anchor.set(0.5, 1);
+    this.starmapMissionLabel.x = width / 2;
+    this.starmapMissionLabel.y = height - 50;
+    this.starmapMissionLabel.visible = false;
+    this.menuLayer.addChild(this.starmapMissionLabel);
+
+    this.starmapCreditsText = new Text({
+      text: "",
+      style: hudStyle(COLOR.hudAmber, 18),
+    });
+    this.starmapCreditsText.anchor.set(1, 0);
+    this.starmapCreditsText.x = width - 24;
+    this.starmapCreditsText.y = 24;
+    this.starmapCreditsText.visible = false;
+    this.menuLayer.addChild(this.starmapCreditsText);
+
+    this.starmapPrompt = new Text({
+      text: "↑↓ SELECT   ENTER  LAUNCH   ESC  BACK",
+      style: hudStyle(COLOR.hudWhite, 14),
+    });
+    this.starmapPrompt.anchor.set(0.5, 1);
+    this.starmapPrompt.x = width / 2;
+    this.starmapPrompt.y = height - 20;
+    this.starmapPrompt.visible = false;
+    this.menuLayer.addChild(this.starmapPrompt);
+
     this.initStarfield();
   }
 
@@ -570,6 +663,7 @@ export class GameRenderer {
       menuSelection: number;
       lastRun: Readonly<RunStats> | null;
       bombCredits: number;
+      starmap: StarmapRenderData | null;
     },
   ): void {
     this.drawStarfield(deltaMs);
@@ -584,10 +678,11 @@ export class GameRenderer {
     const isStats = screen === "stats";
     const isMenu = screen === "main-menu";
     const isGameOver = screen === "game-over";
+    const isStarmap = screen === "starmap";
     // Gameplay entities stay visible behind the pause overlay.
     const drawsEntities = isGameplay || isPause;
 
-    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats;
+    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap;
     this.titleText.visible = isMenu;
     this.subtitleText.visible = isMenu;
     this.promptText.visible = isMenu || isPause;
@@ -604,7 +699,15 @@ export class GameRenderer {
     this.statsColLast.visible = isStats;
     this.statsColAllTime.visible = isStats;
     this.statsPrompt.visible = isStats;
-    // Menu list items: used by main-menu (2) and pause (3); hidden on stats.
+    // Starmap overlay toggles
+    this.starmapTitle.visible = isStarmap;
+    this.starmapSelectedName.visible = isStarmap;
+    this.starmapMissionLabel.visible = isStarmap;
+    this.starmapCreditsText.visible = isStarmap;
+    this.starmapPrompt.visible = isStarmap;
+    for (const t of this.starmapNodeLabels) t.visible = isStarmap;
+    if (!isStarmap) this.starmapGfx.clear();
+    // Menu list items: used by main-menu (3) and pause (3); hidden on stats / starmap.
     const showList = isMenu || isPause;
     for (const t of this.menuItemTexts) t.visible = showList;
 
@@ -621,6 +724,11 @@ export class GameRenderer {
     if (isStats) {
       this.updateStatsScreen(state, extras.lastRun);
       this.statsPrompt.alpha = 0.6 + 0.4 * Math.sin(performance.now() * 0.004);
+      return;
+    }
+
+    if (isStarmap && extras.starmap) {
+      this.drawStarmap(extras.starmap);
       return;
     }
 
@@ -1864,10 +1972,92 @@ export class GameRenderer {
     this.bombsText.text = bombCredits > 0 ? `BOMBS ${bombCredits}` : "";
   }
 
-  /** Populates the 2-item main-menu list and highlights the selected one. */
+  /**
+   * Draws the campaign starmap: node dots + connecting paths + labels.
+   *
+   * Edges go first so dots draw on top. Locked nodes are rendered dimmed,
+   * the current node has an outer halo, and the selected node gets a
+   * thicker amber ring.
+   */
+  private drawStarmap(data: StarmapRenderData): void {
+    const g = this.starmapGfx;
+    g.clear();
+
+    // Edges
+    for (const e of data.edges) {
+      const color = e.unlocked ? 0x446688 : 0x223344;
+      const alpha = e.unlocked ? 0.75 : 0.35;
+      g.moveTo(e.fromX, e.fromY).lineTo(e.toX, e.toY).stroke({ color, width: 2, alpha });
+    }
+
+    // Nodes — one circle per node, with halo / rings layered as needed.
+    for (const n of data.nodes) {
+      const baseColor = n.completed
+        ? 0x44cc66
+        : n.unlocked
+          ? 0x33ccff
+          : 0x556677;
+      const alpha = n.unlocked ? 1 : 0.45;
+
+      if (n.current) {
+        g.circle(n.x, n.y, 22).fill({ color: 0x336699, alpha: 0.35 });
+      }
+      if (n.selected) {
+        g.circle(n.x, n.y, 18).stroke({ color: COLOR.hudAmber, width: 3, alpha: 1 });
+      }
+      g.circle(n.x, n.y, 10).fill({ color: baseColor, alpha });
+      g.circle(n.x, n.y, 10).stroke({ color: 0xffffff, width: 1, alpha: alpha * 0.7 });
+    }
+
+    // Node labels — reuse a pool of Text objects sized to the node list.
+    while (this.starmapNodeLabels.length < data.nodes.length) {
+      const t = new Text({
+        text: "",
+        style: new TextStyle({
+          fontFamily: "monospace",
+          fontSize: 14,
+          fill: COLOR.hudWhite,
+          fontWeight: "bold",
+        }),
+      });
+      t.anchor.set(0.5, 0);
+      this.menuLayer.addChild(t);
+      this.starmapNodeLabels.push(t);
+    }
+    for (let i = 0; i < this.starmapNodeLabels.length; i++) {
+      const t = this.starmapNodeLabels[i]!;
+      const n = data.nodes[i];
+      if (!n) {
+        t.visible = false;
+        continue;
+      }
+      t.visible = true;
+      t.text = n.unlocked ? n.name : "???";
+      t.style.fill = n.selected ? COLOR.hudAmber : n.completed ? 0x99ffaa : COLOR.hudWhite;
+      t.alpha = n.unlocked ? 1 : 0.5;
+      t.x = n.x;
+      t.y = n.y + 18;
+    }
+
+    this.starmapTitle.text = data.sectorName.toUpperCase();
+    this.starmapCreditsText.text = `CREDITS ${data.credits}`;
+
+    const selected = data.nodes.find((n) => n.selected);
+    if (selected) {
+      this.starmapSelectedName.text = selected.unlocked
+        ? `${selected.name.toUpperCase()}  —  ${selected.kind.replace(/-/g, " ").toUpperCase()}`
+        : "UNDISCOVERED";
+      this.starmapMissionLabel.text = data.selectedMissionLabel ?? "";
+    } else {
+      this.starmapSelectedName.text = "";
+      this.starmapMissionLabel.text = "";
+    }
+  }
+
+  /** Populates the 3-item main-menu list and highlights the selected one. */
   private updateMainMenu(selectedIdx: number): void {
-    const items = ["PLAY", "STATS"];
-    this.renderMenuList(items, selectedIdx, this.height / 2 + 80, 46);
+    const items = ["PLAY", "CAMPAIGN", "STATS"];
+    this.renderMenuList(items, selectedIdx, this.height / 2 + 70, 42);
   }
 
   /** Populates the 3-item pause-menu list and highlights the selected one. */
