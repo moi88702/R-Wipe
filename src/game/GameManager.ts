@@ -14,13 +14,17 @@ import { PlayerManager } from "../managers/PlayerManager";
 import { EnemyManager } from "../managers/EnemyManager";
 import { LevelManager } from "../managers/LevelManager";
 import { PowerUpManager } from "../managers/PowerUpManager";
+import { OverworldManager } from "../managers/OverworldManager";
+import { missionToLevelState } from "../managers/MissionManager";
 import { CollisionSystem } from "../systems/CollisionSystem";
 import { GameRenderer } from "../rendering/GameRenderer";
+import type { MissionId, NodeId } from "../types/campaign";
+import { STARTER_SECTOR } from "./campaign/StarterSector";
 
 /** Menu item ids used by updateMenu / updatePause. */
-type MainMenuItem = "play" | "stats";
+type MainMenuItem = "play" | "campaign" | "stats";
 type PauseMenuItem = "continue" | "stats" | "quit";
-const MAIN_MENU_ITEMS: readonly MainMenuItem[] = ["play", "stats"];
+const MAIN_MENU_ITEMS: readonly MainMenuItem[] = ["play", "campaign", "stats"];
 const PAUSE_MENU_ITEMS: readonly PauseMenuItem[] = ["continue", "stats", "quit"];
 
 export interface GameManagerOptions {
@@ -43,9 +47,19 @@ export class GameManager {
   private readonly powerUps: PowerUpManager;
   private readonly collisions: CollisionSystem;
   private readonly renderer: GameRenderer;
+  private readonly overworld: OverworldManager;
 
   private safeTimerMs = 0;
   private menuDebounceMs = 0;
+
+  /**
+   * When non-null, gameplay is inside a campaign mission. Level-clear and
+   * game-over branches both return to the starmap instead of advancing the
+   * arcade level counter. Cleared when the mission resolves.
+   */
+  private activeMissionId: MissionId | null = null;
+  /** Starmap selection index into `overworld.getSector().nodes`. */
+  private starmapSelection = 0;
 
   // Edge-triggered menu input tracking. `prev*` mirrors last frame's poll.
   private prevPausePressed = false;
@@ -86,6 +100,13 @@ export class GameManager {
     this.powerUps = new PowerUpManager();
     this.collisions = new CollisionSystem();
     this.renderer = new GameRenderer(app, opts.width, opts.height);
+    this.overworld = new OverworldManager(STARTER_SECTOR);
+    try {
+      this.overworld.load();
+    } catch {
+      // Corrupt / incompatible save — start fresh rather than crashing.
+      this.overworld.clearSaved();
+    }
   }
 
   /**
@@ -114,6 +135,8 @@ export class GameManager {
       this.updateStats();
     } else if (screen === "game-over") {
       this.updateGameOver();
+    } else if (screen === "starmap") {
+      this.updateStarmap();
     }
 
     // Commit edge-trigger prev-state AFTER all update*() have consumed edges.
@@ -178,6 +201,8 @@ export class GameManager {
       const pick = MAIN_MENU_ITEMS[this.menuSelection]!;
       if (pick === "play") {
         this.startNewRun();
+      } else if (pick === "campaign") {
+        this.openStarmap();
       } else {
         this.openStats("main-menu");
       }
@@ -241,6 +266,109 @@ export class GameManager {
     }
   }
 
+  // ── Screen: starmap (campaign overworld) ─────────────────────────────────
+
+  /** Open the starmap, seeding the selection at the player's current node. */
+  private openStarmap(): void {
+    const nodeIds = this.getStarmapNodeIds();
+    const currentId = this.overworld.getState().currentNodeId;
+    const idx = nodeIds.indexOf(currentId);
+    this.starmapSelection = idx >= 0 ? idx : 0;
+    this.menuSelection = 0;
+    this.menuDebounceMs = MENU_DEBOUNCE_MS;
+    this.state.setScreen("starmap");
+  }
+
+  private updateStarmap(): void {
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.state.setScreen("main-menu");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+
+    const nodeIds = this.getStarmapNodeIds();
+    const input = this.input.poll();
+    const upEdge = input.moveUp && !this.prevUpPressed;
+    const downEdge = input.moveDown && !this.prevDownPressed;
+    const len = nodeIds.length;
+    if (len > 0) {
+      if (upEdge) {
+        this.starmapSelection = (this.starmapSelection - 1 + len) % len;
+      } else if (downEdge) {
+        this.starmapSelection = (this.starmapSelection + 1) % len;
+      }
+    }
+
+    if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0 && len > 0) {
+      const nodeId = nodeIds[this.starmapSelection]!;
+      // Move the campaign cursor to the selected node, then pick the first
+      // available (un-cleared) mission there. If everything is cleared, do
+      // nothing — the starmap remains open.
+      this.overworld.moveTo(nodeId);
+      const missions = this.overworld.getAvailableMissionsAtNode(nodeId);
+      const mission = missions[0];
+      if (mission) {
+        this.startCampaignMission(mission.id);
+      }
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+    }
+  }
+
+  /** Node ids the player can currently see on the starmap, in sector order. */
+  private getStarmapNodeIds(): NodeId[] {
+    const sector = this.overworld.getSector();
+    const unlocked = new Set(this.overworld.getState().unlockedNodeIds);
+    return Object.keys(sector.nodes).filter((id) => unlocked.has(id)) as NodeId[];
+  }
+
+  /**
+   * Launches the selected mission: resolves it through the overworld manager,
+   * builds a LevelState via missionToLevelState, and drops into gameplay.
+   */
+  private startCampaignMission(missionId: MissionId): void {
+    const result = this.overworld.startMission(missionId);
+    if (!result.ok || !result.spec) return;
+    this.activeMissionId = missionId;
+    const levelState = missionToLevelState(result.spec);
+    this.state.updateLevelState(levelState);
+    this.startNewRun();
+    // Re-apply the mission-specific level state; startNewRun() doesn't touch it
+    // but resetRunStats + level.startLevel do — make sure the mission roster
+    // and difficulty survive that reset.
+    this.state.updateLevelState(levelState);
+    this.level.startLevel(this.state.getGameState().levelState, this.enemies);
+    const bossDef = this.enemies.resolveBossDefForLevel(levelState.levelNumber);
+    this.renderer.showLevelBanner(
+      result.spec.name.toUpperCase(),
+      `BOSS: ${bossDef.displayName}`,
+      1_400,
+    );
+  }
+
+  /**
+   * Called from the level-clear path when a campaign mission is active:
+   * records the completion, saves progress, and returns to the starmap.
+   */
+  private completeActiveMission(): void {
+    const missionId = this.activeMissionId;
+    if (!missionId) return;
+    const outcome = this.overworld.completeMission(missionId);
+    try {
+      this.overworld.save();
+    } catch {
+      // Save is best-effort — don't crash gameplay if storage is unavailable.
+    }
+    this.activeMissionId = null;
+    // Reset transient gameplay timers so the next mission starts clean.
+    this.levelTransitionMs = 0;
+    this.deathAnimationMs = 0;
+    // Fold the mission's stats into all-time tallies so campaign play
+    // still counts in the stats screen.
+    this.state.finalizeRun("level-timeout");
+    void outcome;
+    this.openStarmap();
+  }
+
   // ── Run lifecycle ────────────────────────────────────────────────────────
 
   private startNewRun(): void {
@@ -301,6 +429,13 @@ export class GameManager {
 
   private gameOver(): void {
     this.state.finalizeRun("no-lives");
+    // Campaign mission failures drop the player back on the starmap so they
+    // can retry without losing the sector's progress.
+    if (this.activeMissionId) {
+      this.activeMissionId = null;
+      this.openStarmap();
+      return;
+    }
     this.state.setScreen("game-over");
     this.menuDebounceMs = MENU_DEBOUNCE_MS;
     this.renderer.beginGameOverFade();
@@ -346,7 +481,13 @@ export class GameManager {
       this.powerUps.update(deltaMs);
       if (this.levelTransitionMs <= 0) {
         this.levelTransitionMs = 0;
-        this.startNextLevel();
+        // Campaign missions return to the starmap after a clear instead of
+        // advancing the arcade level counter.
+        if (this.activeMissionId) {
+          this.completeActiveMission();
+        } else {
+          this.startNextLevel();
+        }
       }
       return;
     }
@@ -852,7 +993,87 @@ export class GameManager {
       menuSelection: this.menuSelection,
       lastRun: this.state.getLastRun(),
       bombCredits: this.player.getBombCredits(),
+      starmap: state.screen === "starmap" ? this.buildStarmapExtras() : null,
     });
+  }
+
+  /** Collects the data the renderer needs to draw the starmap screen. */
+  private buildStarmapExtras(): {
+    sectorName: string;
+    nodes: ReadonlyArray<{
+      id: NodeId;
+      name: string;
+      kind: string;
+      x: number;
+      y: number;
+      unlocked: boolean;
+      completed: boolean;
+      current: boolean;
+      selected: boolean;
+    }>;
+    edges: ReadonlyArray<{ fromX: number; fromY: number; toX: number; toY: number; unlocked: boolean }>;
+    credits: number;
+    selectedMissionLabel: string | null;
+  } {
+    const sector = this.overworld.getSector();
+    const state = this.overworld.getState();
+    const visibleIds = this.getStarmapNodeIds();
+    const selectedId = visibleIds[this.starmapSelection];
+    const unlockedSet = new Set(state.unlockedNodeIds);
+    const completedMissions = new Set(state.completedMissionIds);
+
+    const nodes = Object.values(sector.nodes).map((n) => {
+      const missionsHere = n.missionIds;
+      const allCleared = missionsHere.length > 0 &&
+        missionsHere.every((id) => completedMissions.has(id));
+      return {
+        id: n.id,
+        name: n.name,
+        kind: n.kind,
+        x: n.position.x,
+        y: n.position.y,
+        unlocked: unlockedSet.has(n.id),
+        completed: allCleared,
+        current: state.currentNodeId === n.id,
+        selected: selectedId === n.id,
+      };
+    });
+
+    const edges: {
+      fromX: number; fromY: number; toX: number; toY: number; unlocked: boolean;
+    }[] = [];
+    for (const from of Object.values(sector.nodes)) {
+      for (const toId of from.unlocksNodeIds) {
+        const to = sector.nodes[toId];
+        if (!to) continue;
+        edges.push({
+          fromX: from.position.x,
+          fromY: from.position.y,
+          toX: to.position.x,
+          toY: to.position.y,
+          unlocked: unlockedSet.has(from.id) && unlockedSet.has(to.id),
+        });
+      }
+    }
+
+    let selectedMissionLabel: string | null = null;
+    if (selectedId) {
+      const missions = this.overworld.getAvailableMissionsAtNode(selectedId);
+      const first = missions[0];
+      if (first) {
+        selectedMissionLabel = `${first.name.toUpperCase()}   ★${first.difficulty}   ${first.rewardCredits}¢`;
+      } else if (unlockedSet.has(selectedId)) {
+        selectedMissionLabel = "— CLEARED —";
+      }
+    }
+
+    return {
+      sectorName: sector.name,
+      nodes,
+      edges,
+      credits: state.inventory.credits,
+      selectedMissionLabel,
+    };
   }
 }
 

@@ -451,7 +451,8 @@ export type ScreenType =
   | "level-clear"
   | "game-over"
   | "stats"
-  | "pause";
+  | "pause"
+  | "starmap";
 
 /**
  * Dev-only cheat payload parsed from URL query params. Every field is optional
