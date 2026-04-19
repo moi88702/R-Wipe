@@ -23,6 +23,12 @@ export interface InputState {
    * game-space each frame instead of using WASD. Null when no finger is down.
    */
   touchTarget?: { x: number; y: number } | null;
+  /** Current cursor / primary-touch position in game coords. */
+  pointer?: { x: number; y: number } | null;
+  /** One-frame pulse: a click/tap just landed this frame. */
+  pointerDownPulse?: { x: number; y: number } | null;
+  /** True whenever the primary pointer is pressed (mouse button or finger). */
+  pointerHeld?: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -452,7 +458,8 @@ export type ScreenType =
   | "game-over"
   | "stats"
   | "pause"
-  | "starmap";
+  | "starmap"
+  | "shipyard";
 
 /**
  * Dev-only cheat payload parsed from URL query params. Every field is optional

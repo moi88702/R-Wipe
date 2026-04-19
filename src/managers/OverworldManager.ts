@@ -267,6 +267,22 @@ export class OverworldManager {
     return true;
   }
 
+  /**
+   * Equip + unlock in a single step. Used by the shipyard, where player-authored
+   * blueprints may not come through the reward pipeline. Distinct from
+   * `equipBlueprint` so a reward-only flow can still gate on unlock state.
+   */
+  equipBlueprintForced(blueprintId: string | null): void {
+    const inv = this.state.inventory;
+    const blueprints = blueprintId !== null && !inv.blueprints.includes(blueprintId)
+      ? [...inv.blueprints, blueprintId]
+      : inv.blueprints;
+    this.state = {
+      ...this.state,
+      inventory: { ...inv, blueprints, equippedBlueprintId: blueprintId },
+    };
+  }
+
   // ── Persistence ──────────────────────────────────────────────────────────
 
   save(): void {
