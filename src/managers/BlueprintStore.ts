@@ -14,8 +14,10 @@ import {
   VersionedSlot,
 } from "../services/LocalStorageService";
 
-export const BLUEPRINT_SCHEMA_VERSION = 1 as const;
-export const BLUEPRINT_STORAGE_KEY = "rwipe.blueprints.v1";
+export const BLUEPRINT_SCHEMA_VERSION = 2 as const;
+export const BLUEPRINT_STORAGE_KEY = "rwipe.blueprints.v2";
+/** Legacy key from the pre-power-core schema. Deleted on first load. */
+const BLUEPRINT_LEGACY_KEY = "rwipe.blueprints.v1";
 
 interface BlueprintPayload {
   blueprints: Blueprint[];
@@ -57,14 +59,23 @@ function isPayload(raw: unknown): raw is BlueprintPayload {
 export class BlueprintStore {
   private blueprints: Blueprint[] = [];
   private readonly slot: VersionedSlot<BlueprintPayload>;
+  private readonly backend: StorageBackend | null;
 
   constructor(storage?: StorageBackend | null) {
+    this.backend = storage ?? null;
     this.slot = new VersionedSlot<BlueprintPayload>({
       key: BLUEPRINT_STORAGE_KEY,
       currentVersion: BLUEPRINT_SCHEMA_VERSION,
       storage: storage ?? null,
       validate: isPayload,
     });
+    if (this.backend) {
+      try {
+        this.backend.removeItem(BLUEPRINT_LEGACY_KEY);
+      } catch {
+        // storage disabled / quota — harmless to skip
+      }
+    }
   }
 
   list(): ReadonlyArray<Blueprint> {

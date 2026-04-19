@@ -72,6 +72,8 @@ async function init(): Promise<void> {
 
   // Drag-to-move, hold-to-fire, double-tap-bomb, two-finger-pause.
   game.enableTouchControls(app.canvas);
+  // Mouse pointer for menu screens (shipyard, starmap).
+  game.enablePointerControls(app.canvas);
 
   // Drive the game from Pixi's ticker — deltaMS is the real frame duration in ms.
   app.ticker.add((ticker) => {

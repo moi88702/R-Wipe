@@ -71,23 +71,84 @@ interface FloatingText {
   vy: number;
 }
 
+interface ShipyardRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface ShipyardPaletteTile {
+  readonly partId: string;
+  readonly rect: ShipyardRect;
+  readonly name: string;
+  readonly powerCost: number;
+  readonly powerCapacity: number;
+  readonly visualKind: string;
+  readonly colour: number;
+  readonly shape: { readonly width: number; readonly height: number };
+  readonly category: string;
+  readonly disabled: boolean;
+  readonly isHeld: boolean;
+}
+
 export interface ShipyardRenderData {
-  readonly blueprints: ReadonlyArray<{
-    readonly id: string;
-    readonly name: string;
-    readonly selected: boolean;
-    readonly equipped: boolean;
+  readonly layout: {
+    readonly canvasRect: ShipyardRect;
+    readonly paletteRect: ShipyardRect;
+    readonly statsRect: ShipyardRect;
+    readonly newBtn: ShipyardRect;
+    readonly saveBtn: ShipyardRect;
+    readonly backBtn: ShipyardRect;
+    readonly trashBtn: ShipyardRect;
+  };
+  readonly palette: ReadonlyArray<ShipyardPaletteTile>;
+  readonly ship: {
+    readonly originX: number;
+    readonly originY: number;
+    readonly scale: number;
+    readonly placements: ReadonlyArray<{
+      readonly placedId: string;
+      readonly partId: string;
+      readonly worldX: number;
+      readonly worldY: number;
+      readonly visualKind: string;
+      readonly colour: number;
+      readonly shape: { readonly width: number; readonly height: number };
+      readonly selected: boolean;
+      readonly category: string;
+    }>;
+    readonly sockets: ReadonlyArray<{
+      readonly parentPlacedId: string;
+      readonly socketId: string;
+      readonly screenX: number;
+      readonly screenY: number;
+      readonly highlighted: boolean;
+    }>;
+  };
+  readonly ghost: null | {
+    readonly screenX: number;
+    readonly screenY: number;
+    readonly visualKind: string;
+    readonly colour: number;
+    readonly shape: { readonly width: number; readonly height: number };
+    readonly valid: boolean;
+  };
+  readonly stats: {
     readonly hp: number;
     readonly speed: number;
     readonly damage: number;
+    readonly fireRate: number;
     readonly hitboxW: number;
     readonly hitboxH: number;
+    readonly powerUsed: number;
+    readonly powerCapacity: number;
     readonly cost: number;
-    readonly partCount: number;
-  }>;
-  readonly unlockedPartCount: number;
-  readonly totalPartCount: number;
+  };
+  readonly blueprintName: string;
   readonly credits: number;
+  readonly hasSelection: boolean;
+  readonly heldPartName: string | null;
 }
 
 export interface StarmapRenderData {
@@ -273,11 +334,13 @@ export class GameRenderer {
   private readonly starmapNodeLabels: Text[] = [];
 
   // Shipyard overlay elements.
+  private readonly shipyardGfx: Graphics;
   private readonly shipyardTitle: Text;
   private readonly shipyardStatsText: Text;
   private readonly shipyardSummaryText: Text;
   private readonly shipyardPrompt: Text;
-  private readonly shipyardRowTexts: Text[] = [];
+  private readonly shipyardPaletteLabels: Text[] = [];
+  private readonly shipyardButtonLabels: Text[] = [];
 
   constructor(app: Application, width: number, height: number) {
     this.app = app;
@@ -642,18 +705,21 @@ export class GameRenderer {
     this.menuLayer.addChild(this.starmapPrompt);
 
     // Shipyard overlay
+    this.shipyardGfx = new Graphics();
+    this.menuLayer.addChild(this.shipyardGfx);
+
     this.shipyardTitle = new Text({
       text: "SHIPYARD",
       style: new TextStyle({
         fontFamily: "monospace",
-        fontSize: 40,
+        fontSize: 28,
         fill: COLOR.hudAmber,
         fontWeight: "bold",
       }),
     });
     this.shipyardTitle.anchor.set(0.5, 0);
     this.shipyardTitle.x = width / 2;
-    this.shipyardTitle.y = 24;
+    this.shipyardTitle.y = 18;
     this.shipyardTitle.visible = false;
     this.menuLayer.addChild(this.shipyardTitle);
 
@@ -668,8 +734,8 @@ export class GameRenderer {
       }),
     });
     this.shipyardStatsText.anchor.set(0, 0);
-    this.shipyardStatsText.x = width * 0.55;
-    this.shipyardStatsText.y = 110;
+    this.shipyardStatsText.x = 976;
+    this.shipyardStatsText.y = 118;
     this.shipyardStatsText.visible = false;
     this.menuLayer.addChild(this.shipyardStatsText);
 
@@ -679,17 +745,17 @@ export class GameRenderer {
     });
     this.shipyardSummaryText.anchor.set(0.5, 0);
     this.shipyardSummaryText.x = width / 2;
-    this.shipyardSummaryText.y = 76;
+    this.shipyardSummaryText.y = 56;
     this.shipyardSummaryText.visible = false;
     this.menuLayer.addChild(this.shipyardSummaryText);
 
     this.shipyardPrompt = new Text({
-      text: "↑↓ SELECT   ENTER  EQUIP   ESC  BACK",
+      text: "TAP A PART  •  TAP THE SHIP TO SNAP  •  TAP A PART TO SELECT",
       style: hudStyle(COLOR.hudWhite, 14),
     });
     this.shipyardPrompt.anchor.set(0.5, 1);
     this.shipyardPrompt.x = width / 2;
-    this.shipyardPrompt.y = height - 20;
+    this.shipyardPrompt.y = height - 8;
     this.shipyardPrompt.visible = false;
     this.menuLayer.addChild(this.shipyardPrompt);
 
@@ -792,7 +858,9 @@ export class GameRenderer {
     this.shipyardStatsText.visible = isShipyard;
     this.shipyardSummaryText.visible = isShipyard;
     this.shipyardPrompt.visible = isShipyard;
-    for (const t of this.shipyardRowTexts) t.visible = isShipyard;
+    for (const t of this.shipyardPaletteLabels) t.visible = isShipyard;
+    for (const t of this.shipyardButtonLabels) t.visible = isShipyard;
+    if (!isShipyard) this.shipyardGfx.clear();
     // Menu list items: used by main-menu (3) and pause (3); hidden on stats / starmap.
     const showList = isMenu || isPause;
     for (const t of this.menuItemTexts) t.visible = showList;
@@ -2146,64 +2214,262 @@ export class GameRenderer {
   }
 
   /**
-   * Draws the shipyard browser: a scrollable list of saved blueprints with
-   * a stats panel for the current selection. Selection is amber, equipped
-   * is tagged [EQUIPPED], others are white.
+   * Draws the visual shipyard builder: parts palette on the left, ship canvas
+   * in the centre (with placements, open sockets, and an optional drag-ghost),
+   * a stats sheet on the right, and action buttons along the bottom.
    */
   private drawShipyard(data: ShipyardRenderData): void {
-    // Text pool grows to match the blueprint count.
-    while (this.shipyardRowTexts.length < data.blueprints.length) {
+    const g = this.shipyardGfx;
+    g.clear();
+
+    // ── Panel backgrounds ─────────────────────────────────────────────────
+    const { layout } = data;
+    this.drawPanelRect(g, layout.paletteRect, 0x0e1a2e, 0x2a466b);
+    this.drawPanelRect(g, layout.canvasRect, 0x0a1020, 0x2a466b);
+    this.drawPanelRect(g, layout.statsRect, 0x0e1a2e, 0x2a466b);
+
+    // ── Palette tiles ─────────────────────────────────────────────────────
+    this.ensureTextPool(this.shipyardPaletteLabels, data.palette.length, 12);
+    for (let i = 0; i < this.shipyardPaletteLabels.length; i++) {
+      const label = this.shipyardPaletteLabels[i]!;
+      const tile = data.palette[i];
+      if (!tile) {
+        label.visible = false;
+        continue;
+      }
+      label.visible = true;
+
+      const { rect } = tile;
+      const border = tile.isHeld
+        ? COLOR.hudAmber
+        : tile.disabled
+          ? 0x444a5a
+          : 0x5a7aa0;
+      const fill = tile.isHeld ? 0x2a2a10 : 0x050a14;
+      g.rect(rect.x, rect.y, rect.w, rect.h)
+        .fill({ color: fill, alpha: tile.disabled ? 0.5 : 1 })
+        .stroke({ color: border, width: tile.isHeld ? 2 : 1 });
+
+      // Part silhouette preview — centred in the upper two-thirds of the tile.
+      const previewMax = Math.min(rect.w - 14, rect.h - 28);
+      const maxShape = Math.max(tile.shape.width, tile.shape.height);
+      const scale = previewMax / maxShape;
+      const cx = rect.x + rect.w / 2;
+      const cy = rect.y + rect.h / 2 - 8;
+      this.drawPartVisual(
+        g,
+        tile.visualKind,
+        cx,
+        cy,
+        tile.shape.width * scale,
+        tile.shape.height * scale,
+        tile.colour,
+        tile.disabled ? 0.4 : 1,
+      );
+
+      const powerText = tile.powerCapacity > 0
+        ? `CAP ${tile.powerCapacity}`
+        : `PWR ${tile.powerCost}`;
+      label.text = `${tile.name.toUpperCase()}\n${powerText}`;
+      label.style.fill = tile.disabled ? 0x778899 : COLOR.hudWhite;
+      label.x = rect.x + rect.w / 2;
+      label.y = rect.y + rect.h - 22;
+    }
+
+    // ── Ship canvas: placements ───────────────────────────────────────────
+    const { ship } = data;
+    for (const pl of ship.placements) {
+      const cx = ship.originX + pl.worldX * ship.scale;
+      const cy = ship.originY + pl.worldY * ship.scale;
+      const w = pl.shape.width * ship.scale;
+      const h = pl.shape.height * ship.scale;
+      this.drawPartVisual(g, pl.visualKind, cx, cy, w, h, pl.colour, 1);
+      if (pl.selected) {
+        g.rect(cx - w / 2 - 3, cy - h / 2 - 3, w + 6, h + 6)
+          .stroke({ color: COLOR.hudAmber, width: 2, alpha: 0.9 });
+      }
+    }
+
+    // ── Open sockets ──────────────────────────────────────────────────────
+    for (const sk of ship.sockets) {
+      const color = sk.highlighted ? COLOR.hudAmber : COLOR.hudCyan;
+      const r = sk.highlighted ? 7 : 5;
+      g.circle(sk.screenX, sk.screenY, r)
+        .fill({ color, alpha: 0.2 })
+        .stroke({ color, width: 2, alpha: 0.9 });
+    }
+
+    // ── Ghost preview ─────────────────────────────────────────────────────
+    if (data.ghost) {
+      const gh = data.ghost;
+      const w = gh.shape.width * ship.scale;
+      const h = gh.shape.height * ship.scale;
+      const tint = gh.valid ? gh.colour : COLOR.hudRed;
+      this.drawPartVisual(g, gh.visualKind, gh.screenX, gh.screenY, w, h, tint, 0.5);
+      g.rect(gh.screenX - w / 2, gh.screenY - h / 2, w, h)
+        .stroke({ color: tint, width: 2, alpha: 0.8 });
+    }
+
+    // ── Buttons ───────────────────────────────────────────────────────────
+    const buttons = [
+      { rect: layout.newBtn, label: "NEW" },
+      { rect: layout.saveBtn, label: "SAVE" },
+      { rect: layout.backBtn, label: "BACK" },
+      {
+        rect: layout.trashBtn,
+        label: data.hasSelection ? "TRASH PART" : "TRASH",
+        disabled: !data.hasSelection,
+      },
+    ];
+    this.ensureTextPool(this.shipyardButtonLabels, buttons.length, 18);
+    for (let i = 0; i < this.shipyardButtonLabels.length; i++) {
+      const label = this.shipyardButtonLabels[i]!;
+      const btn = buttons[i];
+      if (!btn) {
+        label.visible = false;
+        continue;
+      }
+      label.visible = true;
+      const disabled = btn.disabled === true;
+      g.rect(btn.rect.x, btn.rect.y, btn.rect.w, btn.rect.h)
+        .fill({ color: 0x10243c, alpha: disabled ? 0.4 : 1 })
+        .stroke({ color: disabled ? 0x445566 : COLOR.hudCyan, width: 2 });
+      label.text = btn.label;
+      label.style.fill = disabled ? 0x778899 : COLOR.hudWhite;
+      label.x = btn.rect.x + btn.rect.w / 2;
+      label.y = btn.rect.y + btn.rect.h / 2;
+    }
+
+    // ── Stats panel ───────────────────────────────────────────────────────
+    const s = data.stats;
+    this.shipyardStatsText.text = [
+      `HP          ${s.hp}`,
+      `SPEED       ${s.speed}`,
+      `DAMAGE      ${s.damage}`,
+      `FIRE RATE   ${s.fireRate.toFixed(2)}`,
+      `HITBOX      ${s.hitboxW}×${s.hitboxH}`,
+      ``,
+      `POWER       ${s.powerUsed}/${s.powerCapacity}`,
+      `COST        ${s.cost}¢`,
+    ].join("\n");
+
+    const heldSuffix = data.heldPartName
+      ? `   •   HOLDING ${data.heldPartName.toUpperCase()}`
+      : "";
+    this.shipyardSummaryText.text =
+      `${data.blueprintName.toUpperCase()}   •   CREDITS ${data.credits}${heldSuffix}`;
+  }
+
+  /** Fills a rect with flat dark fill + thin stroke for UI panels. */
+  private drawPanelRect(
+    g: Graphics,
+    rect: { x: number; y: number; w: number; h: number },
+    fill: number,
+    stroke: number,
+  ): void {
+    g.rect(rect.x, rect.y, rect.w, rect.h)
+      .fill({ color: fill, alpha: 0.85 })
+      .stroke({ color: stroke, width: 1 });
+  }
+
+  /** Ensures a Text pool has at least `count` entries and applies base style. */
+  private ensureTextPool(pool: Text[], count: number, fontSize: number): void {
+    while (pool.length < count) {
       const t = new Text({
         text: "",
         style: new TextStyle({
           fontFamily: "monospace",
-          fontSize: 18,
+          fontSize,
           fill: COLOR.hudWhite,
           fontWeight: "bold",
+          align: "center",
         }),
       });
-      t.anchor.set(0, 0);
-      t.x = 60;
+      t.anchor.set(0.5, 0.5);
       this.menuLayer.addChild(t);
-      this.shipyardRowTexts.push(t);
+      pool.push(t);
     }
+  }
 
-    const rowY0 = 110;
-    const rowSpacing = 28;
-    for (let i = 0; i < this.shipyardRowTexts.length; i++) {
-      const t = this.shipyardRowTexts[i]!;
-      const row = data.blueprints[i];
-      if (!row) {
-        t.visible = false;
-        continue;
+  /**
+   * Draws a stylised silhouette for a part kind inside the AABB (cx, cy, w, h).
+   * Every `visualKind` from the parts registry is handled; unknown kinds fall
+   * back to a plain rect so new parts can be added without renderer changes.
+   */
+  private drawPartVisual(
+    g: Graphics,
+    kind: string,
+    cx: number,
+    cy: number,
+    w: number,
+    h: number,
+    colour: number,
+    alpha: number,
+  ): void {
+    const fill = { color: colour, alpha };
+    const accent = { color: 0xffffff, alpha: alpha * 0.35 };
+    switch (kind) {
+      case "core-hex":
+        drawHexagon(g, cx, cy, Math.min(w, h) / 2, 0, fill, { color: 0xffffff, width: 1, alpha });
+        drawCircle(g, cx, cy, Math.min(w, h) / 5, { color: 0xffffff, alpha });
+        break;
+      case "hull-delta": {
+        const hw = w / 2;
+        const hh = h / 2;
+        g.poly([cx + hw, cy, cx - hw, cy - hh, cx - hw * 0.6, cy, cx - hw, cy + hh])
+          .fill(fill);
+        drawRect(g, cx - hw * 0.2, cy, hw * 0.8, hh * 0.4, accent);
+        break;
       }
-      t.visible = true;
-      const prefix = row.selected ? "> " : "  ";
-      const suffix = row.equipped ? "  [EQUIPPED]" : "";
-      t.text = `${prefix}${row.name.toUpperCase()}${suffix}`;
-      t.style.fill = row.selected
-        ? COLOR.hudAmber
-        : row.equipped ? COLOR.hudCyan : COLOR.hudWhite;
-      t.y = rowY0 + i * rowSpacing;
+      case "hull-block": {
+        drawRect(g, cx, cy, w, h, fill);
+        drawRect(g, cx, cy, w * 0.5, h * 0.4, accent);
+        break;
+      }
+      case "wing-fin-top": {
+        const hw = w / 2;
+        const hh = h / 2;
+        g.poly([cx - hw, cy + hh, cx + hw, cy + hh, cx + hw * 0.6, cy - hh, cx - hw * 0.4, cy - hh * 0.4])
+          .fill(fill);
+        break;
+      }
+      case "wing-fin-bot": {
+        const hw = w / 2;
+        const hh = h / 2;
+        g.poly([cx - hw, cy - hh, cx + hw, cy - hh, cx + hw * 0.6, cy + hh, cx - hw * 0.4, cy + hh * 0.4])
+          .fill(fill);
+        break;
+      }
+      case "wing-long": {
+        drawRect(g, cx, cy, w, h, fill);
+        drawRect(g, cx, cy, w * 0.4, h * 0.85, accent);
+        break;
+      }
+      case "engine-nozzle": {
+        drawRect(g, cx, cy, w * 0.8, h, fill);
+        drawTriangle(g, cx - w * 0.5, cy, h * 0.6, Math.PI, { color: 0xff9e3d, alpha });
+        break;
+      }
+      case "engine-plasma": {
+        drawRect(g, cx + w * 0.1, cy, w * 0.7, h, fill);
+        drawTriangle(g, cx - w * 0.4, cy, h * 0.7, Math.PI, { color: 0xff3df0, alpha });
+        drawCircle(g, cx + w * 0.25, cy, h * 0.25, accent);
+        break;
+      }
+      case "cannon-barrel": {
+        drawRect(g, cx, cy, w, h * 0.6, fill);
+        drawRect(g, cx + w * 0.3, cy, w * 0.35, h, { color: 0xffffff, alpha: alpha * 0.6 });
+        break;
+      }
+      case "shield-ring": {
+        const r = Math.min(w, h) / 2;
+        drawCircle(g, cx, cy, r, { color: colour, alpha: alpha * 0.3 }, { color: colour, width: 2, alpha });
+        drawCircle(g, cx, cy, r * 0.5, fill);
+        break;
+      }
+      default:
+        drawRect(g, cx, cy, w, h, fill);
     }
-
-    // Right column: stat sheet for the current selection.
-    const sel = data.blueprints.find((b) => b.selected);
-    if (sel) {
-      this.shipyardStatsText.text = [
-        `HP          ${sel.hp}`,
-        `SPEED       ${sel.speed}`,
-        `DAMAGE      ${sel.damage}`,
-        `HITBOX      ${sel.hitboxW}×${sel.hitboxH}`,
-        `PARTS       ${sel.partCount}`,
-        `COST        ${sel.cost}¢`,
-      ].join("\n");
-    } else {
-      this.shipyardStatsText.text = "— NO BLUEPRINT SELECTED —";
-    }
-
-    this.shipyardSummaryText.text =
-      `UNLOCKED PARTS  ${data.unlockedPartCount}/${data.totalPartCount}      CREDITS  ${data.credits}`;
   }
 
   /** Populates the 3-item main-menu list and highlights the selected one. */

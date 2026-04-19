@@ -28,6 +28,12 @@ export class InputHandler {
   private pausePulse = false;
   private touchDisposers: Array<() => void> = [];
 
+  // ── Pointer state (mouse + primary touch, used by menu screens) ────────
+  private pointerPos: { x: number; y: number } | null = null;
+  private pointerDownPulse: { x: number; y: number } | null = null;
+  private pointerHeld = false;
+  private pointerDisposers: Array<() => void> = [];
+
   constructor() {
     this.boundKeyDown = (e: KeyboardEvent) => {
       // Prevent arrow-key / space page scroll during gameplay
@@ -71,7 +77,13 @@ export class InputHandler {
       const prevCount = this.touchActiveCount;
       this.touchActiveCount = e.touches.length;
       const first = e.touches[0];
-      if (first) this.touchTarget = mapTouch(first);
+      if (first) {
+        const p = mapTouch(first);
+        this.touchTarget = p;
+        this.pointerPos = p;
+        this.pointerDownPulse = p;
+        this.pointerHeld = true;
+      }
 
       // Second finger landing → pause pulse.
       if (prevCount < 2 && this.touchActiveCount >= 2) {
@@ -96,13 +108,20 @@ export class InputHandler {
     const onMove = (e: TouchEvent): void => {
       e.preventDefault();
       const first = e.touches[0];
-      if (first) this.touchTarget = mapTouch(first);
+      if (first) {
+        const p = mapTouch(first);
+        this.touchTarget = p;
+        this.pointerPos = p;
+      }
     };
 
     const onEnd = (e: TouchEvent): void => {
       e.preventDefault();
       this.touchActiveCount = e.touches.length;
-      if (this.touchActiveCount === 0) this.touchTarget = null;
+      if (this.touchActiveCount === 0) {
+        this.touchTarget = null;
+        this.pointerHeld = false;
+      }
     };
 
     const opts: AddEventListenerOptions = { passive: false };
@@ -116,6 +135,53 @@ export class InputHandler {
       element.removeEventListener("touchmove", onMove, opts);
       element.removeEventListener("touchend", onEnd, opts);
       element.removeEventListener("touchcancel", onEnd, opts);
+    });
+  }
+
+  /**
+   * Wires mouse pointer events on the given element so menu screens (shipyard,
+   * starmap) can respond to click/drag positions. Non-interfering with the
+   * keyboard-driven arcade loop — in-game pointer data is simply ignored.
+   */
+  attachPointer(element: HTMLElement, gameWidth: number, gameHeight: number): void {
+    const mapMouse = (e: MouseEvent): { x: number; y: number } => {
+      const rect = element.getBoundingClientRect();
+      const w = rect.width || gameWidth;
+      const h = rect.height || gameHeight;
+      return {
+        x: ((e.clientX - rect.left) / w) * gameWidth,
+        y: ((e.clientY - rect.top) / h) * gameHeight,
+      };
+    };
+
+    const onDown = (e: MouseEvent): void => {
+      if (e.button !== 0) return;
+      const p = mapMouse(e);
+      this.pointerPos = p;
+      this.pointerDownPulse = p;
+      this.pointerHeld = true;
+    };
+    const onMove = (e: MouseEvent): void => {
+      this.pointerPos = mapMouse(e);
+    };
+    const onUp = (e: MouseEvent): void => {
+      if (e.button !== 0) return;
+      this.pointerHeld = false;
+    };
+    const onLeave = (): void => {
+      this.pointerHeld = false;
+    };
+
+    element.addEventListener("mousedown", onDown);
+    element.addEventListener("mousemove", onMove);
+    element.addEventListener("mouseup", onUp);
+    element.addEventListener("mouseleave", onLeave);
+
+    this.pointerDisposers.push(() => {
+      element.removeEventListener("mousedown", onDown);
+      element.removeEventListener("mousemove", onMove);
+      element.removeEventListener("mouseup", onUp);
+      element.removeEventListener("mouseleave", onLeave);
     });
   }
 
@@ -143,6 +209,9 @@ export class InputHandler {
         this.menuConfirmPulse,
       menuBack: this.keysPressed.has("Escape"),
       touchTarget: this.touchTarget,
+      pointer: this.pointerPos,
+      pointerDownPulse: this.pointerDownPulse,
+      pointerHeld: this.pointerHeld,
     };
   }
 
@@ -157,6 +226,7 @@ export class InputHandler {
     this.bombPulse = false;
     this.menuConfirmPulse = false;
     this.pausePulse = false;
+    this.pointerDownPulse = null;
   }
 
   // ── Test helpers ─────────────────────────────────────────────────────────
@@ -179,6 +249,8 @@ export class InputHandler {
     }
     for (const dispose of this.touchDisposers) dispose();
     this.touchDisposers = [];
+    for (const dispose of this.pointerDisposers) dispose();
+    this.pointerDisposers = [];
     this.keysPressed.clear();
   }
 }

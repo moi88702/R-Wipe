@@ -18,12 +18,19 @@ import { OverworldManager } from "../managers/OverworldManager";
 import { missionToLevelState } from "../managers/MissionManager";
 import { BlueprintStore } from "../managers/BlueprintStore";
 import { CollisionSystem } from "../systems/CollisionSystem";
-import { GameRenderer } from "../rendering/GameRenderer";
-import type { BlueprintId, MissionId, NodeId } from "../types/campaign";
-import type { Blueprint } from "../types/shipBuilder";
+import { GameRenderer, type ShipyardRenderData, type ShipyardPaletteTile } from "../rendering/GameRenderer";
+import type { MissionId, NodeId } from "../types/campaign";
+import type { Blueprint, PartCategory, PlacedPart } from "../types/shipBuilder";
 import { STARTER_SECTOR } from "./campaign/StarterSector";
-import { PARTS_REGISTRY, DEFAULT_UNLOCKED_PARTS } from "./parts/registry";
+import {
+  PARTS_REGISTRY,
+  DEFAULT_UNLOCKED_PARTS,
+  makeStarterBlueprint,
+  getPart,
+} from "./parts/registry";
 import { computeShipStats } from "./parts/stats";
+import { layoutBlueprint, type Placement } from "./parts/geometry";
+import { canSnap } from "./parts/assembly";
 
 /** Menu item ids used by updateMenu / updatePause. */
 type MainMenuItem = "play" | "campaign" | "shipyard" | "stats";
@@ -65,8 +72,18 @@ export class GameManager {
   private activeMissionId: MissionId | null = null;
   /** Starmap selection index into `overworld.getSector().nodes`. */
   private starmapSelection = 0;
-  /** Shipyard list selection (index into saved blueprints, -1 for vanilla). */
-  private shipyardSelection = -1;
+  /**
+   * Working copy of the blueprint being edited inside the shipyard. Null when
+   * the shipyard is closed. Committed back to the store on SAVE; discarded on
+   * BACK.
+   */
+  private shipyardBlueprint: Blueprint | null = null;
+  /** Part id currently "held" by the cursor, waiting to be snapped. */
+  private shipyardHeldPartId: string | null = null;
+  /** Selected placed part on the ship canvas (for deletion). */
+  private shipyardSelectedPlacedId: string | null = null;
+  /** Auto-incrementing counter used to make unique PlacedPart ids in the editor. */
+  private shipyardNextPlacedIdx = 0;
 
   // Edge-triggered menu input tracking. `prev*` mirrors last frame's poll.
   private prevPausePressed = false;
@@ -127,25 +144,25 @@ export class GameManager {
   }
 
   /**
-   * On first campaign launch the player has no saved ships. Drop a fully
-   * wired "Standard" blueprint into the store so the shipyard has something
-   * to equip before the builder UI lands.
+   * On first campaign launch the player has no saved ships. Drop a minimal
+   * starter blueprint into the store (a starter core + a starter all-in-one
+   * hull) so the shipyard always has something to open and equip.
    */
   private seedStarterBlueprintIfMissing(): void {
     if (this.blueprints.list().length > 0) return;
-    const starter: Blueprint = {
-      id: "bp-starter",
-      name: "Standard",
-      parts: [
-        { id: "r", partId: "hull-standard-t1", parentId: null, parentSocketId: null, colourId: null },
-        { id: "c", partId: "cockpit-standard-t1", parentId: "r", parentSocketId: "s-nose", colourId: null },
-        { id: "wL", partId: "wing-standard-l-t1", parentId: "r", parentSocketId: "s-wingL", colourId: null },
-        { id: "wR", partId: "wing-standard-r-t1", parentId: "r", parentSocketId: "s-wingR", colourId: null },
-        { id: "e", partId: "engine-standard-t1", parentId: "r", parentSocketId: "s-tail", colourId: null },
-      ],
-    };
+    const starter: Blueprint = makeStarterBlueprint();
     this.blueprints.upsert(starter);
     this.blueprints.save();
+    // Auto-equip the starter if nothing is equipped yet so the first campaign
+    // mission picks up its hitbox / HP without a shipyard visit.
+    if (this.overworld.getState().inventory.equippedBlueprintId === null) {
+      this.overworld.equipBlueprintForced(starter.id);
+      try {
+        this.overworld.save();
+      } catch {
+        // best-effort
+      }
+    }
   }
 
   /**
@@ -154,6 +171,14 @@ export class GameManager {
    */
   enableTouchControls(element: HTMLElement): void {
     this.input.attachTouch(element, this.width, this.height);
+  }
+
+  /**
+   * Wire mouse pointer events on the given element so menu screens (shipyard,
+   * starmap) can respond to clicks. Safe to call alongside enableTouchControls.
+   */
+  enablePointerControls(element: HTMLElement): void {
+    this.input.attachPointer(element, this.width, this.height);
   }
 
   // ── Public loop entry ────────────────────────────────────────────────────
@@ -309,55 +334,295 @@ export class GameManager {
     }
   }
 
-  // ── Screen: shipyard (ship builder) ──────────────────────────────────────
+  // ── Screen: shipyard (visual ship builder) ───────────────────────────────
 
   /**
-   * Open the shipyard browser. The current selection lands on the equipped
-   * blueprint so the player sees their active ship first.
+   * Open the shipyard editor. Loads the equipped blueprint (deep-cloned) into
+   * the working copy so edits can be discarded via BACK. If nothing is
+   * equipped yet, fall back to a fresh starter blueprint.
    */
   private openShipyard(): void {
-    const equipped = this.overworld.getState().inventory.equippedBlueprintId;
-    const list = this.blueprints.list();
-    const idx = equipped ? list.findIndex((b) => b.id === equipped) : -1;
-    this.shipyardSelection = idx;
-    this.menuSelection = 0;
+    const equippedId = this.overworld.getState().inventory.equippedBlueprintId;
+    const source = equippedId ? this.blueprints.get(equippedId) : undefined;
+    this.shipyardBlueprint = cloneBlueprint(source ?? makeStarterBlueprint());
+    this.shipyardHeldPartId = null;
+    this.shipyardSelectedPlacedId = null;
+    this.shipyardNextPlacedIdx = this.shipyardBlueprint.parts.length;
     this.menuDebounceMs = MENU_DEBOUNCE_MS;
     this.state.setScreen("shipyard");
   }
 
   private updateShipyard(): void {
+    const bp = this.shipyardBlueprint;
+    if (!bp) return;
+    // Keyboard back — discard changes.
     if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.shipyardBlueprint = null;
       this.state.setScreen("main-menu");
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
-
-    const list = this.blueprints.list();
-    const itemCount = list.length;
-    if (itemCount === 0) return;
-
+    // Pointer: a tap may hit a palette tile, a socket, a placed part, or a button.
     const input = this.input.poll();
-    const upEdge = input.moveUp && !this.prevUpPressed;
-    const downEdge = input.moveDown && !this.prevDownPressed;
-    if (upEdge) {
-      this.shipyardSelection = (this.shipyardSelection - 1 + itemCount) % itemCount;
-    } else if (downEdge) {
-      this.shipyardSelection = (this.shipyardSelection + 1) % itemCount;
+    const click = input.pointerDownPulse ?? null;
+    const pointer = input.pointer ?? null;
+    if (click && this.menuDebounceMs === 0) {
+      this.handleShipyardClick(click.x, click.y);
     }
-    if (this.shipyardSelection < 0) this.shipyardSelection = 0;
+    // Keep the ghost alive for rendering — updateShipyard itself is purely
+    // input-driven; ghost follows the live pointer in the render payload.
+    void pointer;
+  }
 
-    if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
-      const target = list[this.shipyardSelection];
-      if (target) {
-        this.overworld.equipBlueprintForced(target.id);
-        try {
-          this.overworld.save();
-        } catch {
-          // Best-effort — keep the in-memory equip even if persistence fails.
-        }
+  /**
+   * Routes a shipyard pointer-click to whichever interactable it landed on.
+   * Order: buttons → palette → sockets → placed parts → empty (deselect).
+   */
+  private handleShipyardClick(gx: number, gy: number): void {
+    const bp = this.shipyardBlueprint;
+    if (!bp) return;
+    const layout = SHIPYARD_LAYOUT;
+
+    // 1) Buttons — always interactable.
+    if (rectHit(layout.newBtn, gx, gy)) {
+      this.shipyardBlueprint = makeStarterBlueprint();
+      this.shipyardHeldPartId = null;
+      this.shipyardSelectedPlacedId = null;
+      this.shipyardNextPlacedIdx = this.shipyardBlueprint.parts.length;
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+    if (rectHit(layout.saveBtn, gx, gy)) {
+      this.blueprints.upsert(bp);
+      try {
+        this.blueprints.save();
+      } catch {
+        // best-effort
+      }
+      this.overworld.equipBlueprintForced(bp.id);
+      try {
+        this.overworld.save();
+      } catch {
+        // best-effort
+      }
+      this.shipyardBlueprint = null;
+      this.state.setScreen("main-menu");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+    if (rectHit(layout.backBtn, gx, gy)) {
+      this.shipyardBlueprint = null;
+      this.state.setScreen("main-menu");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+    if (rectHit(layout.trashBtn, gx, gy)) {
+      if (this.shipyardSelectedPlacedId) {
+        this.removePlacedPartAndDescendants(this.shipyardSelectedPlacedId);
+        this.shipyardSelectedPlacedId = null;
       }
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
     }
+
+    // 2) Palette — pick up a part.
+    const palette = this.buildShipyardPalette();
+    for (const tile of palette) {
+      if (rectHit(tile.rect, gx, gy)) {
+        if (tile.disabled) return;
+        // Toggle: tapping the held part again puts it down.
+        this.shipyardHeldPartId = this.shipyardHeldPartId === tile.partId ? null : tile.partId;
+        this.shipyardSelectedPlacedId = null;
+        return;
+      }
+    }
+
+    // 3) Ship-canvas interactions. Map pointer to ship-world coords.
+    if (rectHit(layout.canvasRect, gx, gy)) {
+      const held = this.shipyardHeldPartId;
+      const heldDef = held ? getPart(held) : undefined;
+
+      if (heldDef && heldDef.category === "core") {
+        // Swap the root core while keeping children attached (their sockets
+        // still reference ids which do not change on the new core — cores
+        // share a single "s-hull" socket today).
+        const rootIdx = bp.parts.findIndex((p) => p.parentId === null);
+        if (rootIdx >= 0) {
+          const newRoot: PlacedPart = {
+            ...bp.parts[rootIdx]!,
+            partId: held!,
+          };
+          const nextParts = [...bp.parts];
+          nextParts[rootIdx] = newRoot;
+          this.shipyardBlueprint = { ...bp, parts: nextParts };
+          this.shipyardHeldPartId = null;
+        }
+        return;
+      }
+
+      if (heldDef) {
+        // Find the nearest socket in screen space that accepts this part.
+        const target = this.nearestAcceptingSocket(gx, gy, held!);
+        if (target) {
+          const placedId = `p${this.shipyardNextPlacedIdx++}`;
+          const placed: PlacedPart = {
+            id: placedId,
+            partId: held!,
+            parentId: target.parentPlacedId,
+            parentSocketId: target.socketId,
+            colourId: null,
+          };
+          this.shipyardBlueprint = { ...bp, parts: [...bp.parts, placed] };
+          this.shipyardHeldPartId = null;
+        }
+        return;
+      }
+
+      // No held part — tap on a placed part to select it.
+      const picked = this.pickPlacedPartAt(gx, gy);
+      this.shipyardSelectedPlacedId = picked ? picked.placed.id : null;
+      return;
+    }
+
+    // Empty click outside every region — drop held part.
+    this.shipyardHeldPartId = null;
+  }
+
+  /**
+   * Iterates every socket on every placed part, finds the one closest (in
+   * screen pixels) to (gx, gy) that passes `canSnap` for the held part and is
+   * within a small capture radius.
+   */
+  private nearestAcceptingSocket(
+    gx: number,
+    gy: number,
+    childPartId: string,
+  ): { parentPlacedId: string; socketId: string } | null {
+    const bp = this.shipyardBlueprint;
+    if (!bp) return null;
+    const layout = layoutBlueprint(bp);
+    const L = SHIPYARD_LAYOUT;
+    let best: { parentPlacedId: string; socketId: string; d2: number } | null = null;
+    const captureR = 48;
+    const captureR2 = captureR * captureR;
+    for (const pl of layout.placements) {
+      for (const sk of pl.def.sockets) {
+        if (!canSnap(bp, pl.placed.id, sk.id, childPartId)) continue;
+        const sx = L.shipOriginX + (pl.worldX + sk.x) * L.shipScale;
+        const sy = L.shipOriginY + (pl.worldY + sk.y) * L.shipScale;
+        const dx = sx - gx;
+        const dy = sy - gy;
+        const d2 = dx * dx + dy * dy;
+        if (d2 <= captureR2 && (!best || d2 < best.d2)) {
+          best = { parentPlacedId: pl.placed.id, socketId: sk.id, d2 };
+        }
+      }
+    }
+    return best ? { parentPlacedId: best.parentPlacedId, socketId: best.socketId } : null;
+  }
+
+  /** Hit-test a placed part in screen space by its AABB. Topmost wins. */
+  private pickPlacedPartAt(gx: number, gy: number): Placement | null {
+    const bp = this.shipyardBlueprint;
+    if (!bp) return null;
+    const layout = layoutBlueprint(bp);
+    const L = SHIPYARD_LAYOUT;
+    // Iterate in reverse so most-recently-placed parts (likely on top) win.
+    for (let i = layout.placements.length - 1; i >= 0; i--) {
+      const pl = layout.placements[i]!;
+      const sw = pl.def.shape.width * L.shipScale;
+      const sh = pl.def.shape.height * L.shipScale;
+      const cx = L.shipOriginX + pl.worldX * L.shipScale;
+      const cy = L.shipOriginY + pl.worldY * L.shipScale;
+      if (
+        gx >= cx - sw / 2 &&
+        gx <= cx + sw / 2 &&
+        gy >= cy - sh / 2 &&
+        gy <= cy + sh / 2
+      ) {
+        return pl;
+      }
+    }
+    return null;
+  }
+
+  private removePlacedPartAndDescendants(placedId: string): void {
+    const bp = this.shipyardBlueprint;
+    if (!bp) return;
+    // Cannot remove the root core.
+    const target = bp.parts.find((p) => p.id === placedId);
+    if (!target || target.parentId === null) return;
+    const doomed = new Set<string>([placedId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const p of bp.parts) {
+        if (p.parentId && doomed.has(p.parentId) && !doomed.has(p.id)) {
+          doomed.add(p.id);
+          changed = true;
+        }
+      }
+    }
+    this.shipyardBlueprint = { ...bp, parts: bp.parts.filter((p) => !doomed.has(p.id)) };
+  }
+
+  /**
+   * Builds the palette tile list the renderer draws on the left of the
+   * shipyard. Every unlocked part gets a tile; disabled state reflects the
+   * remaining power budget for non-core parts.
+   */
+  private buildShipyardPalette(): ShipyardPaletteTile[] {
+    const bp = this.shipyardBlueprint;
+    if (!bp) return [];
+    const unlocked = new Set<string>(this.overworld.getState().inventory.unlockedParts);
+    for (const id of DEFAULT_UNLOCKED_PARTS) unlocked.add(id);
+    // Keep a stable, registry-insertion order so the palette doesn't reshuffle.
+    const ids = Object.keys(PARTS_REGISTRY).filter((id) => unlocked.has(id));
+
+    const rootDef = (() => {
+      const root = bp.parts.find((p) => p.parentId === null);
+      return root ? PARTS_REGISTRY[root.partId] : undefined;
+    })();
+    const capacity = rootDef?.powerCapacity ?? 0;
+    let used = 0;
+    for (const p of bp.parts) {
+      if (p.parentId === null) continue;
+      const d = PARTS_REGISTRY[p.partId];
+      if (!d) continue;
+      used += d.powerCost;
+    }
+    const remaining = Math.max(0, capacity - used);
+
+    const L = SHIPYARD_LAYOUT;
+    const tiles: ShipyardPaletteTile[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i]!;
+      const def = PARTS_REGISTRY[id]!;
+      const col = i % L.paletteCols;
+      const row = Math.floor(i / L.paletteCols);
+      const rect = {
+        x: L.paletteX + col * (L.paletteTileW + L.paletteGap),
+        y: L.paletteY + row * (L.paletteTileH + L.paletteGap),
+        w: L.paletteTileW,
+        h: L.paletteTileH,
+      };
+      const isCore = def.category === "core";
+      const fitsPower = isCore || def.powerCost <= remaining;
+      tiles.push({
+        partId: id,
+        rect,
+        powerCost: def.powerCost,
+        powerCapacity: def.powerCapacity ?? 0,
+        name: def.name,
+        visualKind: def.visualKind,
+        colour: def.colour,
+        shape: { width: def.shape.width, height: def.shape.height },
+        category: def.category,
+        disabled: !fitsPower,
+        isHeld: this.shipyardHeldPartId === id,
+      });
+    }
+    return tiles;
   }
 
   // ── Screen: starmap (campaign overworld) ─────────────────────────────────
@@ -656,7 +921,7 @@ export class GameManager {
 
     // Time-alive / safe-timer tracking
     const run = this.state.getCurrentRunStats();
-    let timeAliveMs = run.timeAliveMs + deltaMs;
+    const timeAliveMs = run.timeAliveMs + deltaMs;
     this.safeTimerMs += deltaMs;
     const longestSafe = Math.max(
       run.longestTimeWithoutDamageSec,
@@ -1112,52 +1377,134 @@ export class GameManager {
     });
   }
 
-  /** Collects the data the renderer needs for the shipyard browser. */
-  private buildShipyardExtras(): {
-    blueprints: ReadonlyArray<{
-      id: BlueprintId;
-      name: string;
-      selected: boolean;
-      equipped: boolean;
-      hp: number;
-      speed: number;
-      damage: number;
-      hitboxW: number;
-      hitboxH: number;
-      cost: number;
-      partCount: number;
-    }>;
-    unlockedPartCount: number;
-    totalPartCount: number;
-    credits: number;
-  } {
-    const equipped = this.overworld.getState().inventory.equippedBlueprintId;
-    const list = this.blueprints.list();
-    const rows = list.map((bp, i) => {
-      const stats = computeShipStats(bp);
-      return {
-        id: bp.id,
-        name: bp.name,
-        selected: i === this.shipyardSelection,
-        equipped: bp.id === equipped,
+  /** Collects the data the renderer needs for the shipyard builder. */
+  private buildShipyardExtras(): ShipyardRenderData {
+    const bp = this.shipyardBlueprint;
+    if (!bp) {
+      // Should not happen while screen == "shipyard", but fail soft.
+      return makeEmptyShipyardRenderData();
+    }
+    const L = SHIPYARD_LAYOUT;
+    const input = this.input.poll();
+    const pointer = input.pointer ?? null;
+
+    const palette = this.buildShipyardPalette();
+    const layout = layoutBlueprint(bp);
+    const stats = computeShipStats(bp);
+
+    const heldId = this.shipyardHeldPartId;
+    const heldDef = heldId ? getPart(heldId) : undefined;
+
+    const placements = layout.placements.map((pl) => ({
+      placedId: pl.placed.id,
+      partId: pl.placed.partId,
+      worldX: pl.worldX,
+      worldY: pl.worldY,
+      visualKind: pl.def.visualKind,
+      colour: pl.def.colour,
+      shape: { width: pl.def.shape.width, height: pl.def.shape.height },
+      selected: this.shipyardSelectedPlacedId === pl.placed.id,
+      category: pl.def.category as PartCategory,
+    }));
+
+    const sockets: Array<{
+      parentPlacedId: string;
+      socketId: string;
+      screenX: number;
+      screenY: number;
+      highlighted: boolean;
+    }> = [];
+    for (const pl of layout.placements) {
+      for (const sk of pl.def.sockets) {
+        const occupied = bp.parts.some(
+          (p) => p.parentId === pl.placed.id && p.parentSocketId === sk.id,
+        );
+        if (occupied) continue;
+        const screenX = L.shipOriginX + (pl.worldX + sk.x) * L.shipScale;
+        const screenY = L.shipOriginY + (pl.worldY + sk.y) * L.shipScale;
+        let highlighted = false;
+        if (heldId && heldDef && heldDef.category !== "core") {
+          highlighted = canSnap(bp, pl.placed.id, sk.id, heldId);
+        }
+        sockets.push({
+          parentPlacedId: pl.placed.id,
+          socketId: sk.id,
+          screenX,
+          screenY,
+          highlighted,
+        });
+      }
+    }
+
+    // Ghost preview — only when a part is held and pointer is in-canvas.
+    let ghost: ShipyardRenderData["ghost"] = null;
+    if (heldDef && pointer && rectHit(L.canvasRect, pointer.x, pointer.y)) {
+      let valid = false;
+      let gx = pointer.x;
+      let gy = pointer.y;
+      if (heldDef.category === "core") {
+        valid = true;
+      } else {
+        const target = this.nearestAcceptingSocket(pointer.x, pointer.y, heldId!);
+        if (target) {
+          const pl = layout.placements.find((p) => p.placed.id === target.parentPlacedId);
+          const sk = pl?.def.sockets.find((s) => s.id === target.socketId);
+          if (pl && sk) {
+            gx = L.shipOriginX + (pl.worldX + sk.x) * L.shipScale;
+            gy = L.shipOriginY + (pl.worldY + sk.y) * L.shipScale;
+            valid = true;
+          }
+        }
+      }
+      ghost = {
+        screenX: gx,
+        screenY: gy,
+        visualKind: heldDef.visualKind,
+        colour: heldDef.colour,
+        shape: { width: heldDef.shape.width, height: heldDef.shape.height },
+        valid,
+      };
+    }
+
+    return {
+      layout: {
+        canvasRect: L.canvasRect,
+        paletteRect: {
+          x: L.paletteX,
+          y: L.paletteY,
+          w: L.paletteCols * (L.paletteTileW + L.paletteGap),
+          h: 600,
+        },
+        statsRect: L.statsRect,
+        newBtn: L.newBtn,
+        saveBtn: L.saveBtn,
+        backBtn: L.backBtn,
+        trashBtn: L.trashBtn,
+      },
+      palette,
+      ship: {
+        originX: L.shipOriginX,
+        originY: L.shipOriginY,
+        scale: L.shipScale,
+        placements,
+        sockets,
+      },
+      ghost,
+      stats: {
         hp: stats.hp,
         speed: stats.speed,
         damage: stats.damage,
+        fireRate: stats.fireRate,
         hitboxW: stats.hitbox.width,
         hitboxH: stats.hitbox.height,
+        powerUsed: stats.powerUsed,
+        powerCapacity: stats.powerCapacity,
         cost: stats.cost,
-        partCount: bp.parts.length,
-      };
-    });
-
-    const unlocked = new Set<string>(this.overworld.getState().inventory.unlockedParts);
-    for (const id of DEFAULT_UNLOCKED_PARTS) unlocked.add(id);
-
-    return {
-      blueprints: rows,
-      unlockedPartCount: unlocked.size,
-      totalPartCount: Object.keys(PARTS_REGISTRY).length,
+      },
+      blueprintName: bp.name,
       credits: this.overworld.getState().inventory.credits,
+      hasSelection: this.shipyardSelectedPlacedId !== null,
+      heldPartName: heldDef?.name ?? null,
     };
   }
 
@@ -1284,5 +1631,89 @@ function makeLevelState(levelNumber: number) {
     durationMs: 0,
     targetDurationMs: Math.min(60_000 * levelNumber, 600_000),
     isComplete: false,
+  };
+}
+
+// ── Shipyard layout + render-data types ────────────────────────────────────
+
+interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Static layout for the shipyard screen. Co-located with hit-test logic. */
+const SHIPYARD_LAYOUT = {
+  paletteX: 24,
+  paletteY: 100,
+  paletteCols: 2,
+  paletteTileW: 90,
+  paletteTileH: 80,
+  paletteGap: 10,
+  canvasRect: { x: 240, y: 90, w: 700, h: 530 } as Rect,
+  shipOriginX: 590,
+  shipOriginY: 355,
+  shipScale: 6,
+  statsRect: { x: 960, y: 100, w: 300, h: 500 } as Rect,
+  newBtn: { x: 260, y: 640, w: 140, h: 52 } as Rect,
+  saveBtn: { x: 420, y: 640, w: 140, h: 52 } as Rect,
+  backBtn: { x: 580, y: 640, w: 140, h: 52 } as Rect,
+  trashBtn: { x: 960, y: 640, w: 140, h: 52 } as Rect,
+} as const;
+
+function rectHit(r: Rect, x: number, y: number): boolean {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+function cloneBlueprint(bp: Blueprint): Blueprint {
+  return {
+    id: bp.id,
+    name: bp.name,
+    parts: bp.parts.map((p) => ({ ...p })),
+  };
+}
+
+function makeEmptyShipyardRenderData(): ShipyardRenderData {
+  const L = SHIPYARD_LAYOUT;
+  return {
+    layout: {
+      canvasRect: L.canvasRect,
+      paletteRect: {
+        x: L.paletteX,
+        y: L.paletteY,
+        w: L.paletteCols * (L.paletteTileW + L.paletteGap),
+        h: 600,
+      },
+      statsRect: L.statsRect,
+      newBtn: L.newBtn,
+      saveBtn: L.saveBtn,
+      backBtn: L.backBtn,
+      trashBtn: L.trashBtn,
+    },
+    palette: [],
+    ship: {
+      originX: L.shipOriginX,
+      originY: L.shipOriginY,
+      scale: L.shipScale,
+      placements: [],
+      sockets: [],
+    },
+    ghost: null,
+    stats: {
+      hp: 100,
+      speed: 420,
+      damage: 10,
+      fireRate: 1,
+      hitboxW: 0,
+      hitboxH: 0,
+      powerUsed: 0,
+      powerCapacity: 0,
+      cost: 0,
+    },
+    blueprintName: "",
+    credits: 0,
+    hasSelection: false,
+    heldPartName: null,
   };
 }
