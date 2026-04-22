@@ -84,6 +84,9 @@ export class GameManager {
   private shipyardSelectedPlacedId: string | null = null;
   /** Auto-incrementing counter used to make unique PlacedPart ids in the editor. */
   private shipyardNextPlacedIdx = 0;
+  /** Transient status message shown in the shipyard (e.g. "SAVED", "FULL"). */
+  private shipyardStatusMsg: string | null = null;
+  private shipyardStatusMs = 0;
 
   // Edge-triggered menu input tracking. `prev*` mirrors last frame's poll.
   private prevPausePressed = false;
@@ -202,7 +205,7 @@ export class GameManager {
     } else if (screen === "starmap") {
       this.updateStarmap();
     } else if (screen === "shipyard") {
-      this.updateShipyard();
+      this.updateShipyard(clamped);
     }
 
     // Commit edge-trigger prev-state AFTER all update*() have consumed edges.
@@ -352,9 +355,13 @@ export class GameManager {
     this.state.setScreen("shipyard");
   }
 
-  private updateShipyard(): void {
+  private updateShipyard(deltaMs: number): void {
     const bp = this.shipyardBlueprint;
     if (!bp) return;
+    if (this.shipyardStatusMs > 0) {
+      this.shipyardStatusMs = Math.max(0, this.shipyardStatusMs - deltaMs);
+      if (this.shipyardStatusMs === 0) this.shipyardStatusMsg = null;
+    }
     // Keyboard back — discard changes.
     if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
       this.shipyardBlueprint = null;
@@ -385,15 +392,26 @@ export class GameManager {
 
     // 1) Buttons — always interactable.
     if (rectHit(layout.newBtn, gx, gy)) {
-      this.shipyardBlueprint = makeStarterBlueprint();
+      const fresh = makeStarterBlueprint();
+      // Fresh id so SAVE creates a new slot instead of overwriting the
+      // template in the library.
+      fresh.id = freshBlueprintId();
+      fresh.name = `Design ${this.blueprints.list().length + 1}`;
+      this.shipyardBlueprint = fresh;
       this.shipyardHeldPartId = null;
       this.shipyardSelectedPlacedId = null;
-      this.shipyardNextPlacedIdx = this.shipyardBlueprint.parts.length;
+      this.shipyardNextPlacedIdx = fresh.parts.length;
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
     if (rectHit(layout.saveBtn, gx, gy)) {
-      this.blueprints.upsert(bp);
+      const existing = this.blueprints.get(bp.id);
+      if (!existing && this.blueprints.list().length >= MAX_SAVED_BLUEPRINTS) {
+        this.setShipyardStatus(`LIBRARY FULL (${MAX_SAVED_BLUEPRINTS} max)`);
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+        return;
+      }
+      this.blueprints.upsert(cloneBlueprint(bp));
       try {
         this.blueprints.save();
       } catch {
@@ -405,8 +423,7 @@ export class GameManager {
       } catch {
         // best-effort
       }
-      this.shipyardBlueprint = null;
-      this.state.setScreen("main-menu");
+      this.setShipyardStatus(existing ? "UPDATED & EQUIPPED" : "SAVED & EQUIPPED");
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
@@ -420,7 +437,50 @@ export class GameManager {
       if (this.shipyardSelectedPlacedId) {
         this.removePlacedPartAndDescendants(this.shipyardSelectedPlacedId);
         this.shipyardSelectedPlacedId = null;
+      } else if (this.blueprints.get(bp.id)) {
+        // Nothing selected on the canvas → delete the currently-loaded
+        // saved design from the library.
+        this.blueprints.delete(bp.id);
+        try {
+          this.blueprints.save();
+        } catch {
+          // best-effort
+        }
+        // If this was the equipped one, fall back to the next saved one
+        // (or starter).
+        const equipped = this.overworld.getState().inventory.equippedBlueprintId;
+        if (equipped === bp.id) {
+          const next = this.blueprints.list()[0];
+          this.overworld.equipBlueprintForced(next ? next.id : null);
+          try {
+            this.overworld.save();
+          } catch {
+            // best-effort
+          }
+        }
+        this.setShipyardStatus("DELETED");
       }
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+
+    // 1b) Saved-ships panel — click a slot to load that blueprint.
+    for (let i = 0; i < SHIPYARD_LAYOUT.savedSlotCount; i++) {
+      const r = savedSlotRect(i);
+      if (!rectHit(r, gx, gy)) continue;
+      const entry = this.blueprints.list()[i];
+      if (!entry) return; // empty slot — no-op
+      this.shipyardBlueprint = cloneBlueprint(entry);
+      this.shipyardHeldPartId = null;
+      this.shipyardSelectedPlacedId = null;
+      this.shipyardNextPlacedIdx = entry.parts.length;
+      this.overworld.equipBlueprintForced(entry.id);
+      try {
+        this.overworld.save();
+      } catch {
+        // best-effort
+      }
+      this.setShipyardStatus(`LOADED "${entry.name.toUpperCase()}"`);
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
@@ -544,6 +604,11 @@ export class GameManager {
       }
     }
     return null;
+  }
+
+  private setShipyardStatus(msg: string): void {
+    this.shipyardStatusMsg = msg;
+    this.shipyardStatusMs = 2000;
   }
 
   private removePlacedPartAndDescendants(placedId: string): void {
@@ -1474,6 +1539,38 @@ export class GameManager {
       };
     }
 
+    // Saved-ships slot view.
+    const saved = this.blueprints.list();
+    const equippedId = this.overworld.getState().inventory.equippedBlueprintId;
+    const savedSlots = Array.from({ length: L.savedSlotCount }, (_, i) => {
+      const entry = saved[i];
+      const rect = savedSlotRect(i);
+      if (!entry) {
+        return {
+          rect,
+          index: i,
+          name: "— EMPTY —",
+          empty: true,
+          equipped: false,
+          current: false,
+        };
+      }
+      return {
+        rect,
+        index: i,
+        name: entry.name,
+        empty: false,
+        equipped: entry.id === equippedId,
+        current: entry.id === bp.id,
+      };
+    });
+
+    const trashAction: "none" | "part" | "blueprint" = this.shipyardSelectedPlacedId
+      ? "part"
+      : this.blueprints.get(bp.id)
+        ? "blueprint"
+        : "none";
+
     return {
       layout: {
         canvasRect: L.canvasRect,
@@ -1484,11 +1581,15 @@ export class GameManager {
           h: 600,
         },
         statsRect: L.statsRect,
+        savedPanelRect: L.savedPanelRect,
         newBtn: L.newBtn,
         saveBtn: L.saveBtn,
         backBtn: L.backBtn,
         trashBtn: L.trashBtn,
       },
+      savedSlots,
+      statusMsg: this.shipyardStatusMsg,
+      trashAction,
       palette,
       ship: {
         originX: L.shipOriginX,
@@ -1651,6 +1752,8 @@ interface Rect {
   h: number;
 }
 
+const MAX_SAVED_BLUEPRINTS = 10;
+
 /** Static layout for the shipyard screen. Co-located with hit-test logic. */
 const SHIPYARD_LAYOUT = {
   paletteX: 24,
@@ -1663,12 +1766,28 @@ const SHIPYARD_LAYOUT = {
   shipOriginX: 590,
   shipOriginY: 355,
   shipScale: 6,
-  statsRect: { x: 960, y: 100, w: 300, h: 500 } as Rect,
+  statsRect: { x: 960, y: 100, w: 300, h: 230 } as Rect,
+  savedPanelRect: { x: 960, y: 340, w: 300, h: 290 } as Rect,
+  savedSlotX: 968,
+  savedSlotY0: 368,
+  savedSlotW: 284,
+  savedSlotH: 24,
+  savedSlotCount: MAX_SAVED_BLUEPRINTS,
   newBtn: { x: 260, y: 640, w: 140, h: 52 } as Rect,
   saveBtn: { x: 420, y: 640, w: 140, h: 52 } as Rect,
   backBtn: { x: 580, y: 640, w: 140, h: 52 } as Rect,
   trashBtn: { x: 960, y: 640, w: 140, h: 52 } as Rect,
 } as const;
+
+function savedSlotRect(index: number): Rect {
+  const L = SHIPYARD_LAYOUT;
+  return {
+    x: L.savedSlotX,
+    y: L.savedSlotY0 + index * L.savedSlotH,
+    w: L.savedSlotW,
+    h: L.savedSlotH,
+  };
+}
 
 function rectHit(r: Rect, x: number, y: number): boolean {
   return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
@@ -1680,6 +1799,11 @@ function cloneBlueprint(bp: Blueprint): Blueprint {
     name: bp.name,
     parts: bp.parts.map((p) => ({ ...p })),
   };
+}
+
+/** Generates a blueprint id that won't collide with existing library entries. */
+function freshBlueprintId(): string {
+  return `bp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
 function makeEmptyShipyardRenderData(): ShipyardRenderData {
@@ -1694,11 +1818,15 @@ function makeEmptyShipyardRenderData(): ShipyardRenderData {
         h: 600,
       },
       statsRect: L.statsRect,
+      savedPanelRect: L.savedPanelRect,
       newBtn: L.newBtn,
       saveBtn: L.saveBtn,
       backBtn: L.backBtn,
       trashBtn: L.trashBtn,
     },
+    savedSlots: [],
+    statusMsg: null,
+    trashAction: "none",
     palette: [],
     ship: {
       originX: L.shipOriginX,

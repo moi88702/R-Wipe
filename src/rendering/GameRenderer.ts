@@ -92,16 +92,29 @@ export interface ShipyardPaletteTile {
   readonly isHeld: boolean;
 }
 
+export interface ShipyardSavedSlot {
+  readonly rect: ShipyardRect;
+  readonly index: number;
+  readonly name: string;
+  readonly empty: boolean;
+  readonly equipped: boolean;
+  readonly current: boolean;
+}
+
 export interface ShipyardRenderData {
   readonly layout: {
     readonly canvasRect: ShipyardRect;
     readonly paletteRect: ShipyardRect;
     readonly statsRect: ShipyardRect;
+    readonly savedPanelRect: ShipyardRect;
     readonly newBtn: ShipyardRect;
     readonly saveBtn: ShipyardRect;
     readonly backBtn: ShipyardRect;
     readonly trashBtn: ShipyardRect;
   };
+  readonly savedSlots: ReadonlyArray<ShipyardSavedSlot>;
+  readonly statusMsg: string | null;
+  readonly trashAction: "none" | "part" | "blueprint";
   readonly palette: ReadonlyArray<ShipyardPaletteTile>;
   readonly ship: {
     readonly originX: number;
@@ -341,6 +354,9 @@ export class GameRenderer {
   private readonly shipyardPrompt: Text;
   private readonly shipyardPaletteLabels: Text[] = [];
   private readonly shipyardButtonLabels: Text[] = [];
+  private readonly shipyardSavedLabels: Text[] = [];
+  private readonly shipyardSavedHeader: Text;
+  private readonly shipyardStatusText: Text;
 
   constructor(app: Application, width: number, height: number) {
     this.app = app;
@@ -759,6 +775,24 @@ export class GameRenderer {
     this.shipyardPrompt.visible = false;
     this.menuLayer.addChild(this.shipyardPrompt);
 
+    this.shipyardSavedHeader = new Text({
+      text: "SAVED SHIPS",
+      style: hudStyle(COLOR.hudAmber, 14),
+    });
+    this.shipyardSavedHeader.anchor.set(0.5, 0);
+    this.shipyardSavedHeader.visible = false;
+    this.menuLayer.addChild(this.shipyardSavedHeader);
+
+    this.shipyardStatusText = new Text({
+      text: "",
+      style: hudStyle(COLOR.hudAmber, 16),
+    });
+    this.shipyardStatusText.anchor.set(0.5, 0);
+    this.shipyardStatusText.x = width / 2;
+    this.shipyardStatusText.y = 80;
+    this.shipyardStatusText.visible = false;
+    this.menuLayer.addChild(this.shipyardStatusText);
+
     this.initStarfield();
   }
 
@@ -858,8 +892,12 @@ export class GameRenderer {
     this.shipyardStatsText.visible = isShipyard;
     this.shipyardSummaryText.visible = isShipyard;
     this.shipyardPrompt.visible = isShipyard;
+    this.shipyardSavedHeader.visible = isShipyard;
+    // shipyardStatusText visibility is driven by data.statusMsg each frame.
+    if (!isShipyard) this.shipyardStatusText.visible = false;
     for (const t of this.shipyardPaletteLabels) t.visible = isShipyard;
     for (const t of this.shipyardButtonLabels) t.visible = isShipyard;
+    for (const t of this.shipyardSavedLabels) t.visible = isShipyard;
     if (!isShipyard) this.shipyardGfx.clear();
     // Menu list items: used by main-menu (3) and pause (3); hidden on stats / starmap.
     const showList = isMenu || isPause;
@@ -2227,6 +2265,56 @@ export class GameRenderer {
     this.drawPanelRect(g, layout.paletteRect, 0x0e1a2e, 0x2a466b);
     this.drawPanelRect(g, layout.canvasRect, 0x0a1020, 0x2a466b);
     this.drawPanelRect(g, layout.statsRect, 0x0e1a2e, 0x2a466b);
+    this.drawPanelRect(g, layout.savedPanelRect, 0x0e1a2e, 0x2a466b);
+
+    // ── Saved-ships header + slots ────────────────────────────────────────
+    this.shipyardSavedHeader.x = layout.savedPanelRect.x + layout.savedPanelRect.w / 2;
+    this.shipyardSavedHeader.y = layout.savedPanelRect.y + 6;
+    const savedCount = data.savedSlots.filter((s) => !s.empty).length;
+    this.shipyardSavedHeader.text = `SAVED SHIPS  ${savedCount}/${data.savedSlots.length}`;
+
+    this.ensureTextPool(this.shipyardSavedLabels, data.savedSlots.length, 13);
+    for (let i = 0; i < this.shipyardSavedLabels.length; i++) {
+      const label = this.shipyardSavedLabels[i]!;
+      const slot = data.savedSlots[i];
+      if (!slot) {
+        label.visible = false;
+        continue;
+      }
+      label.visible = true;
+      const r = slot.rect;
+      const borderColor = slot.current
+        ? COLOR.hudAmber
+        : slot.equipped
+          ? COLOR.hudCyan
+          : 0x3a5a80;
+      const fillColor = slot.current ? 0x1a2a14 : slot.equipped ? 0x0a1a2a : 0x050a14;
+      g.rect(r.x, r.y, r.w, r.h)
+        .fill({ color: fillColor, alpha: 0.9 })
+        .stroke({ color: borderColor, width: slot.current ? 2 : 1 });
+      const suffix = slot.equipped ? "  [EQUIPPED]" : "";
+      label.text = slot.empty
+        ? "— EMPTY —"
+        : `${slot.name.toUpperCase()}${suffix}`;
+      label.style.fill = slot.empty
+        ? 0x4a5a70
+        : slot.current
+          ? COLOR.hudAmber
+          : slot.equipped
+            ? COLOR.hudCyan
+            : COLOR.hudWhite;
+      label.anchor.set(0, 0.5);
+      label.x = r.x + 8;
+      label.y = r.y + r.h / 2;
+    }
+
+    // ── Status message (SAVED / LIBRARY FULL / etc.) ─────────────────────
+    if (data.statusMsg) {
+      this.shipyardStatusText.text = data.statusMsg;
+      this.shipyardStatusText.visible = true;
+    } else {
+      this.shipyardStatusText.visible = false;
+    }
 
     // ── Palette tiles ─────────────────────────────────────────────────────
     this.ensureTextPool(this.shipyardPaletteLabels, data.palette.length, 12);
@@ -2311,14 +2399,19 @@ export class GameRenderer {
     }
 
     // ── Buttons ───────────────────────────────────────────────────────────
+    const trashLabel = data.trashAction === "part"
+      ? "TRASH PART"
+      : data.trashAction === "blueprint"
+        ? "DELETE SHIP"
+        : "TRASH";
     const buttons = [
       { rect: layout.newBtn, label: "NEW" },
       { rect: layout.saveBtn, label: "SAVE" },
       { rect: layout.backBtn, label: "BACK" },
       {
         rect: layout.trashBtn,
-        label: data.hasSelection ? "TRASH PART" : "TRASH",
-        disabled: !data.hasSelection,
+        label: trashLabel,
+        disabled: data.trashAction === "none",
       },
     ];
     this.ensureTextPool(this.shipyardButtonLabels, buttons.length, 18);
