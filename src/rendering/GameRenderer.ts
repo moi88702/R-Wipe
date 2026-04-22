@@ -447,6 +447,12 @@ export class GameRenderer {
     this.hudLayer.addChild(this.bombsText);
 
     // Menu text
+    // Pause overlay — dark scrim drawn under every menuLayer element so the
+    // scrim dims the frozen gameplay but never dims the pause menu itself.
+    // Cleared when not in pause, so order doesn't affect other screens.
+    this.pauseOverlay = new Graphics();
+    this.menuLayer.addChild(this.pauseOverlay);
+
     this.titleText = new Text({
       text: "R-WIPE",
       style: new TextStyle({
@@ -493,10 +499,6 @@ export class GameRenderer {
       this.menuLayer.addChild(t);
       this.menuItemTexts.push(t);
     }
-
-    // Pause overlay — dark scrim + title. Drawn over the frozen gameplay layer.
-    this.pauseOverlay = new Graphics();
-    this.menuLayer.addChild(this.pauseOverlay);
 
     this.pauseTitle = new Text({
       text: "PAUSED",
