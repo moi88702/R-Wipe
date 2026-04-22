@@ -8,6 +8,7 @@
  *
  * URL shape:
  *   /?god=1&weapon=spread&weaponLevel=5&lives=99&shield=1&speed=2&startLevel=5&autostart=1
+ *   /?unlockParts=1&credits=99999   (shipyard testing)
  *
  * Unknown params are ignored. Invalid values (e.g. weapon=foo) are dropped.
  */
@@ -79,6 +80,12 @@ export function parseCheats(search: string): DevCheats {
 
   const boss = asBoss(params.get("boss"));
   if (boss !== undefined) cheats.boss = boss;
+
+  const unlockParts = asBool(params.get("unlockParts"));
+  if (unlockParts !== undefined) cheats.unlockParts = unlockParts;
+
+  const credits = asNumber(params.get("credits"));
+  if (credits !== undefined) cheats.credits = credits;
 
   return cheats;
 }

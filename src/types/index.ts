@@ -490,6 +490,10 @@ export interface DevCheats {
   autostart?: boolean;
   /** Force a specific boss id regardless of level. */
   boss?: string;
+  /** Unlock every part in the registry (campaign shipyard testing). */
+  unlockParts?: boolean;
+  /** Override campaign credits balance. */
+  credits?: number;
 }
 
 export interface GameState {

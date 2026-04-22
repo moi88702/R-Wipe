@@ -1337,6 +1337,14 @@ export class GameManager {
     if (cheats.shield !== undefined) this.player.setShieldActive(cheats.shield);
     if (cheats.speed !== undefined) this.player.setSpeedMultiplier(cheats.speed);
     if (cheats.megaLaserMs !== undefined) this.player.setMegaLaserMs(cheats.megaLaserMs);
+    if (cheats.unlockParts) {
+      this.overworld.unlockParts(Object.keys(PARTS_REGISTRY));
+      this.overworld.save();
+    }
+    if (cheats.credits !== undefined) {
+      this.overworld.setCredits(cheats.credits);
+      this.overworld.save();
+    }
     this.state.updatePlayerState(this.player.getState());
   }
 
