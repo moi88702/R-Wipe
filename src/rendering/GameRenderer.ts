@@ -164,6 +164,16 @@ export interface ShipyardRenderData {
   readonly heldPartName: string | null;
 }
 
+export interface PlayerBlueprintVisual {
+  readonly placements: ReadonlyArray<{
+    readonly worldX: number;
+    readonly worldY: number;
+    readonly visualKind: string;
+    readonly colour: number;
+    readonly shape: { readonly width: number; readonly height: number };
+  }>;
+}
+
 export interface StarmapRenderData {
   readonly sectorName: string;
   readonly nodes: ReadonlyArray<{
@@ -843,6 +853,7 @@ export class GameRenderer {
       bombCredits: number;
       starmap: StarmapRenderData | null;
       shipyard: ShipyardRenderData | null;
+      playerBlueprint: PlayerBlueprintVisual | null;
     },
   ): void {
     this.drawStarfield(deltaMs);
@@ -964,7 +975,7 @@ export class GameRenderer {
     for (const p of extras.playerProjectiles) this.drawProjectile(p, true);
     for (const p of extras.enemyProjectiles) this.drawProjectile(p, false);
 
-    if (state.playerState.isAlive) this.drawPlayer(state.playerState);
+    if (state.playerState.isAlive) this.drawPlayer(state.playerState, extras.playerBlueprint);
     if (state.playerState.isAlive && state.playerState.megaLaserMs > 0) {
       this.drawMegaLaser(state.playerState);
     }
@@ -1211,27 +1222,46 @@ export class GameRenderer {
       .fill({ color: COLOR.playerAccent, alpha: 0.6 });
   }
 
-  private drawPlayer(p: Readonly<PlayerState>): void {
+  private drawPlayer(
+    p: Readonly<PlayerState>,
+    blueprint: PlayerBlueprintVisual | null,
+  ): void {
     const { x, y } = p.position;
     const w = p.width;
     const h = p.height;
     const flicker = p.invulnerabilityTimer > 0 && Math.floor(p.invulnerabilityTimer / 80) % 2 === 0;
     if (flicker) return;
 
-    // Main body: arrowhead pointing right
-    this.entityGfx
-      .poly([
-        x + w / 2, y,
-        x - w / 2, y - h / 2,
-        x - w / 4, y,
-        x - w / 2, y + h / 2,
-      ])
-      .fill({ color: COLOR.player });
-
-    // Cockpit stripe
-    this.entityGfx
-      .rect(x - w / 4, y - 3, w / 2, 6)
-      .fill({ color: COLOR.playerAccent });
+    if (blueprint && blueprint.placements.length > 0) {
+      // Assembled silhouette from the equipped blueprint. Placements carry
+      // world offsets from the root core; drawPartVisual handles the per-kind
+      // look. Rendered at 1:1 since shape/socket offsets are already in pixels.
+      for (const pl of blueprint.placements) {
+        this.drawPartVisual(
+          this.entityGfx,
+          pl.visualKind,
+          x + pl.worldX,
+          y + pl.worldY,
+          pl.shape.width,
+          pl.shape.height,
+          pl.colour,
+          1,
+        );
+      }
+    } else {
+      // Default arrowhead used when no blueprint is equipped (arcade default).
+      this.entityGfx
+        .poly([
+          x + w / 2, y,
+          x - w / 2, y - h / 2,
+          x - w / 4, y,
+          x - w / 2, y + h / 2,
+        ])
+        .fill({ color: COLOR.player });
+      this.entityGfx
+        .rect(x - w / 4, y - 3, w / 2, 6)
+        .fill({ color: COLOR.playerAccent });
+    }
 
     // Engine glow — bigger + brighter while a speed boost is active.
     const boosting = p.speedBoostMs > 0;

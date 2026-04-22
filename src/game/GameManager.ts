@@ -18,7 +18,7 @@ import { OverworldManager } from "../managers/OverworldManager";
 import { missionToLevelState } from "../managers/MissionManager";
 import { BlueprintStore } from "../managers/BlueprintStore";
 import { CollisionSystem } from "../systems/CollisionSystem";
-import { GameRenderer, type ShipyardRenderData, type ShipyardPaletteTile } from "../rendering/GameRenderer";
+import { GameRenderer, type PlayerBlueprintVisual, type ShipyardRenderData, type ShipyardPaletteTile } from "../rendering/GameRenderer";
 import type { MissionId, NodeId } from "../types/campaign";
 import type { Blueprint, PartCategory, PlacedPart } from "../types/shipBuilder";
 import { STARTER_SECTOR } from "./campaign/StarterSector";
@@ -761,9 +761,6 @@ export class GameManager {
     // and difficulty survive that reset.
     this.state.updateLevelState(levelState);
     this.level.startLevel(this.state.getGameState().levelState, this.enemies);
-    // Apply equipped blueprint's hitbox + HP override so a heavier ship
-    // actually feels heavier in combat.
-    this.applyEquippedBlueprint();
     const bossDef = this.enemies.resolveBossDefForLevel(levelState.levelNumber);
     this.renderer.showLevelBanner(
       result.spec.name.toUpperCase(),
@@ -833,6 +830,10 @@ export class GameManager {
 
     const levelState = this.state.getGameState().levelState;
     this.level.startLevel(levelState, this.enemies);
+
+    // Fold the equipped blueprint's hitbox + HP over the fresh PlayerState
+    // so arcade PLAY and campaign missions both honour the shipyard pick.
+    this.applyEquippedBlueprint();
 
     this.state.setScreen("gameplay");
     this.menuDebounceMs = MENU_DEBOUNCE_MS;
@@ -1447,7 +1448,31 @@ export class GameManager {
       bombCredits: this.player.getBombCredits(),
       starmap: state.screen === "starmap" ? this.buildStarmapExtras() : null,
       shipyard: state.screen === "shipyard" ? this.buildShipyardExtras() : null,
+      playerBlueprint: this.buildPlayerBlueprintVisual(),
     });
+  }
+
+  /**
+   * If a blueprint is equipped, produces the per-placement visual data the
+   * renderer uses to draw the assembled ship silhouette instead of the
+   * default arrowhead. Null otherwise.
+   */
+  private buildPlayerBlueprintVisual(): PlayerBlueprintVisual | null {
+    const equipped = this.overworld.getState().inventory.equippedBlueprintId;
+    if (!equipped) return null;
+    const bp = this.blueprints.get(equipped);
+    if (!bp) return null;
+    const layout = layoutBlueprint(bp);
+    if (layout.placements.length === 0) return null;
+    return {
+      placements: layout.placements.map((pl: Placement) => ({
+        worldX: pl.worldX,
+        worldY: pl.worldY,
+        visualKind: pl.def.visualKind,
+        colour: pl.def.colour,
+        shape: { width: pl.def.shape.width, height: pl.def.shape.height },
+      })),
+    };
   }
 
   /** Collects the data the renderer needs for the shipyard builder. */
