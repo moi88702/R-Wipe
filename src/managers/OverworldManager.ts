@@ -255,6 +255,25 @@ export class OverworldManager {
     };
   }
 
+  /** Set credits to an absolute value (dev-cheat use). */
+  setCredits(amount: number): void {
+    this.state = {
+      ...this.state,
+      inventory: { ...this.state.inventory, credits: Math.max(0, Math.floor(amount)) },
+    };
+  }
+
+  /** Add every id in `partIds` to the unlocked-parts list (dev-cheat use). */
+  unlockParts(partIds: readonly PartId[]): void {
+    this.state = {
+      ...this.state,
+      inventory: {
+        ...this.state.inventory,
+        unlockedParts: mergeUnique(this.state.inventory.unlockedParts, partIds),
+      },
+    };
+  }
+
   /** Equip a blueprint (phase D). Blueprint must already be in inventory. */
   equipBlueprint(blueprintId: string | null): boolean {
     if (blueprintId !== null && !this.state.inventory.blueprints.includes(blueprintId)) {
@@ -265,6 +284,22 @@ export class OverworldManager {
       inventory: { ...this.state.inventory, equippedBlueprintId: blueprintId },
     };
     return true;
+  }
+
+  /**
+   * Equip + unlock in a single step. Used by the shipyard, where player-authored
+   * blueprints may not come through the reward pipeline. Distinct from
+   * `equipBlueprint` so a reward-only flow can still gate on unlock state.
+   */
+  equipBlueprintForced(blueprintId: string | null): void {
+    const inv = this.state.inventory;
+    const blueprints = blueprintId !== null && !inv.blueprints.includes(blueprintId)
+      ? [...inv.blueprints, blueprintId]
+      : inv.blueprints;
+    this.state = {
+      ...this.state,
+      inventory: { ...inv, blueprints, equippedBlueprintId: blueprintId },
+    };
   }
 
   // ── Persistence ──────────────────────────────────────────────────────────
@@ -327,7 +362,7 @@ function mergeMaterials(
   return out;
 }
 
-function mergeUnique<T>(base: T[], add: T[]): T[] {
+function mergeUnique<T>(base: readonly T[], add: readonly T[]): T[] {
   const set = new Set(base);
   for (const x of add) set.add(x);
   return [...set];
