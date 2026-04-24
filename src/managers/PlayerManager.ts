@@ -656,4 +656,28 @@ export class PlayerManager {
   setMegaLaserMs(ms: number): void {
     this.state = { ...this.state, megaLaserMs: Math.max(0, ms) };
   }
+
+  /**
+   * Ship-builder hitbox override (phase D). Applied at mission start from
+   * the equipped blueprint's computed hitbox. Larger ships are easier to hit.
+   * Clamped to sensible minimums so a bug in the builder can't produce an
+   * invisible-to-collisions ship.
+   */
+  setHitbox(width: number, height: number): void {
+    this.state = {
+      ...this.state,
+      width: Math.max(16, Math.round(width)),
+      height: Math.max(12, Math.round(height)),
+    };
+  }
+
+  /**
+   * Apply the ship-builder's computed HP ceiling. Restores HP to the new
+   * maximum so starting a mission with an upgraded hull doesn't leave the
+   * player capped at the vanilla 100.
+   */
+  setMaxHealth(hp: number): void {
+    const clamped = Math.max(10, Math.round(hp));
+    this.state = { ...this.state, health: clamped };
+  }
 }
