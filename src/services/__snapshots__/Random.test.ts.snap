@@ -1,0 +1,7 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`seededRng > produces stable known values for seed 42 (regression guard) 1`] = `0.6018039032351226`;
+
+exports[`seededRng > produces stable known values for seed 42 (regression guard) 2`] = `0.15717907925136387`;
+
+exports[`seededRng > produces stable known values for seed 42 (regression guard) 3`] = `0.47605527378618717`;
