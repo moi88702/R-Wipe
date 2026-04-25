@@ -4,6 +4,51 @@
  */
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Open World Solar System Exploration — type barrel re-exports
+// ──────────────────────────────────────────────────────────────────────────────
+
+export type {
+  SystemSeed,
+  OrbitalParams,
+  CelestialBody,
+  Location,
+  StateChangeLogEntry,
+  StateChangeLog,
+  SolarSystemState,
+  SolarSystemSessionState,
+} from "./solarsystem";
+
+export type {
+  FactionDefinition,
+  FactionStanding,
+  FactionStandingsState,
+  FactionTakeoverEvent,
+} from "./factions";
+
+export type {
+  MissionSpec,
+  MissionLogEntry,
+  MissionLogState,
+  Waypoint,
+} from "./missions";
+
+export type {
+  CapitalShipUpgrade,
+  CapitalShipHull,
+  CapitalShipBlueprint,
+  CapitalShipState,
+  CombatSystemState,
+} from "./capital-ship";
+
+export type {
+  ResourceDeposit,
+  ResourceInventory,
+  HarvestingSession,
+} from "./resources";
+
+export type { DockingCheckResult, LocationProximity } from "./docking";
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Input
 // ──────────────────────────────────────────────────────────────────────────────
 
