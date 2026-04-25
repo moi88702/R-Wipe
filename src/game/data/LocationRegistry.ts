@@ -147,23 +147,6 @@ const REBEL_BASE: Location = {
 
 // ── Registry ──────────────────────────────────────────────────────────────────
 
-/**
- * Explicit map of locationId → controlling faction for quick lookups.
- * Mirrors the `controllingFaction` field but avoids repeated object traversal.
- */
-const LOCATION_FACTION: Readonly<Record<string, string>> = Object.freeze({
-  "station-alpha": "terran-federation",
-  "outpost-frontier": "terran-federation",
-  "station-beta": "void-merchants",
-  "neutral-hub": "void-merchants",
-  "xeno-nexus": "xeno-collective",
-  "crystal-spire": "xeno-collective",
-  "scavenger-haven": "scavenger-clans",
-  "mining-outpost-gamma": "deep-miners",
-  "deep-core-station": "deep-miners",
-  "rebel-base": "nova-rebels",
-});
-
 const ALL_LOCATIONS: readonly Location[] = Object.freeze([
   STATION_ALPHA,
   OUTPOST_FRONTIER,
@@ -240,18 +223,9 @@ export const LocationRegistry = {
 
   /**
    * Returns the default controlling faction id for the given location id.
+   * Derived directly from the location object — no separate map to keep in sync.
    */
   getControllingFaction(locationId: string): string | undefined {
-    return LOCATION_FACTION[locationId];
+    return LOCATION_MAP[locationId]?.controllingFaction;
   },
 } as const;
-
-// ── Extended Location type with optional reputation field ─────────────────────
-// The base Location type in solarsystem.ts does not include requiredReputation
-// (it is managed by the faction system). We augment it here for the registry only.
-declare module "../../types/solarsystem" {
-  interface Location {
-    /** Minimum faction reputation required to dock (defaults to 0). */
-    requiredReputation?: number;
-  }
-}

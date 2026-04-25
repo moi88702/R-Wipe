@@ -23,6 +23,10 @@ const TERRAN_FEDERATION: FactionDefinition = {
   baselineNpcs: ["npc-commander-voss", "npc-trader-halley"],
   baselineLocations: ["station-alpha", "outpost-frontier"],
   allies: ["void-merchants"],
+  // Intentionally asymmetric: XENO_COLLECTIVE lists TERRAN_FEDERATION as an
+  // enemy (territorial encroachment), but the Federation does not reciprocate —
+  // TF concentrates its declared hostility on the more immediately aggressive
+  // SCAVENGER_CLANS and NOVA_REBELS.
   enemies: ["scavenger-clans", "nova-rebels"],
 };
 
@@ -43,6 +47,11 @@ const VOID_MERCHANTS: FactionDefinition = {
   baselineNpcs: ["npc-broker-sable", "npc-captain-mira"],
   baselineLocations: ["neutral-hub", "station-beta"],
   allies: ["terran-federation"],
+  // Intentionally empty — the Guild values commerce over conflict and does not
+  // formally declare war on anyone. Both SCAVENGER_CLANS and NOVA_REBELS list
+  // VOID_MERCHANTS as an enemy (raiding convoys and seizing supply lines), but
+  // the Guild treats those factions as an operational hazard rather than
+  // declared adversaries, maintaining trade routes wherever possible.
   enemies: [],
 };
 

@@ -113,6 +113,12 @@ export interface Location {
    * Absent or empty means no mission prerequisite.
    */
   requiredMissions?: string[];
+  /**
+   * Minimum faction reputation the player must hold with the controlling
+   * faction to be granted docking permission. Absent or 0 means no
+   * reputation gate.
+   */
+  requiredReputation?: number;
   /** Structural classification of the location. */
   type: "station" | "settlement" | "outpost";
 }
