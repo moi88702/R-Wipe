@@ -4,6 +4,51 @@
  */
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Open World Solar System Exploration — type barrel re-exports
+// ──────────────────────────────────────────────────────────────────────────────
+
+export type {
+  SystemSeed,
+  OrbitalParams,
+  CelestialBody,
+  Location,
+  StateChangeLogEntry,
+  StateChangeLog,
+  SolarSystemState,
+  SolarSystemSessionState,
+} from "./solarsystem";
+
+export type {
+  FactionDefinition,
+  FactionStanding,
+  FactionStandingsState,
+  FactionTakeoverEvent,
+} from "./factions";
+
+export type {
+  MissionSpec,
+  MissionLogEntry,
+  MissionLogState,
+  Waypoint,
+} from "./missions";
+
+export type {
+  CapitalShipUpgrade,
+  CapitalShipHull,
+  CapitalShipBlueprint,
+  CapitalShipState,
+  CombatSystemState,
+} from "./capital-ship";
+
+export type {
+  ResourceDeposit,
+  ResourceInventory,
+  HarvestingSession,
+} from "./resources";
+
+export type { DockingCheckResult, LocationProximity } from "./docking";
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Input
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -494,6 +539,25 @@ export interface DevCheats {
   unlockParts?: boolean;
   /** Override campaign credits balance. */
   credits?: number;
+
+  // ── Solar system cheats (open-world mode) ──────────────────────────────
+  /** Set the player's credit balance to this value at session start. */
+  cheat_credits?: number;
+  /** Set the player's alloy inventory to this value at session start. */
+  cheat_alloys?: number;
+  /** Set the player's power crystal inventory to this value at session start. */
+  cheat_crystals?: number;
+  /**
+   * Unlock all capital ship upgrade tiers from 1 up to and including this
+   * value (max 11) for the current session.
+   */
+  cheat_tier?: number;
+  /** Set all faction reputation standings to this value at session start. */
+  cheat_reputation?: number;
+  /** Start the solar system session docked at this location id. */
+  cheat_location?: string;
+  /** Override the solar system generation seed (overrides saved seed). */
+  cheat_system_seed?: number;
 }
 
 export interface GameState {
