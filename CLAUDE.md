@@ -86,9 +86,19 @@ Reset in `resetFx`. All are per-run ephemeral.
 
 Add new HUD data here, never poke renderer internals.
 
+## Solar System — GravitySystem
+
+`src/game/solarsystem/GravitySystem.ts` — static `applyGravity(shipPos, shipVel, primaryBody, deltaMs)` method.
+
+- Units: positions in km, velocities in m/s, gravityStrength in m/s².
+- Formula: `a = gravityStrength × (radius / distance)²` (inverse-square, simplified surface-gravity form).
+- Integration: explicit Euler (`v_new = v + a × dt`).
+- Collision boundary: if `distance ≤ radius`, cancels the inward velocity component (prevents ship penetration). Caller is responsible for the position push-out (repositioning outside the body surface).
+- Degenerate (ship exactly at body centre): returns `{x:0, y:0}`.
+
 ## Testing
 
-Tests live in `src/**/*.test.ts`. Only PlayerManager has tests currently (3 cases). Node-environment safe — nothing Pixi-bound.
+Tests live in `src/**/*.test.ts`. Node-environment safe — nothing Pixi-bound.
 
 ## Commit style
 
