@@ -196,6 +196,13 @@ export class MissionLogManager {
       );
     }
 
+    // Release all waypoint slots before marking completed so they are
+    // immediately available to new missions (clearWaypoint guards against
+    // non-active status, so we write directly here).
+    entry.waypointAssignments.primary = null;
+    entry.waypointAssignments.secondary = null;
+    entry.waypointAssignments.tertiary = null;
+
     entry.status = "completed";
     this.completedMissionIds.add(missionId);
     this.persist();
@@ -279,6 +286,9 @@ export class MissionLogManager {
     const typesFound = new Set<"primary" | "secondary" | "tertiary">();
 
     for (const entry of this.entries) {
+      // Only active missions contribute waypoints — completed/failed/abandoned
+      // entries must not appear on the map.
+      if (entry.status !== "active") continue;
       for (const type of ["primary", "secondary", "tertiary"] as const) {
         const targetId = entry.waypointAssignments[type];
         if (targetId && !typesFound.has(type)) {
