@@ -1,8 +1,9 @@
 /**
  * Docking system data models for the Open World Solar System Exploration feature.
  *
- * Covers the result of a docking permission check and the location proximity
- * query result returned by `DockingSystem.checkProximity`.
+ * Covers the result of a docking permission check, the location proximity
+ * query result returned by `DockingSystem.checkProximity`, and the result of
+ * a full docking request returned by `DockingSystem.requestDocking`.
  */
 
 import type { Location } from "./solarsystem";
@@ -53,4 +54,30 @@ export interface LocationProximity {
   withinDockingRange: Location | null;
   /** Distance (km) from the player to the closest location in the system. */
   distance: number;
+}
+
+// ── Docking Request ───────────────────────────────────────────────────────────
+
+/**
+ * Result returned by `DockingSystem.requestDocking(location)`.
+ *
+ * Represents the outcome of a full docking attempt — whether permission was
+ * granted and, if not, the first gate that blocked it. The caller (typically
+ * the UI layer) uses this to trigger a docking animation, open the location
+ * menu, or display a denial message.
+ */
+export interface DockingRequestResult {
+  /**
+   * Whether docking permission was granted.
+   * `true` means all gates (reputation, items, missions) passed.
+   * `false` means at least one gate blocked the request.
+   */
+  granted: boolean;
+  /**
+   * Why docking was denied. Absent when `granted` is `true`.
+   * Mirrors the `reason` field on `DockingCheckResult`.
+   */
+  reason?: "low-reputation" | "missing-item" | "mission-incomplete";
+  /** The location that was requested. */
+  location: Location;
 }
