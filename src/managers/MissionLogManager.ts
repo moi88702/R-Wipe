@@ -112,6 +112,13 @@ export class MissionLogManager {
       );
     }
 
+    // Guard against duplicate entries — one log entry per mission id at a time.
+    if (this.findEntry(missionSpec.id)) {
+      throw new MissionLogError(
+        `Mission "${missionSpec.id}" is already in the mission log`,
+      );
+    }
+
     // Resolve the auto primary waypoint target.
     let autoWaypoint: string | null = null;
     if (missionSpec.type === "courier" && missionSpec.destinationLocationId) {
@@ -124,6 +131,9 @@ export class MissionLogManager {
       if (firstLocation) {
         autoWaypoint = firstLocation.id;
       }
+      // If the NPC is not listed at any registered location, autoWaypoint stays
+      // null and no primary waypoint is auto-set.  The player can still assign
+      // waypoints manually via setWaypoint().
     }
 
     // Claim the primary slot (clear from any current holder).
@@ -155,6 +165,15 @@ export class MissionLogManager {
    */
   getMissionLog(): MissionLogEntry[] {
     return [...this.entries];
+  }
+
+  /**
+   * Returns the set of mission ids the player has ever completed.
+   * Intended for prerequisite checks on location docking and mission unlock.
+   * The returned set is a live read-only view — callers must not mutate it.
+   */
+  getCompletedMissionIds(): ReadonlySet<string> {
+    return this.completedMissionIds;
   }
 
   /**
@@ -207,6 +226,12 @@ export class MissionLogManager {
       throw new MissionLogError(`Mission "${missionId}" not found in mission log`);
     }
 
+    if (!this.isWaypointModifiable(entry)) {
+      throw new MissionLogError(
+        `Waypoints cannot be modified on a ${entry.status} mission ("${missionId}")`,
+      );
+    }
+
     if (!LocationRegistry.getLocation(targetId)) {
       throw new MissionLogError(
         `Target "${targetId}" is not a valid location or body`,
@@ -234,6 +259,12 @@ export class MissionLogManager {
       throw new MissionLogError(`Mission "${missionId}" not found in mission log`);
     }
 
+    if (!this.isWaypointModifiable(entry)) {
+      throw new MissionLogError(
+        `Waypoints cannot be modified on a ${entry.status} mission ("${missionId}")`,
+      );
+    }
+
     entry.waypointAssignments[type] = null;
     this.persist();
   }
@@ -251,15 +282,21 @@ export class MissionLogManager {
       for (const type of ["primary", "secondary", "tertiary"] as const) {
         const targetId = entry.waypointAssignments[type];
         if (targetId && !typesFound.has(type)) {
-          typesFound.add(type);
           const location = LocationRegistry.getLocation(targetId);
+          if (!location) {
+            // The persisted targetId no longer resolves — likely stale saved data.
+            // Warn and skip rather than silently placing a waypoint at the origin.
+            console.warn(
+              `[MissionLogManager] getWaypoints: targetId "${targetId}" assigned to mission "${entry.missionId}" no longer resolves in LocationRegistry; skipping waypoint.`,
+            );
+            continue;
+          }
+          typesFound.add(type);
           waypoints.push({
             id: `waypoint-${type}`,
             type,
             targetId,
-            targetPosition: location
-              ? { x: location.position.x, y: location.position.y }
-              : { x: 0, y: 0 },
+            targetPosition: { x: location.position.x, y: location.position.y },
             color: WAYPOINT_COLORS[type],
             assignedMissionId: entry.missionId,
           });
@@ -303,6 +340,15 @@ export class MissionLogManager {
 
   private findEntry(missionId: string): MissionLogEntry | undefined {
     return this.entries.find((e) => e.missionId === missionId);
+  }
+
+  /**
+   * Returns true when waypoint assignments on the given entry may be mutated.
+   * Only active missions can have waypoints set or cleared; modifying waypoints
+   * on completed, failed, or abandoned missions is not permitted.
+   */
+  private isWaypointModifiable(entry: MissionLogEntry): boolean {
+    return entry.status === "active";
   }
 
   /**
