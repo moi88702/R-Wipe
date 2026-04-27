@@ -120,8 +120,9 @@ export class MissionLogManager {
       // Set primary to the NPC's location so the player can navigate back
       // after collecting the required items.
       const npcLocations = LocationRegistry.getLocationsForNPC(npcId);
-      if (npcLocations.length > 0) {
-        autoWaypoint = npcLocations[0].id;
+      const firstLocation = npcLocations[0];
+      if (firstLocation) {
+        autoWaypoint = firstLocation.id;
       }
     }
 
