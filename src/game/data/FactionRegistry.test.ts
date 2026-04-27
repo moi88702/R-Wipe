@@ -126,7 +126,7 @@ describe("FactionRegistry.getFactionsForLocation", () => {
     // Given station-alpha is a baseline location of terran-federation
     const result = FactionRegistry.getFactionsForLocation("station-alpha");
     expect(result).toHaveLength(1);
-    expect(result[0].id).toBe("terran-federation");
+    expect(result[0]!.id).toBe("terran-federation");
   });
 
   it("returns an empty array for an unknown location id", () => {
