@@ -184,7 +184,7 @@ export class DockingSystem {
 
     return {
       granted: check.allowed,
-      reason: check.reason,
+      ...(check.reason !== undefined ? { reason: check.reason } : {}),
       location,
     };
   }
