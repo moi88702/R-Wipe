@@ -129,14 +129,17 @@ export class DockingSystem {
     completedMissions: Set<string>,
   ): DockingCheckResult {
     // ── Gate 1: faction reputation ────────────────────────────────────────
-    const requiredReputation = location.requiredReputation ?? 0;
-    if (factionStanding.reputation < requiredReputation) {
-      return {
-        allowed: false,
-        reason: "low-reputation",
-        requiredReputation,
-        currentReputation: factionStanding.reputation,
-      };
+    // Only applies when the location explicitly declares a requiredReputation.
+    // An absent field means the location is open to all factions.
+    if (location.requiredReputation !== undefined) {
+      if (factionStanding.reputation < location.requiredReputation) {
+        return {
+          allowed: false,
+          reason: "low-reputation",
+          requiredReputation: location.requiredReputation,
+          currentReputation: factionStanding.reputation,
+        };
+      }
     }
 
     // ── Gate 2: required items ────────────────────────────────────────────
