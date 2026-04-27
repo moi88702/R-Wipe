@@ -22,6 +22,7 @@ import { GameRenderer, type PlayerBlueprintVisual, type ShipyardRenderData, type
 import type { MissionId, NodeId } from "../types/campaign";
 import type { Blueprint, PartCategory, PlacedPart } from "../types/shipBuilder";
 import { STARTER_SECTOR } from "./campaign/StarterSector";
+import { SolarSystemManager } from "../managers/SolarSystemManager";
 import {
   PARTS_REGISTRY,
   DEFAULT_UNLOCKED_PARTS,
@@ -33,9 +34,15 @@ import { layoutBlueprint, type Placement } from "./parts/geometry";
 import { canSnap } from "./parts/assembly";
 
 /** Menu item ids used by updateMenu / updatePause. */
-type MainMenuItem = "play" | "campaign" | "shipyard" | "stats";
+type MainMenuItem = "play" | "campaign" | "shipyard" | "solar-system" | "stats";
 type PauseMenuItem = "continue" | "stats" | "quit";
-const MAIN_MENU_ITEMS: readonly MainMenuItem[] = ["play", "campaign", "shipyard", "stats"];
+export const MAIN_MENU_ITEMS: readonly MainMenuItem[] = [
+  "play",
+  "campaign",
+  "shipyard",
+  "solar-system",
+  "stats",
+];
 const PAUSE_MENU_ITEMS: readonly PauseMenuItem[] = ["continue", "stats", "quit"];
 
 export interface GameManagerOptions {
@@ -60,6 +67,7 @@ export class GameManager {
   private readonly renderer: GameRenderer;
   private readonly overworld: OverworldManager;
   private readonly blueprints: BlueprintStore;
+  private readonly solarSystem: SolarSystemManager;
 
   private safeTimerMs = 0;
   private menuDebounceMs = 0;
@@ -144,6 +152,8 @@ export class GameManager {
     // Seed a sensible starter blueprint the first time campaign is opened
     // so the shipyard always has at least one option to equip.
     this.seedStarterBlueprintIfMissing();
+
+    this.solarSystem = new SolarSystemManager();
   }
 
   /**
@@ -206,6 +216,8 @@ export class GameManager {
       this.updateStarmap();
     } else if (screen === "shipyard") {
       this.updateShipyard(clamped);
+    } else if (screen === "solar-system") {
+      this.updateSolarSystem(clamped);
     }
 
     // Commit edge-trigger prev-state AFTER all update*() have consumed edges.
@@ -274,6 +286,8 @@ export class GameManager {
         this.openStarmap();
       } else if (pick === "shipyard") {
         this.openShipyard();
+      } else if (pick === "solar-system") {
+        this.openSolarSystem();
       } else {
         this.openStats("main-menu");
       }
@@ -306,6 +320,31 @@ export class GameManager {
       }
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
     }
+  }
+
+  // ── Screen: solar-system (open-world exploration) ────────────────────────
+
+  /** Transition to the solar-system screen. */
+  private openSolarSystem(): void {
+    this.menuSelection = 0;
+    this.menuDebounceMs = MENU_DEBOUNCE_MS;
+    this.state.setScreen("solar-system");
+  }
+
+  private updateSolarSystem(deltaMs: number): void {
+    // ESC / Back → return to main menu.
+    if (
+      (this.wasMenuBackPressed() || this.wasPausePressed()) &&
+      this.menuDebounceMs === 0
+    ) {
+      this.menuSelection = 0;
+      this.state.setScreen("main-menu");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+
+    // Advance the simulation while the screen is active.
+    this.solarSystem.tick(deltaMs);
   }
 
   // ── Screen: stats ────────────────────────────────────────────────────────
@@ -1449,6 +1488,10 @@ export class GameManager {
       starmap: state.screen === "starmap" ? this.buildStarmapExtras() : null,
       shipyard: state.screen === "shipyard" ? this.buildShipyardExtras() : null,
       playerBlueprint: this.buildPlayerBlueprintVisual(),
+      solarSystem:
+        state.screen === "solar-system"
+          ? this.solarSystem.buildRenderData(this.width, this.height)
+          : null,
     });
   }
 

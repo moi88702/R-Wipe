@@ -17,6 +17,7 @@ import type {
   Projectile,
   RunStats,
 } from "../types/index";
+import type { SolarSystemRenderData } from "../managers/SolarSystemManager";
 import {
   drawCircle,
   drawHexagon,
@@ -368,6 +369,12 @@ export class GameRenderer {
   private readonly shipyardSavedHeader: Text;
   private readonly shipyardStatusText: Text;
 
+  // Solar-system (open-world) overlay elements.
+  private readonly solarSystemGfx: Graphics;
+  private readonly solarSystemTitle: Text;
+  private readonly solarSystemPrompt: Text;
+  private readonly solarSystemInfoText: Text;
+
   constructor(app: Application, width: number, height: number) {
     this.app = app;
     this.width = width;
@@ -486,16 +493,17 @@ export class GameRenderer {
     this.promptText.y = height - 40;
     this.menuLayer.addChild(this.promptText);
 
-    // Menu list items — centred column, spaced ~44px apart.
+    // Menu list items — centred column, spaced 40px apart.
+    // Sized for the largest menu (main menu: 5 items; pause: 3 items).
     this.menuItemTexts = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
       const t = new Text({
         text: "",
         style: hudStyle(COLOR.hudWhite, 28),
       });
       t.anchor.set(0.5, 0.5);
       t.x = width / 2;
-      t.y = height / 2 + 80 + i * 46;
+      t.y = height / 2 + 40 + i * 40;
       this.menuLayer.addChild(t);
       this.menuItemTexts.push(t);
     }
@@ -805,6 +813,51 @@ export class GameRenderer {
     this.shipyardStatusText.visible = false;
     this.menuLayer.addChild(this.shipyardStatusText);
 
+    // Solar-system overlay
+    this.solarSystemGfx = new Graphics();
+    this.menuLayer.addChild(this.solarSystemGfx);
+
+    this.solarSystemTitle = new Text({
+      text: "OPEN WORLD",
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: 40,
+        fill: COLOR.hudCyan,
+        fontWeight: "bold",
+      }),
+    });
+    this.solarSystemTitle.anchor.set(0.5, 0);
+    this.solarSystemTitle.x = width / 2;
+    this.solarSystemTitle.y = 16;
+    this.solarSystemTitle.visible = false;
+    this.menuLayer.addChild(this.solarSystemTitle);
+
+    this.solarSystemInfoText = new Text({
+      text: "",
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: 16,
+        fill: COLOR.hudAmber,
+        align: "center",
+        lineHeight: 24,
+      }),
+    });
+    this.solarSystemInfoText.anchor.set(0.5, 1);
+    this.solarSystemInfoText.x = width / 2;
+    this.solarSystemInfoText.y = height - 50;
+    this.solarSystemInfoText.visible = false;
+    this.menuLayer.addChild(this.solarSystemInfoText);
+
+    this.solarSystemPrompt = new Text({
+      text: "ESC  BACK TO MENU",
+      style: hudStyle(COLOR.hudWhite, 14),
+    });
+    this.solarSystemPrompt.anchor.set(0.5, 1);
+    this.solarSystemPrompt.x = width / 2;
+    this.solarSystemPrompt.y = height - 20;
+    this.solarSystemPrompt.visible = false;
+    this.menuLayer.addChild(this.solarSystemPrompt);
+
     this.initStarfield();
   }
 
@@ -856,6 +909,7 @@ export class GameRenderer {
       starmap: StarmapRenderData | null;
       shipyard: ShipyardRenderData | null;
       playerBlueprint: PlayerBlueprintVisual | null;
+      solarSystem: SolarSystemRenderData | null;
     },
   ): void {
     this.drawStarfield(deltaMs);
@@ -872,10 +926,12 @@ export class GameRenderer {
     const isGameOver = screen === "game-over";
     const isStarmap = screen === "starmap";
     const isShipyard = screen === "shipyard";
+    const isSolarSystem = screen === "solar-system";
     // Gameplay entities stay visible behind the pause overlay.
     const drawsEntities = isGameplay || isPause;
 
-    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard;
+    this.menuLayer.visible =
+      isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem;
     this.titleText.visible = isMenu;
     this.subtitleText.visible = isMenu;
     this.promptText.visible = isMenu || isPause;
@@ -912,7 +968,12 @@ export class GameRenderer {
     for (const t of this.shipyardButtonLabels) t.visible = isShipyard;
     for (const t of this.shipyardSavedLabels) t.visible = isShipyard;
     if (!isShipyard) this.shipyardGfx.clear();
-    // Menu list items: used by main-menu (3) and pause (3); hidden on stats / starmap.
+    // Solar-system overlay toggles
+    this.solarSystemTitle.visible = isSolarSystem;
+    this.solarSystemInfoText.visible = isSolarSystem;
+    this.solarSystemPrompt.visible = isSolarSystem;
+    if (!isSolarSystem) this.solarSystemGfx.clear();
+    // Menu list items: used by main-menu and pause; hidden on other screens.
     const showList = isMenu || isPause;
     for (const t of this.menuItemTexts) t.visible = showList;
 
@@ -939,6 +1000,11 @@ export class GameRenderer {
 
     if (isShipyard && extras.shipyard) {
       this.drawShipyard(extras.shipyard);
+      return;
+    }
+
+    if (isSolarSystem && extras.solarSystem) {
+      this.drawSolarSystem(extras.solarSystem);
       return;
     }
 
@@ -2597,13 +2663,13 @@ export class GameRenderer {
     }
   }
 
-  /** Populates the 3-item main-menu list and highlights the selected one. */
+  /** Populates the main-menu list and highlights the selected one. */
   private updateMainMenu(selectedIdx: number): void {
-    const items = ["PLAY", "CAMPAIGN", "SHIPYARD", "STATS"];
-    this.renderMenuList(items, selectedIdx, this.height / 2 + 60, 40);
+    const items = ["PLAY", "CAMPAIGN", "SHIPYARD", "OPEN WORLD", "STATS"];
+    this.renderMenuList(items, selectedIdx, this.height / 2 + 40, 40);
   }
 
-  /** Populates the 3-item pause-menu list and highlights the selected one. */
+  /** Populates the pause-menu list and highlights the selected one. */
   private updatePauseMenu(selectedIdx: number): void {
     const items = ["CONTINUE", "STATS", "QUIT TO MENU"];
     this.renderMenuList(items, selectedIdx, this.height / 2, 52);
@@ -2641,6 +2707,75 @@ export class GameRenderer {
       ? formatRunStats(lastRun)
       : "— NO RUNS YET —";
     this.statsColAllTime.text = formatAllTimeStats(state.allTimeStats);
+  }
+
+  // ── Solar-system screen ───────────────────────────────────────────────────
+
+  /**
+   * Draw the open-world solar system map:
+   *  - Star + planet circles sized by their km radius (clamped to visible range).
+   *  - Location diamond markers coloured by faction.
+   *  - Player ship as a small cyan triangle.
+   *  - Info text showing docked location name (if docked).
+   */
+  private drawSolarSystem(data: SolarSystemRenderData): void {
+    const g = this.solarSystemGfx;
+    g.clear();
+
+    // Update title to show system name.
+    this.solarSystemTitle.text = data.systemName.toUpperCase();
+
+    // Update info line.
+    this.solarSystemInfoText.text = data.playerIsDocked
+      ? `DOCKED AT  ${(data.dockedLocationName ?? "").toUpperCase()}`
+      : "FREE FLIGHT";
+
+    // ── Bodies ─────────────────────────────────────────────────────────────
+    for (const body of data.bodies) {
+      const r = Math.max(4, Math.min(body.screenRadius, body.type === "star" ? 40 : 18));
+      const { r: cr, g: cg, b: cb } = body.color;
+      const col = (cr << 16) | (cg << 8) | cb;
+
+      if (body.type === "star") {
+        // Outer glow ring.
+        g.circle(body.screenX, body.screenY, r + 6).fill({ color: col, alpha: 0.25 });
+      }
+      g.circle(body.screenX, body.screenY, r).fill({ color: col, alpha: 1 });
+
+      // Subtle label — drawn as part of the graphics for simplicity (no
+      // dynamic Text pool needed here; the canvas is read-only during play).
+    }
+
+    // ── Location markers (diamond shape) ───────────────────────────────────
+    for (const loc of data.locations) {
+      const size = loc.isDocked ? 10 : loc.isNearby ? 8 : 6;
+      const col = loc.isDocked ? 0x00ffcc : loc.isNearby ? 0xffdd44 : 0xaaaaaa;
+      const { x, y } = { x: loc.screenX, y: loc.screenY };
+      // Draw a small diamond.
+      g.poly([x, y - size, x + size, y, x, y + size, x - size, y]).fill({
+        color: col,
+        alpha: 0.9,
+      });
+    }
+
+    // ── Player ship (small triangle pointing in heading direction) ──────────
+    if (!data.playerIsDocked) {
+      const hRad = data.playerHeading * (Math.PI / 180);
+      const s = 7;
+      // Three points: nose forward, two trailing corners.
+      const noseX = data.playerScreenX + Math.cos(hRad) * s * 1.6;
+      const noseY = data.playerScreenY - Math.sin(hRad) * s * 1.6;
+      const lAngle = hRad + 2.4;
+      const rAngle = hRad - 2.4;
+      g.poly([
+        noseX,
+        noseY,
+        data.playerScreenX + Math.cos(lAngle) * s,
+        data.playerScreenY - Math.sin(lAngle) * s,
+        data.playerScreenX + Math.cos(rAngle) * s,
+        data.playerScreenY - Math.sin(rAngle) * s,
+      ]).fill({ color: 0x00ffff, alpha: 1 });
+    }
   }
 
   private updateGameOverText(state: Readonly<GameState>): void {
