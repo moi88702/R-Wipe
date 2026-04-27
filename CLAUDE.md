@@ -96,6 +96,29 @@ Add new HUD data here, never poke renderer internals.
 - Collision boundary: if `distance ≤ radius`, cancels the inward velocity component (prevents ship penetration). Caller is responsible for the position push-out (repositioning outside the body surface).
 - Degenerate (ship exactly at body centre): returns `{x:0, y:0}`.
 
+## Solar System — MissionLogManager
+
+`src/managers/MissionLogManager.ts` — mission log, waypoint management, and persistence for the open-world solar system.
+
+**Public API:**
+- `acceptMission(spec, npcId)` — validates spec.id in `MissionRegistry`, creates active `MissionLogEntry`, auto-sets primary waypoint (courier→`destinationLocationId`, trade→NPC's first `LocationRegistry` location), persists. Throws `MissionLogError` if id unknown or already in log. Only one entry may hold each slot globally (previous holder is cleared).
+- `getMissionLog()` — returns shallow copy of all entries (active, completed, failed, abandoned).
+- `getCompletedMissionIds()` — returns live `ReadonlySet<string>` for prerequisite checks.
+- `completeMission(missionId)` — marks entry completed, clears all its waypoint slots, adds to completedSet, returns `MissionRewards {credits, reputation, items}`, persists. Throws if id not in log.
+- `setWaypoint(missionId, type, targetId)` — validates targetId in `LocationRegistry`, clears the slot's current holder, assigns, persists. Only active missions can be modified. Throws `MissionLogError` on bad id/location/status.
+- `clearWaypoint(missionId, type)` — nulls the slot on the entry, persists. Only active missions.
+- `getWaypoints()` — returns up to 3 `Waypoint` objects (one per occupied slot type), filtered to active missions only. Colours: primary=cyan(0,255,255), secondary=yellow(255,255,0), tertiary=magenta(255,0,255).
+- `load()` — loads from `rwipe.missions.v1`; returns `true` if data found.
+- `reset()` — clears in-memory state and removes storage entry (new-game / test teardown).
+
+**Constructor:** `new MissionLogManager(storageBackend?)` — pass `new InMemoryStorage()` in tests.
+
+**Storage key:** `MISSIONS_STORAGE_KEY = "rwipe.missions.v1"` (schema v1, exported from `LocalStorageService`).
+
+**Static registries (same package — no mocking needed in tests):**
+- `MissionRegistry` (`src/game/data/MissionRegistry.ts`) — 18 missions across 5 factions; `getMission(id)`, `getMissionsByFaction`, `getMissionsByNPC`, `getMissionsByType`.
+- `LocationRegistry` (`src/game/data/LocationRegistry.ts`) — 10 locations; `getLocation(id)`, `getLocationsForNPC(npcId)`, `getLocationsByFaction`, `getLocationsByBody`.
+
 ## Testing
 
 Tests live in `src/**/*.test.ts`. Node-environment safe — nothing Pixi-bound.
