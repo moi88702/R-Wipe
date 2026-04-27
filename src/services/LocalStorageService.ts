@@ -193,3 +193,121 @@ export class InMemoryStorage implements StorageBackend {
     return this.map.size;
   }
 }
+
+// ── Named Slot Constants ───────────────────────────────────────────────────
+
+/** localStorage key for the solar system state slot. */
+export const SOLAR_SYSTEM_STORAGE_KEY = "rwipe.solarsystem.v1" as const;
+/** Current schema version for rwipe.solarsystem.v1. */
+export const SOLAR_SYSTEM_SCHEMA_VERSION = 1 as const;
+/**
+ * Migration chain for rwipe.solarsystem.v1.
+ * Add an entry keyed by the *from* version to upgrade to the next version.
+ * Example (v1 → v2):
+ *   solarSystemMigrations[1] = (raw) => ({ ...(raw as V1), newField: "default" });
+ */
+export const solarSystemMigrations: Record<number, Migration> = {};
+
+/** localStorage key for the faction standings slot. */
+export const FACTIONS_STORAGE_KEY = "rwipe.factions.v1" as const;
+/** Current schema version for rwipe.factions.v1. */
+export const FACTIONS_SCHEMA_VERSION = 1 as const;
+/**
+ * Migration chain for rwipe.factions.v1.
+ * Example (v1 → v2):
+ *   factionsMigrations[1] = (raw) => ({ ...(raw as V1), newField: "default" });
+ */
+export const factionsMigrations: Record<number, Migration> = {};
+
+/** localStorage key for the mission log slot. */
+export const MISSIONS_STORAGE_KEY = "rwipe.missions.v1" as const;
+/** Current schema version for rwipe.missions.v1. */
+export const MISSIONS_SCHEMA_VERSION = 1 as const;
+/**
+ * Migration chain for rwipe.missions.v1.
+ * Example (v1 → v2):
+ *   missionsMigrations[1] = (raw) => ({ ...(raw as V1), newField: "default" });
+ */
+export const missionsMigrations: Record<number, Migration> = {};
+
+/** localStorage key for the capital ship blueprint and upgrades slot. */
+export const CAPITAL_SHIP_STORAGE_KEY = "rwipe.capital-ship.v1" as const;
+/** Current schema version for rwipe.capital-ship.v1. */
+export const CAPITAL_SHIP_SCHEMA_VERSION = 1 as const;
+/**
+ * Migration chain for rwipe.capital-ship.v1.
+ * Example (v1 → v2):
+ *   capitalShipMigrations[1] = (raw) => ({ ...(raw as V1), newField: "default" });
+ */
+export const capitalShipMigrations: Record<number, Migration> = {};
+
+// ── LocalStorageService ────────────────────────────────────────────────────
+
+/**
+ * Central service that provides generic versioned load / save operations over
+ * localStorage. Each call delegates to a fresh `VersionedSlot` instance, so
+ * the caller supplies the key, current schema version, and any migration steps
+ * needed to bring older stored payloads up to date.
+ *
+ * The four named slot constants (`SOLAR_SYSTEM_STORAGE_KEY`, etc.) and their
+ * companion migration registries (`solarSystemMigrations`, etc.) are exported
+ * from this module so all code that touches a given slot can share the same
+ * config object. To add a v1→v2 migration, set:
+ *
+ *   solarSystemMigrations[1] = (raw) => ({ ...(raw as OldShape), newField: "" });
+ *   // bump SOLAR_SYSTEM_SCHEMA_VERSION to 2 in the same commit.
+ *
+ * Usage:
+ *   const svc = new LocalStorageService(new InMemoryStorage());
+ *   svc.save(SOLAR_SYSTEM_STORAGE_KEY, myState, SOLAR_SYSTEM_SCHEMA_VERSION);
+ *   const state = svc.load<SolarSystemState>(
+ *     SOLAR_SYSTEM_STORAGE_KEY,
+ *     SOLAR_SYSTEM_SCHEMA_VERSION,
+ *     solarSystemMigrations,
+ *   );
+ */
+export class LocalStorageService {
+  constructor(private readonly storage: StorageBackend | null = defaultStorage()) {}
+
+  /**
+   * Load a versioned payload from storage.
+   *
+   * Returns `null` when nothing is stored under `key` or when storage is
+   * unavailable (e.g. running in Node without an InMemoryStorage override).
+   *
+   * Throws `StorageMigrationError` on:
+   *  - corrupt JSON
+   *  - a stored version newer than `version` (forward-compat guard)
+   *  - a missing migration step in the chain
+   *  - optional validator rejection
+   */
+  load<T>(
+    key: string,
+    version: number,
+    migrations: Record<number, Migration> = {},
+  ): T | null {
+    return new VersionedSlot<T>({
+      key,
+      currentVersion: version,
+      migrations,
+      storage: this.storage,
+    }).load();
+  }
+
+  /**
+   * Persist a versioned payload to storage.
+   * No-ops silently when storage is unavailable.
+   */
+  save<T>(key: string, value: T, version: number): void {
+    new VersionedSlot<T>({
+      key,
+      currentVersion: version,
+      storage: this.storage,
+    }).save(value);
+  }
+
+  /** Remove the stored entry for the given key. No-op if absent. */
+  clear(key: string): void {
+    if (this.storage) this.storage.removeItem(key);
+  }
+}
