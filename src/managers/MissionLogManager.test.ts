@@ -80,7 +80,7 @@ describe("acceptMission()", () => {
     const b = new MissionLogManager(storage);
     b.load();
     expect(b.getMissionLog()).toHaveLength(1);
-    expect(b.getMissionLog()[0].missionId).toBe("mission-tf-courier-alpha");
+    expect(b.getMissionLog()[0]!.missionId).toBe("mission-tf-courier-alpha");
   });
 
   it("throws MissionLogError when spec id is not in MissionRegistry", () => {
@@ -132,7 +132,7 @@ describe("completeMission()", () => {
     // When
     const rewards = manager.completeMission("mission-tf-courier-alpha");
     // Then
-    const entry = manager.getMissionLog()[0];
+    const entry = manager.getMissionLog()[0]!;
     expect(entry.status).toBe("completed");
     expect(manager.getCompletedMissionIds().has("mission-tf-courier-alpha")).toBe(true);
     expect(rewards.credits).toBe(800);
@@ -148,7 +148,7 @@ describe("completeMission()", () => {
     // When
     manager.completeMission("mission-tf-courier-alpha");
     // Then
-    const entry = manager.getMissionLog()[0];
+    const entry = manager.getMissionLog()[0]!;
     expect(entry.waypointAssignments.primary).toBeNull();
     expect(entry.waypointAssignments.secondary).toBeNull();
     expect(entry.waypointAssignments.tertiary).toBeNull();
@@ -188,7 +188,7 @@ describe("completeMission()", () => {
 
     const b = new MissionLogManager(storage);
     b.load();
-    expect(b.getMissionLog()[0].status).toBe("completed");
+    expect(b.getMissionLog()[0]!.status).toBe("completed");
     expect(b.getCompletedMissionIds().has("mission-tf-courier-alpha")).toBe(true);
   });
 
@@ -211,7 +211,7 @@ describe("setWaypoint()", () => {
     // Then — visible from a reloaded manager
     const b = new MissionLogManager(storage);
     b.load();
-    expect(b.getMissionLog()[0].waypointAssignments.primary).toBe("station-beta");
+    expect(b.getMissionLog()[0]!.waypointAssignments.primary).toBe("station-beta");
   });
 
   it("releases the previous holder of a slot before assigning to a new mission", () => {
@@ -268,7 +268,7 @@ describe("clearWaypoint()", () => {
     // Then
     const b = new MissionLogManager(storage);
     b.load();
-    expect(b.getMissionLog()[0].waypointAssignments.primary).toBeNull();
+    expect(b.getMissionLog()[0]!.waypointAssignments.primary).toBeNull();
   });
 
   it("throws MissionLogError when missionId is not in the log", () => {
@@ -394,7 +394,7 @@ describe("load() / persistence", () => {
     // Only the active trade mission contributes a waypoint
     const waypoints = b.getWaypoints();
     expect(waypoints).toHaveLength(1);
-    expect(waypoints[0].targetId).toBe("station-alpha");
+    expect(waypoints[0]!.targetId).toBe("station-alpha");
   });
 
   it("returns false when nothing is stored", () => {
