@@ -22,7 +22,6 @@
 
 import type {
   FactionStanding,
-  FactionStandingsState,
   FactionTakeoverEvent,
 } from "../types/factions";
 import type { SolarSystemState } from "../types/solarsystem";
