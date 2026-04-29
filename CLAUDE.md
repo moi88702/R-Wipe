@@ -96,6 +96,65 @@ Add new HUD data here, never poke renderer internals.
 - Collision boundary: if `distance ≤ radius`, cancels the inward velocity component (prevents ship penetration). Caller is responsible for the position push-out (repositioning outside the body surface).
 - Degenerate (ship exactly at body centre): returns `{x:0, y:0}`.
 
+## Solar System — Enemy Stations & Spawn System
+
+### EnemyStationRegistry (`src/game/data/EnemyStationRegistry.ts`)
+
+Static registry of four hostile stations. Two factions own them:
+- `scavenger-clans`: `enemy-station-scav-belt` (asteroid-belt), `enemy-station-scav-wreck` (asteroid-belt)
+- `nova-rebels`: `enemy-station-rebel-strike` (moon-petra), `enemy-station-rebel-forward` (planet-void)
+
+**Public API:**
+- `getStation(id)` → `EnemyStationDefinition | undefined`
+- `getAllStations()` → frozen `readonly EnemyStationDefinition[]`
+- `getAllStationIds()` → `string[]`
+- `getStationsByFaction(factionId)` → `EnemyStationDefinition[]`
+- `getStationsByBody(bodyId)` → `EnemyStationDefinition[]`
+- `createInitialStates()` → `EnemyStationState[]` — one dormant/full-health state per station
+
+**Shape guarantees (enforced by tests):**
+- `alertRadiusKm > turrets.rangeKm` — station always alerts before turrets fire.
+- `spawnRadiusKm < alertRadiusKm` — ships spawn near the station, not at its edge.
+
+### EnemySpawnSystem (`src/systems/EnemySpawnSystem.ts`)
+
+Pure-function class. Every method takes state arrays and returns new state arrays (no mutation).
+
+**Alert state machine** (`StationAlertLevel`): `"dormant"` → `"alerted"` → `"combat"`. One-way escalation only.
+
+| Method | When to call |
+|---|---|
+| `updateAlertStates(playerPos, defs, states)` | Every frame when player moves |
+| `escalateToCombat(stationId, states)` | After alert delay elapses, or on first incoming damage |
+| `trySpawn(def, state, nowMs, rng)` | Each combat tick; returns `SpawnWaveResult` |
+| `registerSpawnedEnemies(id, newIds, states)` | After creating enemy entities from `spawnPositions` |
+| `onEnemyDestroyed(enemyId, states)` | When any enemy entity dies |
+| `applyDamage(stationId, dmg, states)` | When player weapon hits a station |
+| `rechargeShields(deltaMs, defs, states)` | Each frame tick |
+| `getActiveStations(defs, states)` | Returns `{definition, state}[]` for alerted/combat stations |
+| `getStationsInAlertRange(playerPos, defs)` | For approach HUD / map indicators |
+
+**`trySpawn` preconditions** (all must be true):
+1. `!isDestroyed`
+2. `alertLevel === "combat"`
+3. `currentTimeMs − lastSpawnAtMs ≥ spawnIntervalMs`
+4. `activeEnemyIds.length < maxActiveShips`
+
+Wave size = `min(shipsPerWave, maxActiveShips − activeEnemyIds.length)`.
+
+**`applyDamage` model**: shields absorb first; overflow to hull; `hull ≤ 0` → `isDestroyed = true`, `activeEnemyIds` cleared.
+
+### Types (`src/types/combat.ts`, re-exported from `src/types/index.ts`)
+
+- `EnemyStationDefinition` — static config
+- `EnemyStationState` — runtime/save-ready state
+- `StationTurretConfig` — turret count, damage, fire-rate, range, weaponKind
+- `StationSpawnConfig` — ship types, max-active, interval, wave-size, radius
+- `StationAlertLevel` — union literal
+- `SpawnWaveResult` — result from `trySpawn`
+
+---
+
 ## Solar System — MissionLogManager
 
 `src/managers/MissionLogManager.ts` — mission log, waypoint management, and persistence for the open-world solar system.
