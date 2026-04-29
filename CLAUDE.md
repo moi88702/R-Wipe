@@ -86,6 +86,20 @@ Reset in `resetFx`. All are per-run ephemeral.
 
 Add new HUD data here, never poke renderer internals.
 
+## Solar System — ShipControlManager
+
+`src/game/solarsystem/ShipControlManager.ts` — static class. `update(current, input, config, primaryBody, deltaMs)` computes one physics tick.
+
+**Steps (in order)**: rotation → thrust → gravity → speed-cap → position integration.
+
+**Heading**: radians, 0 = North (−y), clockwise. `forwardVector(h)` = `(sin h, −cos h)`. `strafeRightVector(h)` = `(cos h, sin h)`.
+
+**Input mapping**: W/S = forward/reverse thrust, A/D = rotation, ← / → arrows = strafe. Optional `mouseHeadingTarget` (radians) overrides keyboard turning.
+
+**Position units**: position km, velocity m/s → `Δpos_km = vel_ms × dt_s / 1000`.
+
+**`InputState` additions**: four optional boolean fields added (`thrustForward`, `thrustReverse`, `turnLeft`, `turnRight`) and populated in `InputHandler.poll()` from KeyW / KeyS / KeyA / KeyD. Classic arcade mode is unaffected — those fields are optional.
+
 ## Solar System — GravitySystem
 
 `src/game/solarsystem/GravitySystem.ts` — static `applyGravity(shipPos, shipVel, primaryBody, deltaMs)` method.

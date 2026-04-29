@@ -29,10 +29,57 @@ Key subsystems:
 | `GameRenderer` | Pixi.js draw layer (no state mutation) |
 | `InputHandler` | Keyboard + touch; pulse-flag contract |
 | `GravitySystem` | Inverse-square gravity for the solar system layer |
+| `ShipControlManager` | WASD/arrow-key movement physics + gravity integration |
 | `DockingSystem` | Proximity detection + multi-gate docking permission |
 | `MissionLogManager` | Mission acceptance, log, waypoints, persistence |
 | `EnemyStationRegistry` | Static definitions for hostile enemy strongholds |
 | `EnemySpawnSystem` | Alert state machine, ship-spawn waves, station damage |
+
+## Solar system — Ship controls
+
+`ShipControlManager` (`src/game/solarsystem/ShipControlManager.ts`) translates WASD / arrow-key input into velocity + heading changes with full gravitational physics each tick.
+
+**Input mapping**:
+
+| Key | Action |
+|---|---|
+| W | Forward thrust (ship's facing direction) |
+| S | Reverse / retro-burn (opposite heading) |
+| A | Rotate counter-clockwise (turn left) |
+| D | Rotate clockwise (turn right) |
+| ← ArrowLeft | Strafe left (perpendicular to heading) |
+| → ArrowRight | Strafe right (perpendicular to heading) |
+| Mouse heading target | Smooth turn-toward-cursor override |
+
+**Physics model** (explicit Euler, per-tick order):
+1. **Rotation** — heading += `turnRateRadPerS × Δt`, or closest-path turn toward mouse heading.
+2. **Thrust** — `v += thrusterPower × Δt` in the forward direction; lateral (`strafePower`).
+3. **Gravity** — `GravitySystem.applyGravity` applied to running velocity.
+4. **Speed cap** — optional `maxSpeedMs` clamp before position integration.
+5. **Position** — `pos_km += vel_ms × Δt_s / 1000`.
+
+**Heading convention**: radians, 0 = North (−y screen), clockwise. Helper methods
+`degreesToRadians` / `radiansToDegrees` bridge the degrees stored in `SolarSystemSessionState`.
+
+**`InputState` additions** (optional fields populated by `InputHandler`):
+- `thrustForward` (W key)
+- `thrustReverse` (S key)
+- `turnLeft` (A key)
+- `turnRight` (D key)
+
+```ts
+import { ShipControlManager } from "./src/game/solarsystem/ShipControlManager";
+
+const result = ShipControlManager.update(
+  { position, velocity, headingRadians },
+  { thrustForward: true, thrustReverse: false, turnLeft: false, turnRight: false,
+    strafeLeft: false, strafeRight: false },
+  { hullMass: 1000, thrusterPower: 150, turnRateRadPerS: Math.PI, maxSpeedMs: 500 },
+  primaryGravityBody,  // CelestialBody | null
+  deltaMs,
+);
+// result: { position, velocity, headingRadians, isThrustActive, isRotating }
+```
 
 ## Solar system — Enemy Stations
 

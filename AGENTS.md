@@ -18,6 +18,41 @@ Integration-first TDD (see system prompt). Mock only **true external boundaries*
 - `localStorage` → use the `InMemoryStorage` test double from `LocalStorageService.ts`.
 - No mocking of internal helpers, pure functions, or same-package modules.
 
+## Key new subsystems (task 5ff56ba9)
+
+### ShipControlManager (`src/game/solarsystem/ShipControlManager.ts`)
+
+Pure-static manager for WASD / arrow-key ship movement with gravity physics.
+
+**Public API**:
+
+```ts
+ShipControlManager.update(current, input, config, primaryBody, deltaMs)
+  → ShipControlResult   // { position, velocity, headingRadians, isThrustActive, isRotating }
+```
+
+**`ShipControlConfig`** — ship stats driving the physics:
+- `hullMass` (kg) — stored for physics reference
+- `thrusterPower` (m/s²) — forward/reverse acceleration
+- `strafePower?` (m/s²) — lateral acceleration (defaults to `thrusterPower`)
+- `turnRateRadPerS` (rad/s) — angular turn speed
+- `maxSpeedMs?` (m/s) — optional speed cap
+
+**`ShipControlInput`** — per-frame key snapshot:
+- `thrustForward` / `thrustReverse` — W / S keys
+- `turnLeft` / `turnRight` — A / D keys
+- `strafeLeft` / `strafeRight` — ← / → arrow keys
+- `mouseHeadingTarget?` — optional smooth turn override (radians)
+
+**Heading convention**: radians, 0 = North (−y), clockwise. Use
+`ShipControlManager.degreesToRadians` / `radiansToDegrees` to bridge
+`SolarSystemSessionState.playerHeading` (degrees 0–359).
+
+**InputState additions**: `InputState` in `src/types/index.ts` gained four optional
+fields (`thrustForward`, `thrustReverse`, `turnLeft`, `turnRight`). `InputHandler.poll()`
+populates them from KeyW / KeyS / KeyA / KeyD. Existing classic-mode code is unaffected
+(fields are optional; classical move keys still map to ArrowUp/Down/Left/Right).
+
 ## Key new subsystems (task 8af74932)
 
 ### EnemyStationRegistry (`src/game/data/EnemyStationRegistry.ts`)

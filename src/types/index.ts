@@ -82,6 +82,28 @@ export interface InputState {
   pointerDownPulse?: { x: number; y: number } | null;
   /** True whenever the primary pointer is pressed (mouse button or finger). */
   pointerHeld?: boolean;
+
+  // ── Solar-system / free-flight additions ──────────────────────────────────
+  /**
+   * W key — apply thrust in the ship's facing direction (solar-system mode).
+   * Absent in classic arcade mode; always false when the key is not held.
+   */
+  thrustForward?: boolean;
+  /**
+   * S key — apply thrust opposite the ship's facing direction (solar-system
+   * mode). Absent in classic arcade mode; always false when not held.
+   */
+  thrustReverse?: boolean;
+  /**
+   * A key — rotate the ship counter-clockwise (solar-system mode).
+   * Absent in classic arcade mode; always false when not held.
+   */
+  turnLeft?: boolean;
+  /**
+   * D key — rotate the ship clockwise (solar-system mode).
+   * Absent in classic arcade mode; always false when not held.
+   */
+  turnRight?: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

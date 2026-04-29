@@ -212,6 +212,11 @@ export class InputHandler {
       pointer: this.pointerPos,
       pointerDownPulse: this.pointerDownPulse,
       pointerHeld: this.pointerHeld,
+      // ── Solar-system free-flight keys ─────────────────────────────────────
+      thrustForward: this.keysPressed.has("KeyW"),
+      thrustReverse: this.keysPressed.has("KeyS"),
+      turnLeft: this.keysPressed.has("KeyA"),
+      turnRight: this.keysPressed.has("KeyD"),
     };
   }
 
