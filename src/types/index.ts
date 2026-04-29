@@ -48,6 +48,14 @@ export type {
 
 export type { DockingCheckResult, LocationProximity } from "./docking";
 
+export type {
+  StationTurretConfig,
+  StationSpawnConfig,
+  EnemyStationDefinition,
+  StationAlertLevel,
+  EnemyStationState,
+} from "./combat";
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Input
 // ──────────────────────────────────────────────────────────────────────────────
