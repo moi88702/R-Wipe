@@ -3,6 +3,8 @@ export * from "./registries";
 export * from "./types";
 export { TargetLockManager } from "./TargetLockManager";
 export type { EnemyInfo, LockAttemptResult } from "./TargetLockManager";
+export { EnemyAISystem } from "./EnemyAISystem";
+export type { EnemyAIState, EnemyAITickResult } from "./EnemyAISystem";
 
 // Space Combat Control System — implemented managers:
 export { CombatSystem, ABILITY_KEYS } from "../CombatSystem";
@@ -16,5 +18,4 @@ export type {
 
 // Managers to be exported as implemented:
 // export { ShipControlManager } from './ShipControlManager';
-// export { EnemyAISystem } from './EnemyAISystem';
 // export { DockingManager } from './DockingManager';
