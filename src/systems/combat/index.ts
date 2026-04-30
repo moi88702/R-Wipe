@@ -3,7 +3,7 @@ export * from "./registries";
 export * from "./types";
 
 // Space Combat Control System — implemented managers:
-export { CombatSystem } from "../CombatSystem";
+export { CombatSystem, ABILITY_KEYS } from "../CombatSystem";
 export type {
   AbilityKey,
   CombatInput,

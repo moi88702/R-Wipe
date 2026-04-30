@@ -50,6 +50,11 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { CombatSystem, ABILITY_KEYS } from "./CombatSystem";
 import type { CombatInput } from "./CombatSystem";
+// Verify the public barrel re-exports everything callers following the documented API path expect.
+import {
+  CombatSystem as CombatSystemFromIndex,
+  ABILITY_KEYS as ABILITY_KEYS_FROM_INDEX,
+} from "./combat/index";
 import { CombatManager } from "./combat/CombatManager";
 import { ShipClass } from "./combat/types";
 import type { Ship } from "./combat/types";
@@ -447,4 +452,21 @@ it("lockStrength defaults to 1 when omitted (does not throw)", () => {
   expect(() =>
     combatSystem.tick(player, enemy.id, input, {}, "laser-mk1"),
   ).not.toThrow();
+});
+
+// ── Public API surface — barrel export contract ───────────────────────────────
+
+describe("public API: src/systems/combat/index exports match documented contract", () => {
+  it("CombatSystem is exported from the combat barrel (index.ts)", () => {
+    // Callers following the documented API path must be able to import CombatSystem
+    // from src/systems/combat/index without going into the implementation file.
+    expect(CombatSystemFromIndex).toBe(CombatSystem);
+  });
+
+  it("ABILITY_KEYS constant is exported from the combat barrel (index.ts)", () => {
+    // ABILITY_KEYS must be a re-exported value (not just a type) from the barrel,
+    // so callers can import and iterate it at runtime.
+    expect(ABILITY_KEYS_FROM_INDEX).toBe(ABILITY_KEYS);
+    expect(ABILITY_KEYS_FROM_INDEX).toEqual(["B", "V", "C", "X", "Z"]);
+  });
 });
