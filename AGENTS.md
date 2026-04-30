@@ -154,6 +154,75 @@ const result = cs.tick(
 - `CombatSystem`, `AbilityKey`, `ABILITY_KEYS`
 - `CombatInput`, `WeaponFireResult`, `AbilityActivationResult`, `CombatTickResult`
 
+## Key new subsystems (task 96e13e8d)
+
+### EnemyAISystem (`src/systems/combat/EnemyAISystem.ts`)
+
+Pure-static system for enemy AI targeting, aggression state machines, and
+per-frame lock management. Both written and tested alongside `TargetLockManager`.
+
+**Entry-point (game loop)**:
+
+```ts
+EnemyAISystem.tick(enemy, player, playerFiredOnEnemy, obstacles, nowMs)
+  → EnemyAITickResult   // { aggressionChanged, lockAcquired, brokenLockIds, shouldFire }
+```
+
+When `shouldFire` is true, call `EnemyAISystem.getFocusedTarget(enemy)` to get
+the lock and aim the enemy's weapon at that target's position.
+
+**State factory**:
+
+```ts
+EnemyAISystem.createState(id, name, position, scanner, aggression?)
+  → EnemyAIState   // one object per enemy, owned by the caller
+```
+
+**Individual sub-operations** (callable separately for fine-grained control):
+
+```ts
+EnemyAISystem.updateAggression(enemy, playerPos, playerFiredOnEnemy, nowMs)
+EnemyAISystem.acquirePlayerLock(enemy, player, obstacles, nowMs) → boolean
+EnemyAISystem.validateEnemyLocks(enemy, getPlayerPos, obstacles)  → string[]
+```
+
+**Query helpers** (pure, no mutation):
+
+```ts
+EnemyAISystem.shouldEngage(enemy)                         → boolean
+EnemyAISystem.canDetectPlayer(enemy, playerPos, obstacles) → boolean
+EnemyAISystem.getFocusedTarget(enemy)                     → TargetLock | undefined
+```
+
+**`EnemyAIState`** — one per enemy, mutated in-place by the system:
+- `id`, `name`, `position` — entity identity and world-space location (km)
+- `scanner: ScannerEquipment` — range, penetrationLevel, maxSimultaneousLocks
+- `targetingState: TargetingState` — multi-lock state (see TargetLockManager)
+- `aggression: Aggression` — `NEUTRAL | VIGILANT | HOSTILE`
+- `lastAggravatedByPlayerAt?: number` — timestamp when last fired upon
+
+**Aggression state machine** (one-way escalation):
+
+| Current    | Trigger                      | New state  |
+|------------|------------------------------|------------|
+| NEUTRAL    | Player within 200 km         | VIGILANT   |
+| NEUTRAL    | Player fires on the enemy    | HOSTILE    |
+| VIGILANT   | Player fires on the enemy    | HOSTILE    |
+| HOSTILE    | (anything)                   | HOSTILE    |
+
+VIGILANT does **not** revert to NEUTRAL when the player retreats.
+
+**Lock behaviour**: identical to the player — uses `TargetLockManager.attemptLock`
+and `validateAllLocks`. Only VIGILANT and HOSTILE enemies attempt to acquire locks.
+The `tick()` method gates `acquirePlayerLock` behind `shouldEngage()`.
+
+**Constant**: `EnemyAISystem.VIGILANCE_RANGE_KM = 200` (km).
+
+**Exports** (`src/systems/combat/index.ts`):
+- `EnemyAISystem` — the class
+- `EnemyAIState` — per-enemy state type
+- `EnemyAITickResult` — return type of `tick()`
+
 ## Key new subsystems (task 8af74932)
 
 ### EnemyStationRegistry (`src/game/data/EnemyStationRegistry.ts`)
