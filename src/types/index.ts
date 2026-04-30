@@ -110,35 +110,33 @@ export interface InputState {
    * V key pulse — activate the ability assigned to the V slot (solar-system
    * combat mode). One-frame pulse: cleared by InputHandler.endFrame().
    *
-   * Optional for backward compatibility: code that constructs `InputState`
-   * manually (e.g. legacy arcade-mode helpers) is not required to supply this
-   * field.  `InputHandler.poll()` always sets it to `false` when the key was
-   * not pressed this frame, so callers going through `poll()` can treat it as
-   * a non-nullable `boolean`.
-   * The B key uses the existing `bomb` field for consistency.
+   * Always `false` when the key was not pressed this frame.
+   * `InputHandler.poll()` is the canonical constructor of `InputState` and
+   * always supplies this field.  The B key uses the existing `bomb` field for
+   * consistency.
    */
-  abilityV?: boolean;
+  abilityV: boolean;
   /**
    * C key pulse — activate the ability assigned to the C slot.
    *
-   * Optional for backward compatibility.  `InputHandler.poll()` always sets
-   * this to `false` when the key was not pressed this frame.
+   * Always `false` when the key was not pressed this frame.
+   * `InputHandler.poll()` always supplies this field.
    */
-  abilityC?: boolean;
+  abilityC: boolean;
   /**
    * X key pulse — activate the ability assigned to the X slot.
    *
-   * Optional for backward compatibility.  `InputHandler.poll()` always sets
-   * this to `false` when the key was not pressed this frame.
+   * Always `false` when the key was not pressed this frame.
+   * `InputHandler.poll()` always supplies this field.
    */
-  abilityX?: boolean;
+  abilityX: boolean;
   /**
    * Z key pulse — activate the ability assigned to the Z slot.
    *
-   * Optional for backward compatibility.  `InputHandler.poll()` always sets
-   * this to `false` when the key was not pressed this frame.
+   * Always `false` when the key was not pressed this frame.
+   * `InputHandler.poll()` always supplies this field.
    */
-  abilityZ?: boolean;
+  abilityZ: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
