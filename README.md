@@ -34,6 +34,8 @@ Key subsystems:
 | `MissionLogManager` | Mission acceptance, log, waypoints, persistence |
 | `EnemyStationRegistry` | Static definitions for hostile enemy strongholds |
 | `EnemySpawnSystem` | Alert state machine, ship-spawn waves, station damage |
+| `TargetLockManager` | Scanner-based target locking, multi-lock, LOS, "/" quick-lock |
+| `EnemyAISystem` | Enemy aggression state machine, scanner targeting, per-frame AI tick |
 
 ## Solar system — Ship controls
 
@@ -123,3 +125,74 @@ states = EnemySpawnSystem.onEnemyDestroyed(deadEnemyId, states);
 // --- On player weapon hit ---
 states = EnemySpawnSystem.applyDamage(stationId, dmg, states);
 ```
+
+## Solar system — Combat targeting
+
+`TargetLockManager` and `EnemyAISystem` implement scanner-based targeting for both the player and AI-controlled enemy ships.
+
+### TargetLockManager
+
+Both player and enemies share the same manager; each ship owns an independent `TargetingState` object.
+
+```ts
+import { TargetLockManager } from "./src/systems/combat/TargetLockManager";
+import { TargetLockManager as TLM } from "./src/systems/combat";
+
+// Lock onto an enemy
+const result = TargetLockManager.attemptLock(
+  targetingState, shipPos, { id, name, position }, scanner, obstacles, nowMs,
+);
+// result: { success, lock?, reason? }
+
+// Tab to cycle focused lock
+TargetLockManager.cycleFocusedLock(targetingState, nowMs);
+
+// "/" key — quick-lock nearest aggro'd enemy (evicts oldest if at cap)
+TargetLockManager.quickLockNearestHostile(
+  targetingState, shipPos, enemies, scanner, obstacles, nowMs,
+);
+
+// Per-frame validation — drop out-of-range or occluded locks
+const broken = TargetLockManager.validateAllLocks(
+  targetingState, shipPos, (id) => getPosition(id), scanner, obstacles,
+);
+```
+
+**Scanner penetration levels** (minimum level to see through body type):
+
+| Body     | Min level |
+|----------|-----------|
+| asteroid | 1         |
+| moon     | 1         |
+| planet   | 2         |
+| star     | 3         |
+| station  | ∞ (never) |
+
+### EnemyAISystem
+
+Drives enemy aggression and targeting each frame. Pure static API; caller owns one `EnemyAIState` per enemy.
+
+```ts
+import { EnemyAISystem } from "./src/systems/combat/EnemyAISystem";
+
+// Spawn enemy
+const enemy = EnemyAISystem.createState(id, name, pos, scanner, Aggression.NEUTRAL);
+
+// Each frame
+const { aggressionChanged, lockAcquired, brokenLockIds, shouldFire } =
+  EnemyAISystem.tick(enemy, player, playerFiredOnEnemy, obstacles, nowMs);
+
+if (shouldFire) {
+  const lock = EnemyAISystem.getFocusedTarget(enemy);
+  // aim enemy weapon at lock.targetId
+}
+```
+
+**Aggression escalation** (one-way, never de-escalates):
+
+| State    | Trigger                    | → New     |
+|----------|----------------------------|-----------|
+| NEUTRAL  | Player within 200 km       | VIGILANT  |
+| NEUTRAL  | Player fires on enemy      | HOSTILE   |
+| VIGILANT | Player fires on enemy      | HOSTILE   |
+| HOSTILE  | (any)                      | HOSTILE   |
