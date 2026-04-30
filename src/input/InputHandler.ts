@@ -28,6 +28,13 @@ export class InputHandler {
   private pausePulse = false;
   private touchDisposers: Array<() => void> = [];
 
+  // ── Solar-system combat ability key pulses ──────────────────────────────
+  // B uses the existing bombPulse path; V/C/X/Z get their own pulse fields.
+  private abilityVPulse = false;
+  private abilityCPulse = false;
+  private abilityXPulse = false;
+  private abilityZPulse = false;
+
   // ── Pointer state (mouse + primary touch, used by menu screens) ────────
   private pointerPos: { x: number; y: number } | null = null;
   private pointerDownPulse: { x: number; y: number } | null = null;
@@ -45,6 +52,12 @@ export class InputHandler {
         e.preventDefault();
       }
       this.keysPressed.add(e.code);
+
+      // Solar-system ability key pulses (one-shot per keydown)
+      if (e.code === "KeyV") this.abilityVPulse = true;
+      if (e.code === "KeyC") this.abilityCPulse = true;
+      if (e.code === "KeyX") this.abilityXPulse = true;
+      if (e.code === "KeyZ") this.abilityZPulse = true;
     };
 
     this.boundKeyUp = (e: KeyboardEvent) => {
@@ -217,6 +230,13 @@ export class InputHandler {
       thrustReverse: this.keysPressed.has("KeyS"),
       turnLeft: this.keysPressed.has("KeyA"),
       turnRight: this.keysPressed.has("KeyD"),
+
+      // ── Solar-system combat ability keys (pulse per keydown) ─────────────
+      // B reuses the existing `bomb` field above.
+      abilityV: this.abilityVPulse,
+      abilityC: this.abilityCPulse,
+      abilityX: this.abilityXPulse,
+      abilityZ: this.abilityZPulse,
     };
   }
 
@@ -232,6 +252,11 @@ export class InputHandler {
     this.menuConfirmPulse = false;
     this.pausePulse = false;
     this.pointerDownPulse = null;
+    // Solar-system ability key pulses
+    this.abilityVPulse = false;
+    this.abilityCPulse = false;
+    this.abilityXPulse = false;
+    this.abilityZPulse = false;
   }
 
   // ── Test helpers ─────────────────────────────────────────────────────────
@@ -239,6 +264,11 @@ export class InputHandler {
   /** Simulate pressing a key (identified by KeyboardEvent.code). */
   simulateKeyDown(code: string): void {
     this.keysPressed.add(code);
+    // Mirror the keydown handler's pulse logic for test helpers
+    if (code === "KeyV") this.abilityVPulse = true;
+    if (code === "KeyC") this.abilityCPulse = true;
+    if (code === "KeyX") this.abilityXPulse = true;
+    if (code === "KeyZ") this.abilityZPulse = true;
   }
 
   /** Simulate releasing a key. */

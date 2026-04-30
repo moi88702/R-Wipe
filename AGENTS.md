@@ -53,6 +53,45 @@ fields (`thrustForward`, `thrustReverse`, `turnLeft`, `turnRight`). `InputHandle
 populates them from KeyW / KeyS / KeyA / KeyD. Existing classic-mode code is unaffected
 (fields are optional; classical move keys still map to ArrowUp/Down/Left/Right).
 
+## Key new subsystems (task 40f0f0e8)
+
+### CombatSystem (`src/systems/CombatSystem.ts`)
+
+Orchestrates weapon / ability activation for solar-system combat. Wraps `CombatManager`.
+
+**Public API**:
+
+```ts
+const cs = new CombatSystem(combatManager);
+cs.registerShip(ship);    // must be called before the ship fires or is targeted
+cs.unregisterShip(id);    // on death or dock cleanup
+
+const result = cs.tick(
+  playerShip,             // isDocked gate checked here
+  focusedTargetId,        // string | null
+  combatInput,            // { fireWeapon, abilityKeys: {B,V,C,X,Z} }
+  abilityKeyMap,          // Partial<Record<AbilityKey, abilityId>>
+  primaryWeaponId,        // string | null
+  lockStrength?,          // 0–1, default 1
+);
+// result → { weapon?: WeaponFireResult, abilities: Partial<Record<AbilityKey, …>> }
+```
+
+**Docking guard**: when `playerShip.isDocked === true` every pressed key returns `reason: "docked"` immediately — no `CombatManager` calls are made.
+
+**Space → weapon fire**: requires both `primaryWeaponId` and `focusedTargetId`. Either missing returns a typed failure reason. On success delegates to `CombatManager.fireWeapon` (hit/miss, shield absorption, armor, kill detection).
+
+**B/V/C/X/Z → ability activation**: looks up `abilityKeyMap[key]`, then calls `CombatManager.activateAbility` which enforces cooldown and energy gates. Returns `{ activated: false, reason: "not-available" }` when the manager rejects.
+
+**InputState additions for V/C/X/Z** (populated by `InputHandler.poll()`):
+- `abilityV`, `abilityC`, `abilityX`, `abilityZ` — one-frame pulse booleans.
+- Cleared by `InputHandler.endFrame()` — same lifecycle as `bombPulse`.
+- B maps to the existing `bomb` field (`keysPressed.has("KeyB") || bombPulse`).
+
+**Exports** (via `src/systems/combat/index.ts`):
+- `CombatSystem`, `AbilityKey`, `ABILITY_KEYS`
+- `CombatInput`, `WeaponFireResult`, `AbilityActivationResult`, `CombatTickResult`
+
 ## Key new subsystems (task 8af74932)
 
 ### EnemyStationRegistry (`src/game/data/EnemyStationRegistry.ts`)
