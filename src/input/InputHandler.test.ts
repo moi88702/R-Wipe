@@ -113,6 +113,22 @@ describe("no cross-contamination between ability key pulses", () => {
   });
 });
 
+// ── poll() presence guarantee ─────────────────────────────────────────────────
+
+describe("poll() always includes all ability fields in the returned InputState", () => {
+  it("all four ability fields are present with value false when no key has been pressed", () => {
+    // Given — a freshly constructed handler with no key events
+    // When
+    const state = handler.poll();
+
+    // Then — fields are present (not undefined) and default to false
+    expect(state).toHaveProperty("abilityV", false);
+    expect(state).toHaveProperty("abilityC", false);
+    expect(state).toHaveProperty("abilityX", false);
+    expect(state).toHaveProperty("abilityZ", false);
+  });
+});
+
 // ── Existing behaviour is unaffected ──────────────────────────────────────────
 
 describe("existing InputHandler behaviour is unaffected by ability key additions", () => {

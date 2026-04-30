@@ -168,6 +168,12 @@ export class CombatSystem {
    * @param lockStrength    - Current lock quality [0–1] fed into the hit-chance
    *                          formula in CombatManager.  Defaults to 1.
    * @returns A result object describing every action attempted this tick.
+   *
+   * @throws {Error} If either `playerShip.id` or `focusedTargetId` has not been
+   *   registered via {@link registerShip} before this call.  CombatManager
+   *   enforces registration as a hard contract; the exception is intentionally
+   *   allowed to bubble up so callers detect wiring bugs early.  Wrap in a
+   *   try/catch if unregistered IDs are a recoverable runtime condition.
    */
   tick(
     playerShip: Ship,
