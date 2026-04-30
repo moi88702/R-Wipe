@@ -260,6 +260,74 @@ Pure-function system managing station encounters:
 
 All types are re-exported from `src/types/index.ts`.
 
+## Key new subsystems (task bb597638)
+
+### SystemGateRegistry (`src/game/data/SystemGateRegistry.ts`)
+
+Static registry of inter-system traversal gates. Six gates across three systems
+forming three bidirectional corridors:
+- `sol` ↔ `kepler-442`: `gate-sol-to-kepler` / `gate-kepler-to-sol`
+- `sol` ↔ `proxima-centauri`: `gate-sol-to-proxima` / `gate-proxima-to-sol`
+- `kepler-442` ↔ `proxima-centauri`: `gate-kepler-to-proxima` / `gate-proxima-to-kepler`
+
+**Adding a new gate pair**: add two `const` definitions (one per system) at the
+top of the file, append both to `ALL_GATES`, and confirm that each gate's
+`sisterGateId` points to the other's `id`.
+
+**Public API**:
+```ts
+SystemGateRegistry.getGate(id)               → SystemGate | undefined
+SystemGateRegistry.getAllGates()             → readonly SystemGate[]
+SystemGateRegistry.getAllGateIds()           → string[]
+SystemGateRegistry.getGatesBySystem(systemId) → SystemGate[]
+SystemGateRegistry.getSisterGate(gateId)     → SystemGate | undefined
+```
+
+**Structural invariants (enforced by tests)**:
+- Every gate's `sisterGateId` resolves to an existing gate in the registry.
+- Sister gates are always in different systems.
+- A gate's `destinationSystemId` equals its sister gate's `systemId`.
+- Total gate count is even (gates always come in pairs).
+
+### GateTeleportSystem (`src/game/solarsystem/GateTeleportSystem.ts`)
+
+Pure-static system for inter-system transit. Two entry points:
+
+```ts
+// Per-frame proximity check (current system's gates only)
+GateTeleportSystem.checkGateProximity(playerPos, gates)
+  → SystemGate | null
+
+// Execute transit (mutates session in-place on success)
+GateTeleportSystem.teleport(session, sourceGate, sisterGate, destinationSystem)
+  → TeleportResult
+```
+
+**`TeleportResult`** is a discriminated union on `success`:
+- `{ success: true, sourceGate, destinationGate, newPlayerPosition }` — session mutated.
+- `{ success: false, sourceGate, reason }` — session unchanged.
+
+**Failure reasons**: `"docked"` | `"no-primary-body-in-destination"`
+
+**Session mutations on success**:
+- `currentSystem` ← `destinationSystem`
+- `playerPosition` ← `sisterGate.position`
+- `primaryGravitySourceId` ← destination system's primary body id
+- `nearbyLocations` ← `[]` (stale ids cleared)
+- `playerVelocity` / `playerHeading` — **preserved** (inertial continuity)
+
+**Proximity check**: inclusive boundary (`distance ≤ triggerRadius`), consistent
+with `DockingSystem.checkProximity`. Returns the first gate in definition order
+when multiple radii overlap.
+
+**Re-trigger prevention**: the caller is responsible for preventing an immediate
+re-trigger after arrival (e.g., one-frame cooldown before re-arming the check).
+
+**New type** (`src/types/solarsystem.ts`):
+
+`SystemGate` — `{ id, name, systemId, position, triggerRadius, sisterGateId, destinationSystemId }`  
+Re-exported from `src/types/index.ts`.
+
 ## Key new subsystems (task 220336b7)
 
 ### DockingManager (`src/managers/DockingManager.ts`)

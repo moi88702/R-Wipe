@@ -176,6 +176,46 @@ export interface SolarSystemState {
   lastUpdatedAt: number;
 }
 
+// ── System Gates ─────────────────────────────────────────────────────────────
+
+/**
+ * A traversal gate placed at the edge of a solar system.
+ *
+ * Gates always come in **pairs**: the gate's `sisterGateId` points to the
+ * matching gate in another system.  Travelling through gate A deposits the
+ * player at gate B's position (and vice versa), creating bidirectional
+ * fast travel between systems.
+ *
+ * Positions are in km (world space), matching `CelestialBody.position` and
+ * `Location.position` conventions.  A gate's `triggerRadius` is the approach
+ * sphere the player must enter to initiate the transit.
+ */
+export interface SystemGate {
+  /** Unique identifier, e.g. `"gate-sol-to-kepler"`. */
+  id: string;
+  /** Display name shown in the HUD on approach, e.g. `"Sol → Kepler Gate"`. */
+  name: string;
+  /**
+   * Id of the solar system this gate resides in.
+   * Matches the generating system's `SystemSeed.name`.
+   */
+  systemId: string;
+  /** World-space centre position of the gate structure (km). */
+  position: { x: number; y: number };
+  /**
+   * Approach radius (km).  When the player ship is within this distance the
+   * teleportation transit is triggered.
+   */
+  triggerRadius: number;
+  /** Id of the gate this one connects to (in another system). */
+  sisterGateId: string;
+  /**
+   * Id of the solar system that the sister gate belongs to.
+   * Lets callers determine the destination without fetching the sister gate.
+   */
+  destinationSystemId: string;
+}
+
 // ── Session State ────────────────────────────────────────────────────────────
 
 /**

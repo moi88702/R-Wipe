@@ -16,6 +16,7 @@ export type {
   StateChangeLog,
   SolarSystemState,
   SolarSystemSessionState,
+  SystemGate,
 } from "./solarsystem";
 
 export type {
