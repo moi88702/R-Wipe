@@ -17,4 +17,5 @@ export type {
 } from "../CombatSystem";
 
 // Managers to be exported as implemented:
+// export { ShipControlManager } from './ShipControlManager';
 // export { DockingManager } from './DockingManager';

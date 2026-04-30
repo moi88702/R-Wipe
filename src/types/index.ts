@@ -109,24 +109,32 @@ export interface InputState {
   /**
    * V key pulse — activate the ability assigned to the V slot (solar-system
    * combat mode). One-frame pulse: cleared by InputHandler.endFrame().
-   * Always present in the InputState returned by InputHandler.poll() (false
-   * when the key was not pressed this frame).
-   * The B key uses the existing `bomb` field for consistency.
+   *
+   * Always `false` when the key was not pressed this frame.
+   * `InputHandler.poll()` is the canonical constructor of `InputState` and
+   * always supplies this field.  The B key uses the existing `bomb` field for
+   * consistency.
    */
   abilityV: boolean;
   /**
    * C key pulse — activate the ability assigned to the C slot.
-   * Always present; false when the key was not pressed this frame.
+   *
+   * Always `false` when the key was not pressed this frame.
+   * `InputHandler.poll()` always supplies this field.
    */
   abilityC: boolean;
   /**
    * X key pulse — activate the ability assigned to the X slot.
-   * Always present; false when the key was not pressed this frame.
+   *
+   * Always `false` when the key was not pressed this frame.
+   * `InputHandler.poll()` always supplies this field.
    */
   abilityX: boolean;
   /**
    * Z key pulse — activate the ability assigned to the Z slot.
-   * Always present; false when the key was not pressed this frame.
+   *
+   * Always `false` when the key was not pressed this frame.
+   * `InputHandler.poll()` always supplies this field.
    */
   abilityZ: boolean;
 }
