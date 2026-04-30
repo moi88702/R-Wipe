@@ -34,6 +34,9 @@ Key subsystems:
 | `CombatManager` | Damage resolution, hit/miss calculation, ability cooldown enforcement |
 | `DockingSystem` | Proximity detection + multi-gate docking permission (pure functions) |
 | `DockingManager` | Dock/undock lifecycle, UI trigger (Dock button), session-state transitions |
+| `LocationManager` | NPC dialogue (greeting/farewell/shop), shop inventory, buy/sell transactions |
+| `StationUI` | Docked-station UI state machine: dock menu, NPC dialogue, shop, shipyard, undock |
+| `ShopRegistry` | Static shop item catalogue; maps shop ids → item lists with buy/sell pricing |
 | `MissionLogManager` | Mission acceptance, log, waypoints, persistence |
 | `EnemyStationRegistry` | Static definitions for hostile enemy strongholds |
 | `EnemySpawnSystem` | Alert state machine, ship-spawn waves, station damage |
@@ -349,3 +352,143 @@ isDockButtonVisible returns true  ⟺  player is within location.dockingRadius
 `DockingManager` never auto-undocks.  The only way to clear `dockedLocationId`
 is to call `undock()` — which the game loop must invoke from the dock-menu
 "Undock" selection handler.
+
+## Solar system — Docked Station UI
+
+### LocationManager (`src/managers/LocationManager.ts`)
+
+Pure NPC/shop service for the docked-station experience. No Pixi dependency.
+
+**NPC dialogue flow**:
+
+```
+startNPCInteraction(npc, locationId)
+  → phase: "greeting", message: npc.dialogueGreeting
+    options: ["continue", ("shop" if location has shops), "close"]
+
+selectDialogueOption("continue")
+  → phase: "farewell", message: npc.dialogueIdle, options: ["close"]
+
+selectDialogueOption("shop")
+  → transitionTo: "shop"  (caller shows shop screen; dialogue preserved)
+
+selectDialogueOption("close")
+  → transitionTo: "closed"  (dialogue dismissed)
+```
+
+**Shop API**:
+
+```ts
+const lm = new LocationManager();
+
+// NPCs at a location (ordered by Location.npcs array)
+lm.getNPCsAtLocation("station-alpha")  → NPCDefinition[]
+
+// Shop items for the location (aggregated across all Location.shops)
+lm.getShopInventory("station-alpha")   → ShopItem[]
+
+// Transactions — caller owns the credit balance
+lm.purchaseItem("item-medkit", 1000)   → { success: true, newBalance: 900, item }
+lm.purchaseItem("item-medkit", 50)     → { success: false, reason: "insufficient-credits" }
+lm.sellItem("item-medkit", 200)        → { success: true, creditsEarned: 50, newBalance: 250 }
+```
+
+Sell price = `floor(item.priceCredits × 0.5)`.
+
+---
+
+### StationUI (`src/managers/StationUI.ts`)
+
+State machine for the docked-station interface. No Pixi dependency. The game
+loop reads the returned `DockSessionState` snapshots and renders accordingly.
+
+**Screen enum**: `"dock-main" | "npc-dialogue" | "npc-shop" | "shipyard"`
+
+**Typical usage**:
+
+```ts
+const ui = new StationUI();
+
+// 1. Player docks — open the dock menu
+const s0 = ui.openDockMenu(location, playerCredits);
+// s0.screen === "dock-main"
+// s0.availableMenuOptions: [{ id:"npc", available:true }, { id:"shipyard", ... }, { id:"undock", ... }]
+
+// 2. Player selects "Talk to NPC"
+const s1 = ui.selectMenuItem("npc");
+// s1.screen === "npc-dialogue"
+// s1.dialogue.phase === "greeting"
+// s1.dialogue.message === npc.dialogueGreeting
+
+// 3a. Player selects "continue" (farewell)
+const s2a = ui.selectDialogueOption("continue");
+// s2a.dialogue.phase === "farewell"
+
+// 3b. Player selects "close" from farewell → back to dock-main
+const s3b = ui.selectDialogueOption("close");
+// s3b.screen === "dock-main"
+
+// ── OR ──────────────────────────────────────────────────────────────────────
+
+// 3c. Player selects "shop" → shop screen
+const s2c = ui.selectDialogueOption("shop");
+// s2c.screen === "npc-shop", s2c.shopItems populated
+
+// Buy an item
+const buyResult = ui.purchaseItem("item-medkit");
+// buyResult.success, buyResult.newBalance
+// ui.getSessionState().playerCredits reflects the deduction
+
+// Sell an item
+const sellResult = ui.sellItem("item-medkit");
+// sellResult.creditsEarned === 50 (floor(100 * 0.5))
+
+// Return to main menu
+const s3c = ui.returnToMainMenu();
+// s3c.screen === "dock-main"
+
+// ── Undock ───────────────────────────────────────────────────────────────────
+
+// 4. Player selects "Undock"
+const s4 = ui.selectMenuItem("undock");
+// s4.undockTriggered === true
+// Caller invokes: dockingManager.undock(session) then ui.closeDockSession()
+```
+
+**`DockMenuOption.available`** — when `false` the option is greyed out:
+- `"npc"` — `false` when `location.npcs` is empty.
+- `"shipyard"` — `false` when `location.type !== "station"`.
+- `"undock"` — always `true`.
+
+**Credit tracking** — `playerCredits` in the session state is updated
+immediately on each `purchaseItem` / `sellItem` call so the HUD always shows
+the correct live balance.
+
+**Undock handoff pattern**:
+
+```ts
+if (state.undockTriggered) {
+  const undockResult = dockingManager.undock(solarSystemSession);
+  // undockResult.restoredPosition === location.position (km)
+  ui.closeDockSession();
+  switchToCombatScreen();
+}
+```
+
+---
+
+### ShopRegistry (`src/game/data/ShopRegistry.ts`)
+
+Static catalogue of all purchasable items and their shop assignments.
+
+```ts
+ShopRegistry.getShopItems("shop-tf-alpha")  → ShopItem[]   // items at one shop
+ShopRegistry.getItem("item-medkit")         → ShopItem | undefined
+ShopRegistry.getSellPrice("item-medkit")    → 50            // floor(100 * 0.5)
+ShopRegistry.getAllItems()                  → readonly ShopItem[]
+ShopRegistry.getAllShopIds()                → string[]
+```
+
+**`ShopItem`** fields: `id`, `name`, `category` (`"weapon"|"ability"|"equipment"|"consumable"`), `priceCredits`, `description`.
+
+Shop ids match the `Location.shops` array in `LocationRegistry`.
