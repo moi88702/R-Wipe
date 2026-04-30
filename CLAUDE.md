@@ -86,6 +86,52 @@ Reset in `resetFx`. All are per-run ephemeral.
 
 Add new HUD data here, never poke renderer internals.
 
+## Solar System — EnemyAISystem
+
+`src/systems/combat/EnemyAISystem.ts` — static class, pure logic (no I/O, no Pixi).
+Drives enemy scanner-based targeting and aggression state per AI ship.
+
+**Game-loop entry point:**
+```ts
+EnemyAISystem.tick(enemy, player, playerFiredOnEnemy, obstacles, nowMs)
+  → { aggressionChanged, lockAcquired, brokenLockIds, shouldFire }
+```
+Call once per enemy per frame. When `shouldFire` is true, read the lock from
+`getFocusedTarget(enemy)` and aim the enemy's fire at `lock.targetId`.
+
+**State factory:**
+```ts
+EnemyAISystem.createState(id, name, position, scanner, aggression?)
+  → EnemyAIState   // one per enemy, caller owns it
+```
+
+**Individual operations** (fine-grained control):
+- `updateAggression(enemy, playerPos, playerFiredOnEnemy, nowMs)` — advance state machine
+- `acquirePlayerLock(enemy, player, obstacles, nowMs)` → `boolean` — attempt lock
+- `validateEnemyLocks(enemy, getPlayerPos, obstacles)` → `string[]` — drop stale locks
+
+**Pure queries** (no mutation):
+- `shouldEngage(enemy)` → `boolean` — `true` when VIGILANT or HOSTILE
+- `canDetectPlayer(enemy, playerPos, obstacles)` → `boolean` — range + LOS check
+- `getFocusedTarget(enemy)` → `TargetLock | undefined` — focused lock for firing
+
+**Aggression state machine** (one-way escalation):
+
+| Current  | Trigger                   | New state |
+|----------|---------------------------|-----------|
+| NEUTRAL  | Player within 200 km      | VIGILANT  |
+| NEUTRAL  | Player fires on enemy     | HOSTILE   |
+| VIGILANT | Player fires on enemy     | HOSTILE   |
+| HOSTILE  | (anything)                | HOSTILE   |
+
+VIGILANT does **not** revert to NEUTRAL when the player retreats.
+
+**Lock behaviour**: delegates entirely to `TargetLockManager`. Only VIGILANT
+and HOSTILE enemies attempt locks. Lock-limit, range, and penetration rules
+are identical to the player scanner.
+
+**Constant**: `EnemyAISystem.VIGILANCE_RANGE_KM = 200` (km).
+
 ## Solar System — TargetLockManager
 
 `src/systems/combat/TargetLockManager.ts` — static class, pure logic (no I/O, no Pixi).
