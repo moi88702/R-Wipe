@@ -53,6 +53,68 @@ fields (`thrustForward`, `thrustReverse`, `turnLeft`, `turnRight`). `InputHandle
 populates them from KeyW / KeyS / KeyA / KeyD. Existing classic-mode code is unaffected
 (fields are optional; classical move keys still map to ArrowUp/Down/Left/Right).
 
+## Key new subsystems (task 44432e67)
+
+### TargetLockManager (`src/systems/combat/TargetLockManager.ts`)
+
+Pure-static manager for scanner-based target locking, multi-lock persistence, and
+focus management in solar-system combat. Both the player ship and enemy ships use
+the same manager with their own `TargetingState` objects.
+
+**Public API**:
+
+```ts
+// Geometry helpers
+TargetLockManager.calculateDistance(pos1, pos2)   → number   // km
+TargetLockManager.rayCircleIntersects(p1, p2, centre, radius) → boolean
+TargetLockManager.isLineOfSightBlocked(srcPos, tgtPos, body, penetrationLevel) → boolean
+
+// State factory
+TargetLockManager.createTargetingState() → TargetingState
+
+// Lock lifecycle
+TargetLockManager.attemptLock(state, sourcePos, target, scanner, obstacles, nowMs?)
+  → LockAttemptResult  // { success, lock?, reason? }
+TargetLockManager.validateLock(_lock, sourcePos, targetPos, scanner, obstacles) → boolean
+TargetLockManager.validateAllLocks(state, sourcePos, getTargetPos, scanner, obstacles)
+  → string[]  // broken lock ids
+TargetLockManager.breakLock(state, lockId) → void
+TargetLockManager.onTargetDestroyed(state, targetId) → void
+
+// Focus management
+TargetLockManager.cycleFocusedLock(state, nowMs?)    // Tab key
+TargetLockManager.setFocusedLock(state, lockId, nowMs?) → boolean   // HUD click
+
+// Quick-lock ("/" key)
+TargetLockManager.quickLockNearestHostile(state, sourcePos, enemies, scanner, obstacles, nowMs?)
+  → LockAttemptResult
+```
+
+**New types** (`src/systems/combat/types.ts`):
+
+- `ScannerEquipment` — id, name, range (km), penetrationLevel (0–3), maxSimultaneousLocks
+- `Aggression` enum — `NEUTRAL | VIGILANT | HOSTILE`  
+- `TargetLock` — id, targetId, targetName, lockedAtMs, distanceKm, isFocused, lockStrength
+- `TargetingState` — allLocks, focusedLockId?, lastTabCycleMs, lastClickLockMs
+
+**Penetration model** (body type → min scanner level to see through):
+
+| Body type | Min penetration |
+|-----------|-----------------|
+| asteroid  | 1               |
+| moon      | 1               |
+| planet    | 2               |
+| star      | 3               |
+| station   | ∞ (never)       |
+
+**Key behaviours**:
+- `attemptLock` applies 3 sequential gates: lock-limit → range → LOS
+- First lock acquired is automatically focused
+- `cycleFocusedLock` (Tab) wraps cyclically through all active locks
+- `quickLockNearestHostile` ("/") selects nearest VIGILANT or HOSTILE enemy; evicts oldest lock when at capacity
+- When a focused lock breaks, focus auto-shifts to the next lock in the list
+- Only `Aggression.NEUTRAL` enemies are excluded from "/" quick-lock
+
 ## Key new subsystems (task 8af74932)
 
 ### EnemyStationRegistry (`src/game/data/EnemyStationRegistry.ts`)
