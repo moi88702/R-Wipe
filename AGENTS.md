@@ -153,7 +153,6 @@ const result = cs.tick(
 **Exports** (via `src/systems/combat/index.ts`):
 - `CombatSystem`, `AbilityKey`, `ABILITY_KEYS`
 - `CombatInput`, `WeaponFireResult`, `AbilityActivationResult`, `CombatTickResult`
-- `TargetLockManager`, `EnemyInfo`, `LockAttemptResult`
 
 ## Key new subsystems (task 96e13e8d)
 
