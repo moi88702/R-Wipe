@@ -30,6 +30,8 @@ Key subsystems:
 | `InputHandler` | Keyboard + touch; pulse-flag contract |
 | `GravitySystem` | Inverse-square gravity for the solar system layer |
 | `ShipControlManager` | WASD/arrow-key movement physics + gravity integration |
+| `SystemGateRegistry` | Static definitions for inter-system traversal gate pairs |
+| `GateTeleportSystem` | Gate proximity detection + inter-system teleportation |
 | `CombatSystem` | Space / B / V / C / X / Z weapon & ability activation for solar-system combat |
 | `CombatManager` | Damage resolution, hit/miss calculation, ability cooldown enforcement |
 | `DockingSystem` | Proximity detection + multi-gate docking permission (pure functions) |
@@ -349,3 +351,83 @@ isDockButtonVisible returns true  ⟺  player is within location.dockingRadius
 `DockingManager` never auto-undocks.  The only way to clear `dockedLocationId`
 is to call `undock()` — which the game loop must invoke from the dock-menu
 "Undock" selection handler.
+
+## Solar system — System Gates
+
+`SystemGateRegistry` (`src/game/data/SystemGateRegistry.ts`) holds the static
+definitions for all inter-system traversal gates.  Gates come in **pairs**: each
+gate's `sisterGateId` points to the matching gate in another system, so
+travelling through gate A deposits the player at gate B, and using gate B returns
+the player to gate A.
+
+`GateTeleportSystem` (`src/game/solarsystem/GateTeleportSystem.ts`) provides
+the pure logic for proximity detection and executing the transit.
+
+### Gate connections (current registry)
+
+| Gate id | System | ↔ Sister | Destination |
+|---|---|---|---|
+| `gate-sol-to-kepler` | `sol` | `gate-kepler-to-sol` | `kepler-442` |
+| `gate-kepler-to-sol` | `kepler-442` | `gate-sol-to-kepler` | `sol` |
+| `gate-sol-to-proxima` | `sol` | `gate-proxima-to-sol` | `proxima-centauri` |
+| `gate-proxima-to-sol` | `proxima-centauri` | `gate-sol-to-proxima` | `sol` |
+| `gate-kepler-to-proxima` | `kepler-442` | `gate-proxima-to-kepler` | `proxima-centauri` |
+| `gate-proxima-to-kepler` | `proxima-centauri` | `gate-kepler-to-proxima` | `kepler-442` |
+
+### Usage
+
+```ts
+import { SystemGateRegistry } from "./src/game/data/SystemGateRegistry";
+import { GateTeleportSystem }  from "./src/game/solarsystem/GateTeleportSystem";
+
+// --- Each frame: check whether the player has entered a gate ---
+const systemGates = SystemGateRegistry.getGatesBySystem(session.currentSystem.seed.name);
+const triggeredGate = GateTeleportSystem.checkGateProximity(
+  session.playerPosition,
+  systemGates,
+);
+
+if (triggeredGate !== null) {
+  const sisterGate       = SystemGateRegistry.getSisterGate(triggeredGate.id)!;
+  const destinationSystem = loadSystem(triggeredGate.destinationSystemId); // caller provides
+
+  const result = GateTeleportSystem.teleport(
+    session,
+    triggeredGate,
+    sisterGate,
+    destinationSystem,
+  );
+
+  if (result.success) {
+    // session.currentSystem, playerPosition, primaryGravitySourceId updated
+    // session.nearbyLocations reset to []
+    // playerVelocity and playerHeading preserved
+    showTransitEffect(result.newPlayerPosition);
+  }
+}
+```
+
+### Session mutations on `GateTeleportSystem.teleport()` (success path)
+
+| Field | Before | After |
+|-------|--------|-------|
+| `session.currentSystem` | source system | destination `SolarSystemState` |
+| `session.playerPosition` | near source gate | sister gate's `position` (km) |
+| `session.primaryGravitySourceId` | source body id | destination primary body id |
+| `session.nearbyLocations` | source ids | `[]` (stale ids cleared) |
+| `session.playerVelocity` | any | **unchanged** (inertial continuity) |
+| `session.playerHeading` | any | **unchanged** |
+
+### Failure reasons
+
+| Reason | Cause |
+|--------|-------|
+| `"docked"` | Player is docked at a station; transit blocked. |
+| `"no-primary-body-in-destination"` | Destination `SolarSystemState` has no body with `isPrimaryGravitySource: true`. |
+
+### Preventing immediate re-trigger
+
+After a successful teleport the player arrives at the sister gate's exact
+position — still inside the trigger radius.  The caller is responsible for
+preventing an immediate re-trigger (e.g., one-frame cooldown flag or waiting
+until the player exits the radius before re-arming the check).

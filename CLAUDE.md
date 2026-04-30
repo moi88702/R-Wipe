@@ -224,6 +224,59 @@ const snap = dm.getPreDockSnapshot(); // PreDockSnapshot | null
 **Exports** from `src/managers/index.ts`: `DockingManager`, `PreDockSnapshot`,
 `DockResult`, `UndockResult`.
 
+## Solar System — System Gates & Teleportation
+
+### SystemGateRegistry (`src/game/data/SystemGateRegistry.ts`)
+
+Static registry of inter-system traversal gate pairs.  Three bidirectional
+corridors are pre-defined: `sol ↔ kepler-442`, `sol ↔ proxima-centauri`, and
+`kepler-442 ↔ proxima-centauri` (six gates total, one per direction).
+
+**Public API** (all methods on the `SystemGateRegistry` const object):
+- `getGate(id)` → `SystemGate | undefined`
+- `getAllGates()` → `readonly SystemGate[]`
+- `getAllGateIds()` → `string[]`
+- `getGatesBySystem(systemId)` → `SystemGate[]`
+- `getSisterGate(gateId)` → `SystemGate | undefined`
+
+**Invariants** (all enforced by tests in `SystemGateRegistry.test.ts`):
+- Every `sisterGateId` resolves to an existing gate.
+- Sister gates are in different systems.
+- A gate's `destinationSystemId === its sister's systemId`.
+- Total count is even (gates come in pairs only).
+
+### GateTeleportSystem (`src/game/solarsystem/GateTeleportSystem.ts`)
+
+Pure-static class.  Two entry points:
+
+```ts
+GateTeleportSystem.checkGateProximity(playerPos, gates)
+  → SystemGate | null   // first gate whose triggerRadius encloses playerPos
+
+GateTeleportSystem.teleport(session, sourceGate, sisterGate, destinationSystem)
+  → TeleportResult
+```
+
+**`TeleportResult`** discriminated union:
+- `{ success: true, sourceGate, destinationGate, newPlayerPosition }` — session mutated.
+- `{ success: false, sourceGate, reason: "docked" | "no-primary-body-in-destination" }` — session unchanged.
+
+**Session mutations on success** (`teleport` mutates in-place):
+- `currentSystem` ← `destinationSystem`
+- `playerPosition` ← `sisterGate.position`
+- `primaryGravitySourceId` ← destination system's primary body id
+- `nearbyLocations` ← `[]`
+- `playerVelocity` / `playerHeading` — **preserved** (smooth inertial exit)
+
+**Gate type** — `SystemGate` added to `src/types/solarsystem.ts`, re-exported
+from `src/types/index.ts`:
+```ts
+{ id, name, systemId, position, triggerRadius, sisterGateId, destinationSystemId }
+```
+
+**Re-trigger prevention**: callers must prevent an immediate re-trigger after
+arrival since the player spawns inside the sister gate's radius.
+
 ## Solar System — GravitySystem
 
 `src/game/solarsystem/GravitySystem.ts` — static `applyGravity(shipPos, shipVel, primaryBody, deltaMs)` method.
