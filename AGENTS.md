@@ -259,3 +259,74 @@ Pure-function system managing station encounters:
 - `SpawnWaveResult` — result from `trySpawn` (didSpawn, positions, updatedState)
 
 All types are re-exported from `src/types/index.ts`.
+
+## Key new subsystems (task 220336b7)
+
+### DockingManager (`src/managers/DockingManager.ts`)
+
+Orchestrates the full docking lifecycle for the Space Combat Control System.
+Bridges the pure-function `DockingSystem` with mutable `SolarSystemSessionState`.
+
+**Relationship with DockingSystem**
+
+| Concern | Owner |
+|---------|-------|
+| Proximity geometry (distance ≤ dockingRadius) | `DockingSystem.checkProximity` (pure) |
+| Permission gates (reputation / items / missions) | `DockingSystem.canDock` (pure) |
+| Session mutation on dock | `DockingManager.dock()` |
+| Session mutation on undock | `DockingManager.undock()` |
+| "Dock" button visibility | `DockingManager.isDockButtonVisible()` |
+
+**Public API**
+
+```ts
+// One instance per play session
+const dm = new DockingManager();
+
+// Per-frame proximity update
+dm.updateNearbyLocations(session, allLocations);
+
+// HUD dock-button visibility (proximity-based only; permissions deferred to click)
+const show = dm.isDockButtonVisible(session, allLocations);
+
+// Range query (used by minimap, HUD distance indicators)
+const nearby = dm.getNearestDocksWithinRange(shipPos, allLocations, 50 /* km */);
+
+// Player clicks Dock button
+const dockResult = dm.dock(session, location, factionStanding, inventory, completedMissions);
+// dockResult.success / dockResult.reason / dockResult.dockedLocationId
+
+// Player selects "Undock" from dock menu
+const undockResult = dm.undock(session);
+// undockResult.restoredPosition === location.position (km)
+
+// Save/load integration
+const snapshot = dm.getPreDockSnapshot(); // PreDockSnapshot | null
+```
+
+**`dock()` gates (checked in order)**:
+1. **Already-docked guard** — `"already-docked"` if `session.dockedLocationId !== null`
+2. **Proximity gate** — `"not-in-range"` if player is outside `location.dockingRadius`
+3. **Permission gates** (via `DockingSystem.canDock`): `"low-reputation"` → `"missing-item"` → `"mission-incomplete"`
+
+**Session mutations on `dock()`**:
+- `session.dockedLocationId` ← `location.id`
+- `session.playerVelocity` ← `{ x: 0, y: 0 }`
+- `session.discoveredLocations` ← `+ location.id`
+- `preDockSnapshot` ← position / velocity / heading / station position
+
+**Session mutations on `undock()`**:
+- `session.playerPosition` ← docked station's world position (from snapshot)
+- `session.playerVelocity` ← `{ x: 0, y: 0 }`
+- `session.playerHeading` ← pre-dock heading restored
+- `session.dockedLocationId` ← `null`
+- `preDockSnapshot` ← cleared
+
+**Undocking is always explicit**: `DockingManager` never auto-undocks.
+The game loop must call `undock()` from the dock-menu "Undock" handler.
+
+**Exports** (`src/managers/index.ts`):
+- `DockingManager` — the class
+- `PreDockSnapshot` — saved state type
+- `DockResult` — return type of `dock()`
+- `UndockResult` — return type of `undock()`
