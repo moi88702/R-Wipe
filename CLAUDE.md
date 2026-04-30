@@ -196,6 +196,34 @@ asteroid=1, moon=1, planet=2, star=3, station=∞ (always opaque).
 **Exports** (all re-exported from `src/systems/combat/index.ts`):
 `CombatSystem`, `AbilityKey`, `ABILITY_KEYS`, `CombatInput`, `WeaponFireResult`, `AbilityActivationResult`, `CombatTickResult`.
 
+## Solar System — DockingManager
+
+`src/managers/DockingManager.ts` — instance class (one per play session).
+Wraps `DockingSystem` (pure) and owns `SolarSystemSessionState` mutations.
+
+```ts
+const dm = new DockingManager();
+
+// Per-frame HUD trigger + nearby list
+dm.updateNearbyLocations(session, locations);
+const show = dm.isDockButtonVisible(session, locations); // proximity-only check
+
+// Range query
+const nearby = dm.getNearestDocksWithinRange(shipPos, locations, rangeKm);
+
+// Dock (gates: already-docked → not-in-range → low-reputation → missing-item → mission-incomplete)
+const { success, reason } = dm.dock(session, location, standing, inventory, missions);
+
+// Undock (explicit only — never auto-undocked)
+dm.undock(session); // ship placed at station.position, velocity zeroed, heading restored
+
+// Snapshot for save/load
+const snap = dm.getPreDockSnapshot(); // PreDockSnapshot | null
+```
+
+**Exports** from `src/managers/index.ts`: `DockingManager`, `PreDockSnapshot`,
+`DockResult`, `UndockResult`.
+
 ## Solar System — GravitySystem
 
 `src/game/solarsystem/GravitySystem.ts` — static `applyGravity(shipPos, shipVel, primaryBody, deltaMs)` method.

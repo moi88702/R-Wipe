@@ -32,7 +32,8 @@ Key subsystems:
 | `ShipControlManager` | WASD/arrow-key movement physics + gravity integration |
 | `CombatSystem` | Space / B / V / C / X / Z weapon & ability activation for solar-system combat |
 | `CombatManager` | Damage resolution, hit/miss calculation, ability cooldown enforcement |
-| `DockingSystem` | Proximity detection + multi-gate docking permission |
+| `DockingSystem` | Proximity detection + multi-gate docking permission (pure functions) |
+| `DockingManager` | Dock/undock lifecycle, UI trigger (Dock button), session-state transitions |
 | `MissionLogManager` | Mission acceptance, log, waypoints, persistence |
 | `EnemyStationRegistry` | Static definitions for hostile enemy strongholds |
 | `EnemySpawnSystem` | Alert state machine, ship-spawn waves, station damage |
@@ -262,3 +263,89 @@ if (shouldFire) {
 | NEUTRAL  | Player fires on enemy      | HOSTILE   |
 | VIGILANT | Player fires on enemy      | HOSTILE   |
 | HOSTILE  | (any)                      | HOSTILE   |
+
+## Solar system — DockingManager
+
+`DockingManager` (`src/managers/DockingManager.ts`) orchestrates the full docking
+lifecycle: proximity detection, UI trigger logic, permission enforcement (via
+`DockingSystem`), and session-state transitions on dock and undock.
+
+`DockingSystem` provides the **pure geometry and permission functions**;
+`DockingManager` wraps them and owns the mutable `SolarSystemSessionState`
+side-effects.
+
+**Relationship between the two**:
+
+| Concern | Owner |
+|---------|-------|
+| Proximity geometry (distance ≤ dockingRadius) | `DockingSystem.checkProximity` |
+| Permission gates (reputation / items / missions) | `DockingSystem.canDock` |
+| Session mutation on dock | `DockingManager.dock()` |
+| Session mutation on undock | `DockingManager.undock()` |
+| "Dock" button visibility | `DockingManager.isDockButtonVisible()` |
+
+### Usage
+
+```ts
+import { DockingManager } from "./src/managers/DockingManager";
+
+const dockingManager = new DockingManager(); // one per play session
+
+// Each frame — keep nearbyLocations current
+dockingManager.updateNearbyLocations(session, allLocations);
+
+// Drive the "Dock" button in the HUD
+const showButton = dockingManager.isDockButtonVisible(session, allLocations);
+
+// Player clicks the Dock button
+const result = dockingManager.dock(
+  session,
+  targetLocation,
+  playerFactionStanding,
+  playerInventory,
+  completedMissions,
+);
+if (!result.success) {
+  displayDenialMessage(result.reason); // "low-reputation" | "missing-item" | …
+}
+
+// Player selects "Undock" from the dock menu (explicit only — never automatic)
+const undockResult = dockingManager.undock(session);
+// undockResult.restoredPosition === targetLocation.position (km)
+```
+
+### Session mutations on `dock()`
+
+| Field | Before | After |
+|-------|--------|-------|
+| `session.dockedLocationId` | `null` | `location.id` |
+| `session.playerVelocity` | any | `{ x: 0, y: 0 }` |
+| `session.discoveredLocations` | any | `+ location.id` |
+| Pre-dock snapshot | cleared | saved (pos / vel / heading / station pos) |
+
+### Session mutations on `undock()`
+
+| Field | Before | After |
+|-------|--------|-------|
+| `session.playerPosition` | any | docked station's world position (km) |
+| `session.playerVelocity` | `{ x: 0, y: 0 }` | `{ x: 0, y: 0 }` |
+| `session.playerHeading` | docked value | pre-dock heading restored |
+| `session.dockedLocationId` | `location.id` | `null` |
+| Pre-dock snapshot | saved | cleared |
+
+### Dock button visibility contract
+
+The button appears **only on proximity** — permission checks run when the
+button is clicked, not when the player approaches.  This keeps the button
+responsive and lets the UI show a denial reason *after* the player acts.
+
+```
+isDockButtonVisible returns true  ⟺  player is within location.dockingRadius
+                                      AND  session.dockedLocationId === null
+```
+
+### Undocking is always explicit
+
+`DockingManager` never auto-undocks.  The only way to clear `dockedLocationId`
+is to call `undock()` — which the game loop must invoke from the dock-menu
+"Undock" selection handler.

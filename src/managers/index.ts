@@ -7,8 +7,11 @@
  *  - LevelManager    — level progression, difficulty scaling, boss phases
  *  - PowerUpManager  — spawn, collision, effect application
  *  - StatsService    — run + all-time stat persistence via localStorage
+ *  - DockingManager  — proximity detection, permission checks, dock/undock
+ *                      state transitions, and UI trigger logic
  *
  * Implementations will be added as each system is built out.
  */
 
-export {}; // ensure this is treated as a module
+export { DockingManager } from "./DockingManager";
+export type { PreDockSnapshot, DockResult, UndockResult } from "./DockingManager";
