@@ -131,6 +131,25 @@ asteroid=1, moon=1, planet=2, star=3, station=∞ (always opaque).
 
 **`InputState` additions**: four optional boolean fields added (`thrustForward`, `thrustReverse`, `turnLeft`, `turnRight`) and populated in `InputHandler.poll()` from KeyW / KeyS / KeyA / KeyD. Classic arcade mode is unaffected — those fields are optional.
 
+## Solar System — CombatSystem
+
+`src/systems/CombatSystem.ts` — processes Space / B / V / C / X / Z combat input and delegates to `CombatManager`.
+
+**Key design facts**:
+- `ship.isDocked === true` → all combat blocked immediately; every pressed key returns `reason: "docked"`.
+- Space → `CombatManager.fireWeapon(attackerId, targetId, weaponId, lockStrength)`. Both `primaryWeaponId` and `focusedTargetId` must be non-null.
+- B / V / C / X / Z → `CombatManager.activateAbility(shipId, abilityId)`. Ability id sourced from caller-supplied `abilityKeyMap`. Missing slot → `"no-ability-equipped"`. CombatManager rejection (cooldown/energy) → `"not-available"`.
+- Only keys with `=== true` in `CombatInput` produce entries in `CombatTickResult`.
+- Ships must be registered via `cs.registerShip(ship)` before they appear in any `tick()` call (delegates to `CombatManager.registerShip`).
+
+**`InputState` additions for ability keys** (`src/types/index.ts`):
+- `abilityV`, `abilityC`, `abilityX`, `abilityZ` — one-frame pulse booleans, cleared by `endFrame()`.
+- `simulateKeyDown("KeyV" | "KeyC" | "KeyX" | "KeyZ")` sets the matching pulse.
+- B uses the existing `bomb` field (continuous hold + `bombPulse`).
+
+**Exports** (all re-exported from `src/systems/combat/index.ts`):
+`CombatSystem`, `AbilityKey`, `ABILITY_KEYS`, `CombatInput`, `WeaponFireResult`, `AbilityActivationResult`, `CombatTickResult`.
+
 ## Solar System — GravitySystem
 
 `src/game/solarsystem/GravitySystem.ts` — static `applyGravity(shipPos, shipVel, primaryBody, deltaMs)` method.

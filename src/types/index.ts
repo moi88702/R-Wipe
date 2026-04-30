@@ -104,6 +104,31 @@ export interface InputState {
    * Absent in classic arcade mode; always false when not held.
    */
   turnRight?: boolean;
+
+  // ── Solar-system combat ability keys ──────────────────────────────────────
+  /**
+   * V key pulse — activate the ability assigned to the V slot (solar-system
+   * combat mode). One-frame pulse: cleared by InputHandler.endFrame().
+   * Always present in the InputState returned by InputHandler.poll() (false
+   * when the key was not pressed this frame).
+   * The B key uses the existing `bomb` field for consistency.
+   */
+  abilityV: boolean;
+  /**
+   * C key pulse — activate the ability assigned to the C slot.
+   * Always present; false when the key was not pressed this frame.
+   */
+  abilityC: boolean;
+  /**
+   * X key pulse — activate the ability assigned to the X slot.
+   * Always present; false when the key was not pressed this frame.
+   */
+  abilityX: boolean;
+  /**
+   * Z key pulse — activate the ability assigned to the Z slot.
+   * Always present; false when the key was not pressed this frame.
+   */
+  abilityZ: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

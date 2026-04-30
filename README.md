@@ -30,6 +30,8 @@ Key subsystems:
 | `InputHandler` | Keyboard + touch; pulse-flag contract |
 | `GravitySystem` | Inverse-square gravity for the solar system layer |
 | `ShipControlManager` | WASD/arrow-key movement physics + gravity integration |
+| `CombatSystem` | Space / B / V / C / X / Z weapon & ability activation for solar-system combat |
+| `CombatManager` | Damage resolution, hit/miss calculation, ability cooldown enforcement |
 | `DockingSystem` | Proximity detection + multi-gate docking permission |
 | `MissionLogManager` | Mission acceptance, log, waypoints, persistence |
 | `EnemyStationRegistry` | Static definitions for hostile enemy strongholds |
@@ -66,6 +68,11 @@ Key subsystems:
 - `thrustReverse` (S key)
 - `turnLeft` (A key)
 - `turnRight` (D key)
+- `abilityV` (V key — pulse, cleared by `endFrame()`)
+- `abilityC` (C key — pulse)
+- `abilityX` (X key — pulse)
+- `abilityZ` (Z key — pulse)
+- B key uses the existing `bomb` pulse field
 
 ```ts
 import { ShipControlManager } from "./src/game/solarsystem/ShipControlManager";
@@ -80,6 +87,65 @@ const result = ShipControlManager.update(
 );
 // result: { position, velocity, headingRadians, isThrustActive, isRotating }
 ```
+
+## Solar system — CombatSystem
+
+`CombatSystem` (`src/systems/CombatSystem.ts`) translates Space / B / V / C / X / Z key presses into weapon fire and ability activations, delegating all damage and cooldown resolution to `CombatManager`.
+
+**Combat is disabled when `ship.isDocked === true`** — every action returns `reason: "docked"`.
+
+**Input mapping**:
+
+| Key | Action |
+|---|---|
+| Space | Fire primary weapon at focused lock target |
+| B | Activate ability in the B slot (reuses InputState `bomb` field) |
+| V | Activate ability in the V slot (`abilityV` pulse) |
+| C | Activate ability in the C slot (`abilityC` pulse) |
+| X | Activate ability in the X slot (`abilityX` pulse) |
+| Z | Activate ability in the Z slot (`abilityZ` pulse) |
+
+```ts
+import { CombatSystem, CombatManager } from "./src/systems/combat";
+
+const combatManager = new CombatManager();
+const combatSystem  = new CombatSystem(combatManager);
+
+// Register ships before they can fight
+combatSystem.registerShip(playerShip);
+combatSystem.registerShip(enemyShip);
+
+// Each frame — construct CombatInput from InputState
+const combatInput = {
+  fireWeapon: inputState.fire,           // Space key
+  abilityKeys: {
+    B: inputState.bomb   ?? false,
+    V: inputState.abilityV ?? false,
+    C: inputState.abilityC ?? false,
+    X: inputState.abilityX ?? false,
+    Z: inputState.abilityZ ?? false,
+  },
+};
+
+const result = combatSystem.tick(
+  playerShip,
+  focusedTargetId,    // string | null — current lock target
+  combatInput,
+  { B: "shield-boost-mk1", V: "evasive-maneuver-mk1" }, // abilityKeyMap
+  "laser-mk1",        // primaryWeaponId
+  lockStrength,       // 0–1, defaults to 1
+);
+
+// result.weapon   → WeaponFireResult  | undefined
+// result.abilities → Partial<Record<AbilityKey, AbilityActivationResult>>
+```
+
+**Failure reasons:**
+- `"docked"` — ship is docked; combat disabled.
+- `"no-target"` — weapon fire without a focused target.
+- `"no-weapon"` — weapon fire with `primaryWeaponId = null`.
+- `"no-ability-equipped"` — ability key pressed with no mapping.
+- `"not-available"` — CombatManager rejected (cooldown or insufficient energy).
 
 ## Solar system — Enemy Stations
 
