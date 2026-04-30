@@ -114,6 +114,15 @@ describe("no cross-contamination between ability key pulses", () => {
 });
 
 // ── poll() presence guarantee ─────────────────────────────────────────────────
+//
+// Regression guard: InputState.abilityV/C/X/Z are *required* booleans (not
+// optional), and CombatSystem reads them without null/undefined guards.  If a
+// future refactor of poll() accidentally omits one of these fields, or returns
+// it as `undefined`, the CombatSystem ability routing silently misfires (a
+// pressed key is treated as "not pressed").  TypeScript catches structural
+// omissions at compile time, but it cannot enforce that the *runtime* value is
+// strictly `false` rather than falsy-but-undefined.  This test provides that
+// runtime baseline so the contract stays explicit.
 
 describe("poll() always includes all ability fields in the returned InputState", () => {
   it("all four ability fields are present with value false when no key has been pressed", () => {
@@ -121,7 +130,7 @@ describe("poll() always includes all ability fields in the returned InputState",
     // When
     const state = handler.poll();
 
-    // Then — fields are present (not undefined) and default to false
+    // Then — fields are present with value strictly false (not undefined)
     expect(state).toHaveProperty("abilityV", false);
     expect(state).toHaveProperty("abilityC", false);
     expect(state).toHaveProperty("abilityX", false);
