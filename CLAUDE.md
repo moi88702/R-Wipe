@@ -86,6 +86,37 @@ Reset in `resetFx`. All are per-run ephemeral.
 
 Add new HUD data here, never poke renderer internals.
 
+## Solar System — TargetLockManager
+
+`src/systems/combat/TargetLockManager.ts` — static class, pure logic (no I/O, no Pixi).
+Both player and enemies use the same manager with independent `TargetingState` objects.
+
+**Key static methods:**
+- `createTargetingState()` → fresh empty state
+- `attemptLock(state, sourcePos, target, scanner, obstacles, nowMs?)` — 3 gates: lock-limit → range → LOS → `LockAttemptResult`
+- `validateAllLocks(state, sourcePos, getTargetPos, scanner, obstacles)` → broken lock ids; refreshes `distanceKm` on survivors
+- `breakLock(state, lockId)` — removes lock; auto-focuses next if focused lock breaks
+- `onTargetDestroyed(state, targetId)` — remove lock by enemy id (shorthand for breakLock)
+- `cycleFocusedLock(state, nowMs?)` — Tab key: advance focus cyclically through allLocks
+- `setFocusedLock(state, lockId, nowMs?)` → bool — HUD click: focus specific lock
+- `quickLockNearestHostile(state, sourcePos, enemies, scanner, obstacles, nowMs?)` — "/" key; evicts oldest lock when at capacity
+- `isLineOfSightBlocked(srcPos, tgtPos, body, penetrationLevel)` — penetration-level gated LOS (ray-circle)
+- `calculateDistance(p1, p2)` — Euclidean km distance
+- `rayCircleIntersects(p1, p2, centre, radius)` — parametric [0,1] segment test
+
+**Types** (all in `src/systems/combat/types.ts`, exported from `index.ts`):
+- `ScannerEquipment` — { id, name, range, penetrationLevel, maxSimultaneousLocks }
+- `Aggression` — `NEUTRAL | VIGILANT | HOSTILE`
+- `TargetLock` — { id, targetId, targetName, lockedAtMs, distanceKm, isFocused, lockStrength }
+- `TargetingState` — { allLocks, focusedLockId?, lastTabCycleMs, lastClickLockMs }
+
+**Penetration levels** (body.type → minimum scanner penetrationLevel to see through):
+asteroid=1, moon=1, planet=2, star=3, station=∞ (always opaque).
+
+**Focus invariant**: at most one `lock.isFocused === true` at any time; `TargetLockManager` is the sole mutator.
+
+**`exactOptionalPropertyTypes` note**: `TargetingState.focusedLockId` is typed `string | undefined` (not just `string?`) so the manager can explicitly clear it without `delete`.
+
 ## Solar System — ShipControlManager
 
 `src/game/solarsystem/ShipControlManager.ts` — static class. `update(current, input, config, primaryBody, deltaMs)` computes one physics tick.

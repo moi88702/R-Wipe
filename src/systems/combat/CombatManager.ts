@@ -1,10 +1,5 @@
 import { AbilityRegistry, WeaponRegistry } from "./registries";
-import {
-	type CombatEvent,
-	ScannerReading,
-	type Ship,
-	TargetLock,
-} from "./types";
+import { type CombatEvent, type Ship } from "./types";
 
 /**
  * CombatManager
