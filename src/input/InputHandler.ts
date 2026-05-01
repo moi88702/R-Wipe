@@ -44,6 +44,12 @@ export class InputHandler {
   private zoomDelta = 0;
   private readonly boundWheel: (e: WheelEvent) => void;
 
+  // ── Touch swipe detection for menu navigation ──────────────────────────
+  private touchStartX = 0;
+  private touchStartY = 0;
+  private swipeUpPulse = false;
+  private swipeDownPulse = false;
+
   // ── Pointer state (mouse + primary touch, used by menu screens) ────────
   private pointerPos: { x: number; y: number } | null = null;
   private pointerDownPulse: { x: number; y: number } | null = null;
@@ -124,6 +130,9 @@ export class InputHandler {
         this.pointerPos = p;
         this.pointerDownPulse = p;
         this.pointerHeld = true;
+        // Track start position for swipe detection
+        this.touchStartX = p.x;
+        this.touchStartY = p.y;
       }
 
       // Second finger landing → pause pulse.
@@ -158,6 +167,21 @@ export class InputHandler {
 
     const onEnd = (e: TouchEvent): void => {
       e.preventDefault();
+      // Detect swipe direction for menu navigation
+      if (this.pointerPos) {
+        const deltaX = this.pointerPos.x - this.touchStartX;
+        const deltaY = this.pointerPos.y - this.touchStartY;
+        const minSwipeDistance = 50; // pixels
+
+        if (Math.abs(deltaY) > minSwipeDistance && Math.abs(deltaY) > Math.abs(deltaX)) {
+          if (deltaY > 0) {
+            this.swipeDownPulse = true; // Swiped down → move selection down
+          } else {
+            this.swipeUpPulse = true; // Swiped up → move selection up
+          }
+        }
+      }
+
       this.touchActiveCount = e.touches.length;
       if (this.touchActiveCount === 0) {
         this.touchTarget = null;
@@ -275,6 +299,10 @@ export class InputHandler {
 
       // ── Solar-system zoom ──────────────────────────────────────────────
       zoomDelta: this.zoomDelta,
+
+      // ── Mobile touch gestures ──────────────────────────────────────────
+      swipeUpPulse: this.swipeUpPulse,
+      swipeDownPulse: this.swipeDownPulse,
     };
   }
 
@@ -301,6 +329,9 @@ export class InputHandler {
     this.mapTogglePulse = false;
     // Solar-system zoom (accumulates per frame, then clears)
     this.zoomDelta = 0;
+    // Mobile touch swipe pulses
+    this.swipeUpPulse = false;
+    this.swipeDownPulse = false;
   }
 
   // ── Test helpers ─────────────────────────────────────────────────────────

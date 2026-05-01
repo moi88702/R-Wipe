@@ -2383,6 +2383,53 @@ export class GameRenderer {
     if (data.mapOpen) {
       this.drawGalaxyMap(g);
     }
+
+    // Draw touch controls for mobile
+    if (typeof window !== "undefined" && window.innerWidth < 768) {
+      this.drawTouchControls(g);
+    }
+  }
+
+  private drawTouchControls(g: Graphics): void {
+    const buttonSize = 50;
+    const padding = 10;
+    const bottomY = this.height - buttonSize - padding;
+    const rightX = this.width - buttonSize - padding;
+
+    // Thrust button (bottom right area)
+    g.rect(rightX - buttonSize * 2 - 10, bottomY, buttonSize, buttonSize)
+      .fill({ color: 0x00ff00, alpha: 0.4 })
+      .stroke({ color: 0x00ff00, width: 2, alpha: 0.8 });
+
+    // Strafe left button
+    g.rect(padding, bottomY, buttonSize, buttonSize)
+      .fill({ color: 0xff6600, alpha: 0.4 })
+      .stroke({ color: 0xff6600, width: 2, alpha: 0.8 });
+
+    // Strafe right button
+    g.rect(padding + buttonSize + 10, bottomY, buttonSize, buttonSize)
+      .fill({ color: 0xff6600, alpha: 0.4 })
+      .stroke({ color: 0xff6600, width: 2, alpha: 0.8 });
+
+    // Turn left (bottom center-left)
+    g.circle(this.width / 4, bottomY + buttonSize / 2, buttonSize / 2)
+      .fill({ color: 0x0066ff, alpha: 0.4 })
+      .stroke({ color: 0x0066ff, width: 2, alpha: 0.8 });
+
+    // Turn right (bottom center-right)
+    g.circle(this.width * 3 / 4, bottomY + buttonSize / 2, buttonSize / 2)
+      .fill({ color: 0x0066ff, alpha: 0.4 })
+      .stroke({ color: 0x0066ff, width: 2, alpha: 0.8 });
+
+    // Dock button (top right)
+    g.rect(rightX, padding, buttonSize, buttonSize)
+      .fill({ color: 0xffff00, alpha: 0.4 })
+      .stroke({ color: 0xffff00, width: 2, alpha: 0.8 });
+
+    // Map button (top center-right)
+    g.rect(rightX - buttonSize - 10, padding, buttonSize, buttonSize)
+      .fill({ color: 0x6600ff, alpha: 0.4 })
+      .stroke({ color: 0x6600ff, width: 2, alpha: 0.8 });
   }
 
   private drawNebulaBackground(g: Graphics): void {

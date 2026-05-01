@@ -180,6 +180,18 @@ export interface InputState {
    * Accumulates scroll events per frame; cleared by InputHandler.endFrame().
    */
   zoomDelta?: number;
+
+  // ── Mobile touch gestures ────────────────────────────────────────────────
+  /**
+   * Swipe up gesture pulse — move menu selection up (mobile).
+   * One-frame pulse; cleared by InputHandler.endFrame().
+   */
+  swipeUpPulse?: boolean;
+  /**
+   * Swipe down gesture pulse — move menu selection down (mobile).
+   * One-frame pulse; cleared by InputHandler.endFrame().
+   */
+  swipeDownPulse?: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

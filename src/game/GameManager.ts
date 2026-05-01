@@ -246,10 +246,13 @@ export class GameManager {
     const input = this.input.poll();
     const upEdge = input.moveUp && !this.prevUpPressed;
     const downEdge = input.moveDown && !this.prevDownPressed;
-    if (upEdge) {
+    const swipeUp = input.swipeUpPulse;
+    const swipeDown = input.swipeDownPulse;
+
+    if (upEdge || swipeUp) {
       this.menuSelection = (this.menuSelection - 1 + itemCount) % itemCount;
     }
-    if (downEdge) {
+    if (downEdge || swipeDown) {
       this.menuSelection = (this.menuSelection + 1) % itemCount;
     }
   }
