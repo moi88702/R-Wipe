@@ -443,3 +443,97 @@ Tests live in `src/**/*.test.ts`. Node-environment safe — nothing Pixi-bound.
 - Full preflight: `pnpm exec tsc --noEmit && pnpm test && pnpm build`.
 - Run just typecheck: `pnpm exec tsc --noEmit`.
 - Dev server: `pnpm dev`.
+
+## Solar System — HUDRenderer & HUDSystem
+
+`src/rendering/HUDRenderer.ts` — Pixi.js-based HUD overlay renderer for solar-system combat.
+
+Displays:
+- **Target locks**: reticles on locked enemies, full lock list in HUD corner
+- **Ability cooldowns**: 5 bars for B/V/C/X/Z keys, filled 0–1 ratio
+- **Ship status**: health and shield bars with numeric labels
+- **Waypoints**: color-coded navigation markers (primary=yellow, secondary=magenta, tertiary=cyan)
+
+**Constructor:** `new HUDRenderer(width: number, height: number)`
+
+**Public methods:**
+- `getLocksContainer()` / `getLocksGraphics()` — accessor for adding to stage / direct rendering
+- `renderTargetLocks(data: HUDRenderData)` — draw lock reticles and list
+- `renderAbilityCooldowns(data: HUDRenderData)` — draw cooldown bars
+- `renderShipStatus(data: HUDRenderData)` — draw health/shield bars
+- `renderWaypoints(data: HUDRenderData)` — draw waypoint markers
+
+**`HUDRenderData` contract:**
+```ts
+{
+  playerLocks: TargetingState;  // all locks + focused lock id
+  shipHealth: number;           // current health
+  shipMaxHealth: number;        // max health
+  shipShield: number;           // current shield
+  shipMaxShield: number;        // max shield
+  abilityCooldowns: Record<"B"|"V"|"C"|"X"|"Z", number>; // 0–1 ratio
+  waypointMarkers: WaypointMarker[];  // { name, positionKm, color, type }
+}
+```
+
+---
+
+`src/systems/HUDSystem.ts` — pure-logic data construction for HUD rendering.
+
+Converts game state into HUDRenderData each frame:
+- Absolute cooldown milliseconds → 0–1 ratios
+- RGB waypoint colors → hex numbers
+- Targeting state → displayable lock list with focus info
+
+**Static method:**
+```ts
+HUDSystem.buildHUDData(options: {
+  playerTargetingState: TargetingState;
+  playerHealth: number;
+  playerMaxHealth: number;
+  playerShield: number;
+  playerMaxShield: number;
+  abilityCooldownsMs: Record<"B"|"V"|"C"|"X"|"Z", number>;
+  maxAbilityCooldownMs: Record<"B"|"V"|"C"|"X"|"Z", number>;
+  currentWaypoints?: Waypoint[];
+}) → HUDRenderData
+```
+
+**Usage pattern** (game loop):
+```ts
+const hudData = HUDSystem.buildHUDData({
+  playerTargetingState: playerShip.targetingState,
+  playerHealth: playerShip.stats.health,
+  playerMaxHealth: playerShip.stats.maxHealth,
+  playerShield: playerShip.stats.shield,
+  playerMaxShield: playerShip.stats.maxShield,
+  abilityCooldownsMs: { B: remainingB_ms, V: remainingV_ms, ... },
+  maxAbilityCooldownMs: { B: 5000, V: 5000, ... },
+  currentWaypoints: missionLogManager.getWaypoints(),
+});
+
+// Render each HUD layer (can render individually or all at once)
+hud.renderTargetLocks(hudData);
+hud.renderAbilityCooldowns(hudData);
+hud.renderShipStatus(hudData);
+hud.renderWaypoints(hudData);
+```
+
+**Lock display invariants:**
+- All locks up to `scanner.maxSimultaneousLocks` show in the HUD list.
+- One lock is focused (`isFocused === true`); it receives weapon fire.
+- Focused lock is visually distinguished (red reticle; unfocused = green).
+- When focused lock breaks (out of range or destroyed), focus auto-shifts to next lock.
+- Tab-cycling and HUD clicks change focus without breaking background locks.
+
+**Cooldown display invariants:**
+- Each key (B/V/C/X/Z) has a bar.
+- Cooldown ratio 0–1 (0 = ready, 1 = full cooldown).
+- Bar fills left-to-right as cooldown progresses.
+- Text / visual state updates each frame from HUDRenderData.
+
+**Status display invariants:**
+- Health bar: green >25%, red ≤25%.
+- Shield bar: always blue.
+- Both display numeric values (e.g., "H: 60/100").
+- Shield absorbs first; depletes independently of health.

@@ -399,6 +399,112 @@ The game loop must call `undock()` from the dock-menu "Undock" handler.
 - `DockResult` — return type of `dock()`
 - `UndockResult` — return type of `undock()`
 
+## Key new subsystems (task b9261a0a)
+
+### HUDRenderer (`src/rendering/HUDRenderer.ts`)
+
+Pixi.js-based HUD overlay renderer for solar-system combat display. Renders four distinct HUD layers:
+1. Target locks (reticles on enemies, lock list in HUD corner)
+2. Ability cooldowns (bars for B/V/C/X/Z keys)
+3. Ship status (health and shield bars with numeric labels)
+4. Navigation waypoints (color-coded position markers)
+
+**Constructor**:
+```ts
+const hud = new HUDRenderer(width: number, height: number);
+```
+
+**Public API**:
+```ts
+// Render methods (called each frame with HUDRenderData)
+hud.renderTargetLocks(data: HUDRenderData): void     // reticles + lock list
+hud.renderAbilityCooldowns(data: HUDRenderData): void // cooldown bars
+hud.renderShipStatus(data: HUDRenderData): void       // health/shield bars
+hud.renderWaypoints(data: HUDRenderData): void        // waypoint markers
+
+// Accessors (for adding containers to game stage)
+hud.getLocksContainer(): Container
+hud.getLocksGraphics(): Graphics
+hud.getStatusContainer(): Container
+hud.getCooldownsContainer(): Container
+hud.getWaypointsContainer(): Container
+```
+
+**`HUDRenderData` contract** (passed to each render method):
+```ts
+{
+  playerLocks: TargetingState;  // all locks + focused lock id
+  shipHealth: number;           // current health
+  shipMaxHealth: number;        // max health
+  shipShield: number;           // current shield
+  shipMaxShield: number;        // max shield
+  abilityCooldowns: Record<"B"|"V"|"C"|"X"|"Z", number>; // 0–1 ratio
+  waypointMarkers: WaypointMarker[];  // { name, positionKm, color, type }
+  playerPositionKm: { x: number; y: number }; // player position (km) for waypoint conversion
+}
+```
+
+**Lock display invariants**:
+- Focused lock is red reticle; unfocused locks are green
+- All locks up to `maxSimultaneousLocks` show in HUD list
+- When focused lock breaks (out of range/destroyed), focus auto-shifts to next lock
+- Tab-cycling and HUD clicks change focus without breaking background locks
+
+**Cooldown display invariants**:
+- Each key (B/V/C/X/Z) has a bar showing 0–1 cooldown ratio
+- 0 = ready, 1 = full cooldown
+- Bar fills left-to-right as cooldown progresses
+
+**Status display invariants**:
+- Health bar: green >25%, red ≤25%
+- Shield bar: always blue
+- Both display numeric values (e.g., "H: 60/100")
+
+### HUDSystem (`src/systems/HUDSystem.ts`)
+
+Pure-logic data construction for HUD rendering. Converts game state into `HUDRenderData` each frame.
+No Pixi dependency — unit-testable independently.
+
+**Public API**:
+```ts
+HUDSystem.buildHUDData(options: {
+  playerTargetingState: TargetingState;
+  playerHealth: number;
+  playerMaxHealth: number;
+  playerShield: number;
+  playerMaxShield: number;
+  abilityCooldownsMs: Record<"B"|"V"|"C"|"X"|"Z", number>;
+  maxAbilityCooldownMs: Record<"B"|"V"|"C"|"X"|"Z", number>;
+  currentWaypoints?: Waypoint[];
+  playerPositionKm?: { x: number; y: number };
+}) → HUDRenderData
+```
+
+**Usage pattern** (game loop):
+```ts
+const hudData = HUDSystem.buildHUDData({
+  playerTargetingState: playerShip.targetingState,
+  playerHealth: playerShip.stats.health,
+  playerMaxHealth: playerShip.stats.maxHealth,
+  playerShield: playerShip.stats.shield,
+  playerMaxShield: playerShip.stats.maxShield,
+  abilityCooldownsMs: { B: remainingBMs, V: remainingVMs, ... },
+  maxAbilityCooldownMs: { B: 5000, V: 5000, ... },
+  currentWaypoints: missionLogManager.getWaypoints(),
+  playerPositionKm: session.playerPosition,
+});
+
+// Render each HUD layer
+hud.renderTargetLocks(hudData);
+hud.renderAbilityCooldowns(hudData);
+hud.renderShipStatus(hudData);
+hud.renderWaypoints(hudData);
+```
+
+**Conversions performed**:
+- Absolute cooldown milliseconds → 0–1 ratios via `Math.max(0, Math.min(1, current / max))`
+- RGB waypoint colors → hex numbers via bitshift
+- `Waypoint` objects → `WaypointMarker` with screen-space positioning
 ## Key new subsystems (task d8d5e9a5)
 
 ### SolarSystemPersistenceService (`src/services/SolarSystemPersistenceService.ts`)
