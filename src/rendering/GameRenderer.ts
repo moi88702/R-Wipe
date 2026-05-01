@@ -216,6 +216,7 @@ export interface SolarSystemRenderData {
   }>;
   readonly nearbyLocations: string[];
   readonly zoomLevel: number;
+  readonly mapOpen?: boolean;
 }
 
 const COLOR = {
@@ -2369,6 +2370,30 @@ export class GameRenderer {
     const headX = shipX + Math.sin(headingRad) * headingLen;
     const headY = shipY - Math.cos(headingRad) * headingLen;
     g.moveTo(shipX, shipY).lineTo(headX, headY).stroke({ color: shipColor, width: 2, alpha: 0.7 });
+
+    // Draw map overlay if open
+    if (data.mapOpen) {
+      this.drawGalaxyMap(g);
+    }
+  }
+
+  private drawGalaxyMap(g: Graphics): void {
+    // Semi-transparent overlay
+    g.rect(0, 0, this.width, this.height).fill({ color: 0x000000, alpha: 0.7 });
+
+    // Draw grid lines
+    const gridSize = 100;
+    const gridColor = 0x333333;
+    for (let x = 0; x < this.width; x += gridSize) {
+      g.moveTo(x, 0).lineTo(x, this.height).stroke({ color: gridColor, width: 1, alpha: 0.3 });
+    }
+    for (let y = 0; y < this.height; y += gridSize) {
+      g.moveTo(0, y).lineTo(this.width, y).stroke({ color: gridColor, width: 1, alpha: 0.3 });
+    }
+
+    // Draw current system marker (in center)
+    g.circle(this.width / 2, this.height / 2, 10).fill({ color: 0x00ffff, alpha: 1 });
+    g.circle(this.width / 2, this.height / 2, 10).stroke({ color: 0x00ffff, width: 2, alpha: 1 });
   }
 
   private drawDockedMenu(_state: GameState): void {

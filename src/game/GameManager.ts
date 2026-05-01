@@ -66,6 +66,7 @@ export class GameManager {
   private readonly overworld: OverworldManager;
   private readonly blueprints: BlueprintStore;
   private solarSystem: SolarSystemSessionManager | null = null;
+  private mapOpen = false;
   // TODO: Wire up docking, factions, mission log in Phase 4-7
   // private docking: DockingManager | null = null;
   // private factions: FactionManager | null = null;
@@ -933,6 +934,11 @@ export class GameManager {
       }
     }
 
+    // Handle map toggle (M key)
+    if (input.mapTogglePulse) {
+      this.mapOpen = !this.mapOpen;
+    }
+
     // TODO: Implement solar system rendering
     // For now, skip rendering to unblock the game loop
     // this.renderer.renderFrame(this.state.getGameState(), deltaMs, {
@@ -1649,6 +1655,7 @@ export class GameManager {
       })),
       nearbyLocations: sessionState.nearbyLocations,
       zoomLevel: sessionState.zoomLevel,
+      mapOpen: this.mapOpen,
     };
   }
 
