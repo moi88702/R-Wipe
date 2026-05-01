@@ -369,6 +369,67 @@ Wave size = `min(shipsPerWave, maxActiveShips − activeEnemyIds.length)`.
 - `MissionRegistry` (`src/game/data/MissionRegistry.ts`) — 18 missions across 5 factions; `getMission(id)`, `getMissionsByFaction`, `getMissionsByNPC`, `getMissionsByType`.
 - `LocationRegistry` (`src/game/data/LocationRegistry.ts`) — 10 locations; `getLocation(id)`, `getLocationsForNPC(npcId)`, `getLocationsByFaction`, `getLocationsByBody`.
 
+## Solar System — ShipyardManager
+
+`src/managers/ShipyardManager.ts` — instance class (one per active shipyard session).
+Orchestrates ship blueprint modification when docked at a shipyard station.
+Integrates with the existing Ship Builder system (parts registry, blueprint validation).
+
+**Public API:**
+
+```ts
+const sm = new ShipyardManager(blueprintStore?);
+
+// Session lifecycle
+const state = sm.openShipyard(blueprintId | null)
+  // → ShipyardSessionState (loads/creates blueprint, validates)
+
+const result = sm.addPart(partId, parentId, parentSocketId)
+  // → PartModificationResult { success, reason?, state }
+
+const result = sm.removePart(placedPartId)
+  // → PartModificationResult { success, reason?, state }
+
+const result = sm.changePart(placedPartId, newPartId)
+  // → PartModificationResult { success, reason?, state }
+
+const state = sm.renameBlueprintTo(newName)
+  // → ShipyardSessionState
+
+const state = sm.confirmModifications()
+  // → ShipyardSessionState (sets confirmTriggered: true)
+  // throws if isValid === false
+
+const state = sm.getSessionState()
+  // → ShipyardSessionState | null
+
+sm.closeShipyard()
+  // Releases session; subsequent calls throw until next openShipyard()
+```
+
+**`ShipyardSessionState`:**
+- `blueprint` — the Blueprint being edited (working copy)
+- `validationReport` — `AssemblyReport` from parts validation (ok, errors[])
+- `isValid` — true when validationReport.ok is true
+- `confirmTriggered` — true after `confirmModifications()` (caller persists blueprint)
+- `shipStats?` — computed stats (hp, speed, damage, cost, powerUsed, powerCapacity, hitbox) when valid
+
+**Part modification gates:**
+- **addPart**: parent exists, socket exists, socket free, part in registry, power budget allows it
+- **removePart**: not root, no children
+- **changePart**: not root, new part exists in registry
+
+**Validation** (via `src/game/parts/assembly.ts`):
+- Single root core
+- All parts reachable from root
+- No duplicate socket usage
+- Power budget not exceeded (`sum(non-core powerCost) ≤ core.powerCapacity`)
+
+**Constructor:** `new ShipyardManager(blueprintStore?)` — pass `new BlueprintStore(new InMemoryStorage())` in tests.
+
+**Exports** from `src/managers/index.ts`: `ShipyardManager`, `ShipyardSessionState`,
+`PartModificationResult`.
+
 ## Testing
 
 Tests live in `src/**/*.test.ts`. Node-environment safe — nothing Pixi-bound.

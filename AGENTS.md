@@ -505,3 +505,233 @@ hud.renderWaypoints(hudData);
 - Absolute cooldown milliseconds → 0–1 ratios via `Math.max(0, Math.min(1, current / max))`
 - RGB waypoint colors → hex numbers via bitshift
 - `Waypoint` objects → `WaypointMarker` with screen-space positioning
+## Key new subsystems (task d8d5e9a5)
+
+### SolarSystemPersistenceService (`src/services/SolarSystemPersistenceService.ts`)
+
+Provides versioned save/load for all solar system session state, following the
+pattern established by `MissionLogManager`, `FactionManager`, and `OverworldManager`.
+Uses `VersionedSlot<T>` from `LocalStorageService` for schema versioning and
+migration support.
+
+**Persisted data** (via `PersistedSolarSystemState` interface):
+- **Ship state**: `CapitalShipState` (position, velocity, heading, health, shields, weapons)
+- **Target locks**: `TargetingState` (all locks, focused lock, timestamps)
+- **Docking state**: `dockedLocationId`, `PreDockSnapshot` (for undocking)
+- **Navigation**: `primaryGravitySourceId`, `zoomLevel`, `discoveredLocations` (string array)
+- **Enemy stations**: `Record<stationId, EnemyStationState>` (hull, shields, alert level, active ships)
+- **Metadata**: `savedAtMs` (reload detection timestamp)
+## Key new subsystems (task 96a9552c)
+
+### StationUI (`src/managers/StationUI.ts`)
+
+State machine for the docked-station UI experience. Orchestrates NPC dialogue,
+shop transactions, and menu navigation. Delegates actual NPC/shop data to `LocationManager`;
+integrates with `DockingManager` to signal undock requests.
+
+**Public API**:
+
+```ts
+// Session lifecycle
+const state = stationUI.openDockMenu(location, playerCredits)
+  // → DockSessionState (screen: "dock-main", menu options, credits)
+
+const updatedState = stationUI.selectMenuItem("npc" | "shipyard" | "undock")
+  // → DockSessionState (screen transitions, dialogue initiated, or undockTriggered: true)
+
+// NPC dialogue
+const updatedState = stationUI.selectDialogueOption("continue" | "shop" | "close")
+  // → DockSessionState (advances phase, opens shop, or closes dialogue)
+
+// Shop
+const purchaseResult = stationUI.purchaseItem(itemId)
+  // → PurchaseResult { success, reason?, newBalance? }
+const sellResult = stationUI.sellItem(itemId)
+  // → SellResult { success, creditsEarned, reason? }
+
+// Navigation
+const state = stationUI.returnToMainMenu()
+  // → DockSessionState (clears dialogue/shop, returns to dock-main)
+
+stationUI.closeDockSession()
+  // Releases internal state; subsequent calls throw until next openDockMenu()
+```
+
+**`DockSessionState` — canonical dock-session snapshot**:
+- `screen` — "dock-main" | "npc-dialogue" | "npc-shop" | "shipyard"
+- `location` — the docked `Location` object
+- `availableMenuOptions` — [{ id, label, available }]
+- `activeNpc` — `NPCDefinition | undefined`
+- `dialogue` — `NpcDialogueState | undefined` (greeting/farewell phase + options)
+- `shopItems` — `ShopItem[] | undefined`
+- `playerCredits` — number (updated in-session by purchase/sell)
+- `undockTriggered` — boolean (set true after "Undock" selection; caller drives transition)
+
+**TypeScript strictness note** (`exactOptionalPropertyTypes=true`):
+- `activeNpc`, `dialogue`, `shopItems` are explicitly typed as `T | undefined`
+  (not optional `T?`). All assignments must include these properties, even when `undefined`.
+
+**Exports** (`src/managers/index.ts`):
+- `StationUI` — the class
+- `DockSessionState` — state snapshot type
+- `DockMenuOption` — menu item type
+- `NpcDialogueState` — dialogue phase/options type
+
+### ShipyardManager (`src/managers/ShipyardManager.ts`)
+
+Orchestrates ship blueprint modification when docked at a shipyard station.
+Manages blueprint loading, part modifications, validation, and persistence.
+Integrates with the existing Ship Builder system (parts registry, blueprint validation).
+
+**Public API**:
+
+```ts
+import { SolarSystemPersistenceService } from "./src/services/SolarSystemPersistenceService";
+import type { PersistedSolarSystemState } from "./src/services/SolarSystemPersistenceService";
+
+const persistence = new SolarSystemPersistenceService();
+
+// Build snapshot from current session
+const snapshot: PersistedSolarSystemState = {
+  shipState: player.shipState,
+  playerTargetingState: player.targetingState,
+  dockedLocationId: session.dockedLocationId,
+  preDockSnapshot: dockingManager.getPreDockSnapshot(),
+  primaryGravitySourceId: session.primaryGravitySourceId,
+  zoomLevel: session.zoomLevel,
+  discoveredLocations: Array.from(session.discoveredLocations),
+  enemyStationStates: buildEnemyStationMap(enemyStations),
+  savedAtMs: Date.now(),
+};
+
+// Save (typically on game exit or critical state change)
+persistence.save(snapshot);
+
+// Load (typically on game init)
+const loaded = persistence.load();
+if (loaded) {
+  restoreShipState(loaded.shipState);
+  restorePlayerLocks(loaded.playerTargetingState);
+  restoreSessionNavigation(
+    loaded.primaryGravitySourceId,
+    loaded.zoomLevel,
+    loaded.discoveredLocations,
+  );
+  // ...etc
+}
+
+// Clear (on "new game" or "delete save")
+persistence.clear();
+```
+
+**Storage slot**:
+- **Key**: `"rwipe.solarsystem.v1"`
+- **Current version**: `1`
+- **Migrations**: Defined in `solarSystemMigrations` (currently empty)
+
+**Migrations and schema evolution**: To add a v1→v2 migration:
+1. Add a transform function to `solarSystemMigrations[1]` in `LocalStorageService.ts`.
+2. Bump `SOLAR_SYSTEM_SCHEMA_VERSION` to `2` in the same commit.
+3. The migration chain runs automatically on load for any save older than the app version.
+
+**Validation**: The service validates the loaded payload before returning it,
+checking for required fields (`shipState`, `dockedLocationId`, `primaryGravitySourceId`).
+If validation fails or the stored version is incompatible, a `StorageMigrationError`
+is thrown; callers typically catch and fall back to a fresh session (no persisted
+progress).
+
+**Testing boundary**: `SolarSystemPersistenceService.test.ts` uses `InMemoryStorage`
+and tests the full save/load lifecycle at the service boundary — what goes in must
+come out unchanged (except for `savedAtMs` timestamp). No mocking of the underlying
+`VersionedSlot` or `LocalStorageService`.
+
+**Exports** (`src/services/index.ts`):
+- `SolarSystemPersistenceService` — the class
+- `PersistedSolarSystemState` — the persisted data type
+// Session lifecycle
+const state = shipyardManager.openShipyard(blueprintId | null)
+  // → ShipyardSessionState (loads or creates blueprint, validates)
+
+const result = shipyardManager.addPart(partId, parentId, parentSocketId)
+  // → PartModificationResult { success, reason?, state }
+
+const result = shipyardManager.removePart(placedPartId)
+  // → PartModificationResult { success, reason?, state }
+
+const result = shipyardManager.changePart(placedPartId, newPartId)
+  // → PartModificationResult { success, reason?, state }
+
+const state = shipyardManager.renameBlueprintTo(newName)
+  // → ShipyardSessionState (updates blueprint name)
+
+const state = shipyardManager.confirmModifications()
+  // → ShipyardSessionState (sets confirmTriggered: true)
+  // throws if blueprint is invalid
+
+const state = shipyardManager.getSessionState()
+  // → ShipyardSessionState | null
+
+shipyardManager.closeShipyard()
+  // Releases session state; subsequent calls throw until next openShipyard()
+```
+
+**`ShipyardSessionState` — canonical shipyard-session snapshot**:
+- `blueprint` — the blueprint being edited (working copy)
+- `validationReport` — `AssemblyReport` from the parts assembly validator
+- `isValid` — boolean (true when validationReport.ok is true)
+- `confirmTriggered` — boolean (set true after confirmModifications(); caller drives persistence)
+- `shipStats?` — computed ship statistics (hp, speed, damage, cost, power, hitbox) when valid
+
+**Part modification flow**:
+1. **addPart** — requires parent part to exist, socket to exist and be free, part to be in registry, power budget to allow it
+2. **removePart** — cannot remove root core, cannot remove parts with children
+3. **changePart** — cannot change root core, target part type must exist in registry
+4. On each modification, blueprint is re-validated and `ShipyardSessionState` is rebuilt
+
+**Validation gates** (in `AssemblyReport.errors`):
+- Single root core
+- All parts reachable from root
+- No duplicate socket usage
+- Power budget not exceeded (total non-core powerCost ≤ core's powerCapacity)
+- All part references and sockets exist
+
+**Exports** (`src/managers/index.ts`):
+- `ShipyardManager` — the class
+- `ShipyardSessionState` — state snapshot type
+- `PartModificationResult` — result type for add/remove/change operations
+
+## TypeScript strictness (exactOptionalPropertyTypes=true)
+
+The project uses `tsconfig.json` setting `"exactOptionalPropertyTypes": true` to enforce
+strict type contracts. This means:
+
+1. **Optional properties** (declared as `prop?: Type`) can only be absent or have the declared type,
+   **not** explicitly assigned `undefined`.
+2. **Explicit `Type | undefined`** properties must **always** be present in object literals, but
+   can be assigned `undefined`.
+
+### Rationale
+
+With `exactOptionalPropertyTypes=true`, the compiler treats `prop?: Type` as `prop: Type | never`
+(i.e., the property must be absent, not `undefined`). This prevents accidental bugs where code
+checks `if (prop)` expecting absence but receives an explicit `undefined` instead.
+
+### Pattern
+
+```ts
+// ❌ Fails: optional property assigned undefined
+const state = { x: 1, y?: 2 };
+// state.y = undefined;  // Type error: undefined not assignable to number
+
+// ✅ Passes: explicit union type, always present
+interface State { x: number; y: number | undefined; }
+const state: State = { x: 1, y: undefined };  // OK
+```
+
+### Impact on this codebase
+
+- `DockSessionState.activeNpc`, `dialogue`, `shopItems` are **`T | undefined`**, not **`T?`**.
+- `LocationManager.getDialogueState()` returns `NpcDialogueState | undefined`, not `null`.
+- `DialogueTransition.dialogueState` is `NpcDialogueState | undefined`, not `null`.
+- All object literals assigning these properties must include them (even if `undefined`).
+- Tests check `.toBeUndefined()`, not `.toBeNull()`.
