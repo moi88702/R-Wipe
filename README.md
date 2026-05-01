@@ -431,3 +431,74 @@ After a successful teleport the player arrives at the sister gate's exact
 position — still inside the trigger radius.  The caller is responsible for
 preventing an immediate re-trigger (e.g., one-frame cooldown flag or waiting
 until the player exits the radius before re-arming the check).
+
+## Solar system — Persistence
+
+`SolarSystemPersistenceService` (`src/services/SolarSystemPersistenceService.ts`)
+provides versioned save/load for all solar system session data. It mirrors the
+pattern used by `MissionLogManager`, `FactionManager`, and `OverworldManager`:
+uses `VersionedSlot<T>` from `LocalStorageService` for schema versioning and
+migration support.
+
+### Persisted state
+
+The service saves and restores:
+
+- **Player ship state**: position, velocity, heading, health, shields, weapons
+- **Target locks**: all active locks, focused lock, lock timestamps
+- **Docking state**: docked location id, pre-dock snapshot (for undocking)
+- **Navigation**: primary gravity source, zoom level, discovered locations
+- **Enemy stations**: hull, shields, alert level, spawned ship ids
+
+### Usage
+
+```ts
+import { SolarSystemPersistenceService } from "./src/services/SolarSystemPersistenceService";
+
+const persistenceService = new SolarSystemPersistenceService();
+
+// Build a snapshot from current session state
+const snapshot: PersistedSolarSystemState = {
+  shipState: getCurrentShipState(),
+  playerTargetingState: player.targetingState,
+  dockedLocationId: session.dockedLocationId,
+  preDockSnapshot: dockingManager.getPreDockSnapshot(),
+  primaryGravitySourceId: session.primaryGravitySourceId,
+  zoomLevel: session.zoomLevel,
+  discoveredLocations: Array.from(session.discoveredLocations),
+  enemyStationStates: getAllEnemyStationStates(),
+  savedAtMs: Date.now(),
+};
+
+// Save on session exit or docking
+persistenceService.save(snapshot);
+
+// Load on session init
+const saved = persistenceService.load();
+if (saved) {
+  restoreShipState(saved.shipState);
+  restorePlayerLocks(saved.playerTargetingState);
+  restoreSessionNavigation(saved.primaryGravitySourceId, saved.zoomLevel);
+  // ...and so on
+}
+
+// Clear save (e.g. on "new game")
+persistenceService.clear();
+```
+
+### Storage location
+
+All solar system state lives in a single versioned localStorage slot:
+- **Key**: `"rwipe.solarsystem.v1"`
+- **Version**: Currently `1`
+- **Migrations**: Defined in `solarSystemMigrations` (empty for v1)
+
+To add a v1→v2 migration, populate `solarSystemMigrations[1]` with a transform
+function and bump `SOLAR_SYSTEM_SCHEMA_VERSION` to `2`.
+
+### Type guard and validation
+
+The service validates the loaded payload before returning it, ensuring required
+fields (`shipState`, `dockedLocationId`, `primaryGravitySourceId`) are present.
+If validation fails or the stored version is incompatible, a `StorageMigrationError`
+is thrown; callers typically catch and fall back to a fresh session.
