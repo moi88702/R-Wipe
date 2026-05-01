@@ -121,6 +121,7 @@ describe("HUDRenderer", () => {
         shipMaxShield: 100,
         abilityCooldowns: { B: 0, V: 0, C: 0, X: 0, Z: 0 },
         waypointMarkers: [],
+        playerPositionKm: { x: 0, y: 0 },
       };
 
       expect(() => {
@@ -144,6 +145,7 @@ describe("HUDRenderer", () => {
         shipMaxShield: 100,
         abilityCooldowns: { B: 0, V: 0, C: 0, X: 0, Z: 0 },
         waypointMarkers: [],
+        playerPositionKm: { x: 0, y: 0 },
       };
 
       expect(() => {
@@ -165,6 +167,7 @@ describe("HUDRenderer", () => {
         shipMaxShield: 100,
         abilityCooldowns: { B: 0, V: 0, C: 0, X: 0, Z: 0 },
         waypointMarkers: [],
+        playerPositionKm: { x: 0, y: 0 },
       };
 
       expect(() => {
