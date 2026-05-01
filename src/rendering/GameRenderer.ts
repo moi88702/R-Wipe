@@ -980,7 +980,8 @@ export class GameRenderer {
     }
 
     if (isDocked) {
-      // TODO: Draw docked menu
+      // Draw docked menu overlay
+      this.drawDockedMenu(state);
       return;
     }
 
@@ -2368,6 +2369,17 @@ export class GameRenderer {
     const headX = shipX + Math.sin(headingRad) * headingLen;
     const headY = shipY - Math.cos(headingRad) * headingLen;
     g.moveTo(shipX, shipY).lineTo(headX, headY).stroke({ color: shipColor, width: 2, alpha: 0.7 });
+  }
+
+  private drawDockedMenu(_state: GameState): void {
+    // Use existing text fields to display docked menu
+    this.titleText.text = "DOCKED";
+    this.titleText.x = this.width / 2 - this.titleText.width / 2;
+    this.titleText.y = 100;
+
+    this.promptText.text = "Press [ESC] to Undock";
+    this.promptText.x = this.width / 2 - this.promptText.width / 2;
+    this.promptText.y = this.height - 60;
   }
 
   private drawShipyard(data: ShipyardRenderData): void {
