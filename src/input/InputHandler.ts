@@ -35,6 +35,11 @@ export class InputHandler {
   private abilityXPulse = false;
   private abilityZPulse = false;
 
+  // ── Solar-system targeting & map key pulses ────────────────────────────
+  private cycleTargetPulse = false;
+  private quickLockPulse = false;
+  private mapTogglePulse = false;
+
   // ── Pointer state (mouse + primary touch, used by menu screens) ────────
   private pointerPos: { x: number; y: number } | null = null;
   private pointerDownPulse: { x: number; y: number } | null = null;
@@ -58,6 +63,17 @@ export class InputHandler {
       if (e.code === "KeyC") this.abilityCPulse = true;
       if (e.code === "KeyX") this.abilityXPulse = true;
       if (e.code === "KeyZ") this.abilityZPulse = true;
+
+      // Solar-system targeting & map key pulses
+      if (e.code === "Tab") {
+        e.preventDefault();
+        this.cycleTargetPulse = true;
+      }
+      if (e.code === "Slash") {
+        e.preventDefault();
+        this.quickLockPulse = true;
+      }
+      if (e.code === "KeyM") this.mapTogglePulse = true;
     };
 
     this.boundKeyUp = (e: KeyboardEvent) => {
@@ -230,6 +246,8 @@ export class InputHandler {
       thrustReverse: this.keysPressed.has("KeyS"),
       turnLeft: this.keysPressed.has("KeyA"),
       turnRight: this.keysPressed.has("KeyD"),
+      strafeLeft: this.keysPressed.has("ArrowLeft"),
+      strafeRight: this.keysPressed.has("ArrowRight"),
 
       // ── Solar-system combat ability keys (pulse per keydown) ─────────────
       // B reuses the existing `bomb` field above.
@@ -237,6 +255,11 @@ export class InputHandler {
       abilityC: this.abilityCPulse,
       abilityX: this.abilityXPulse,
       abilityZ: this.abilityZPulse,
+
+      // ── Solar-system targeting & map keys ──────────────────────────────
+      cycleTargetPulse: this.cycleTargetPulse,
+      quickLockPulse: this.quickLockPulse,
+      mapTogglePulse: this.mapTogglePulse,
     };
   }
 
@@ -257,6 +280,10 @@ export class InputHandler {
     this.abilityCPulse = false;
     this.abilityXPulse = false;
     this.abilityZPulse = false;
+    // Solar-system targeting & map key pulses
+    this.cycleTargetPulse = false;
+    this.quickLockPulse = false;
+    this.mapTogglePulse = false;
   }
 
   // ── Test helpers ─────────────────────────────────────────────────────────

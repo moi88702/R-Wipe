@@ -105,6 +105,16 @@ export interface InputState {
    * Absent in classic arcade mode; always false when not held.
    */
   turnRight?: boolean;
+  /**
+   * Left arrow key — strafe the ship left perpendicular to facing direction
+   * (solar-system mode). Absent in classic arcade mode; always false when not held.
+   */
+  strafeLeft?: boolean;
+  /**
+   * Right arrow key — strafe the ship right perpendicular to facing direction
+   * (solar-system mode). Absent in classic arcade mode; always false when not held.
+   */
+  strafeRight?: boolean;
 
   // ── Solar-system combat ability keys ──────────────────────────────────────
   /**
@@ -138,6 +148,31 @@ export interface InputState {
    * `InputHandler.poll()` always supplies this field.
    */
   abilityZ: boolean;
+
+  // ── Solar-system targeting keys ──────────────────────────────────────────
+  /**
+   * Tab key pulse — cycle focused lock to next target (solar-system combat).
+   * One-frame pulse; cleared by InputHandler.endFrame().
+   *
+   * Always `false` when the key was not pressed this frame.
+   */
+  cycleTargetPulse?: boolean;
+  /**
+   * Slash key pulse — quick-lock nearest hostile target (solar-system combat).
+   * One-frame pulse; cleared by InputHandler.endFrame().
+   *
+   * Always `false` when the key was not pressed this frame.
+   */
+  quickLockPulse?: boolean;
+
+  // ── Solar-system map key ─────────────────────────────────────────────────
+  /**
+   * M key pulse — toggle galaxy map overlay (solar-system view).
+   * One-frame pulse; cleared by InputHandler.endFrame().
+   *
+   * Always `false` when the key was not pressed this frame.
+   */
+  mapTogglePulse?: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
