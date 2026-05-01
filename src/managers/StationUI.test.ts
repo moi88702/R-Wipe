@@ -93,7 +93,7 @@
  *         (end-to-end: dock → shop → undock → verify ship position)
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { StationUI } from "./StationUI";
 import { DockingManager } from "./DockingManager";
 import { LocationRegistry } from "../game/data/LocationRegistry";
@@ -131,7 +131,13 @@ function makeSession(
 }
 
 /** A minimal faction standing (neutral — passes all open stations). */
-const NEUTRAL_STANDING = { factionId: "terran-federation", standing: 100 };
+const NEUTRAL_STANDING = {
+  factionId: "terran-federation",
+  reputation: 100,
+  missionsDoneCount: 0,
+  canDockAt: new Set(["station-alpha"]),
+  isHostile: false,
+};
 const EMPTY_INVENTORY: Record<string, number> = {};
 const NO_MISSIONS = new Set<string>();
 

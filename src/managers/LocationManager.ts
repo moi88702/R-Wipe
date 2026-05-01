@@ -112,8 +112,8 @@ export interface SellResult {
 export interface DialogueTransition {
   /** Destination state for the caller's UI state machine. */
   transitionTo: "farewell" | "shop" | "closed";
-  /** Updated dialogue snapshot (null when dialogue is closed). */
-  dialogueState: NpcDialogueState | null;
+  /** Updated dialogue snapshot (undefined when dialogue is closed). */
+  dialogueState: NpcDialogueState | undefined;
 }
 
 // ── LocationManager ───────────────────────────────────────────────────────────
@@ -173,8 +173,8 @@ export class LocationManager {
    * Return the current dialogue state snapshot, or `null` when no dialogue
    * is in progress.
    */
-  getDialogueState(): NpcDialogueState | null {
-    return this.activeDialogue !== null ? this.snapshotDialogue() : null;
+  getDialogueState(): NpcDialogueState | undefined {
+    return this.activeDialogue !== null ? this.snapshotDialogue() : undefined;
   }
 
   /**
@@ -188,7 +188,7 @@ export class LocationManager {
    */
   selectDialogueOption(option: DialogueOption): DialogueTransition {
     if (!this.activeDialogue) {
-      return { transitionTo: "closed", dialogueState: null };
+      return { transitionTo: "closed", dialogueState: undefined };
     }
 
     const npc = this.activeDialogue.npc;
@@ -213,7 +213,7 @@ export class LocationManager {
 
       case "close": {
         this.activeDialogue = null;
-        return { transitionTo: "closed", dialogueState: null };
+        return { transitionTo: "closed", dialogueState: undefined };
       }
     }
   }

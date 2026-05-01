@@ -72,7 +72,7 @@
  *    34.  Unknown item id                  → failure, creditsEarned 0, "item-not-found"
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { LocationManager } from "./LocationManager";
 
 // ── getNPCsAtLocation ─────────────────────────────────────────────────────────
@@ -161,9 +161,9 @@ describe("LocationManager.startNPCInteraction", () => {
     expect(state.availableOptions).toContain("close");
   });
 
-  it("returns null from getDialogueState() before any interaction is started", () => {
+  it("returns undefined from getDialogueState() before any interaction is started", () => {
     const manager = new LocationManager();
-    expect(manager.getDialogueState()).toBeNull();
+    expect(manager.getDialogueState()).toBeUndefined();
   });
 
   it("getDialogueState() returns a snapshot matching the active dialogue", () => {
@@ -176,7 +176,7 @@ describe("LocationManager.startNPCInteraction", () => {
     const state = manager.getDialogueState();
 
     // Then: it matches the started snapshot
-    expect(state).not.toBeNull();
+    expect(state).toBeDefined();
     expect(state!.phase).toBe(started.phase);
     expect(state!.message).toBe(started.message);
     expect(state!.npc.id).toBe(started.npc.id);
@@ -211,7 +211,7 @@ describe("LocationManager.selectDialogueOption('continue')", () => {
 
     // Then: farewell phase with idle message
     expect(transitionTo).toBe("farewell");
-    expect(dialogueState).not.toBeNull();
+    expect(dialogueState).toBeDefined();
     expect(dialogueState!.phase).toBe("farewell");
     expect(dialogueState!.message).toBe(voss.dialogueIdle);
   });
@@ -240,7 +240,7 @@ describe("LocationManager.selectDialogueOption('shop')", () => {
 
     // Then: shop transition signalled, dialogue still shows greeting
     expect(transitionTo).toBe("shop");
-    expect(dialogueState).not.toBeNull();
+    expect(dialogueState).toBeDefined();
     expect(dialogueState!.phase).toBe("greeting");
   });
 
@@ -251,7 +251,7 @@ describe("LocationManager.selectDialogueOption('shop')", () => {
     manager.selectDialogueOption("shop");
 
     // Dialogue is not closed, so state should still be accessible
-    expect(manager.getDialogueState()).not.toBeNull();
+    expect(manager.getDialogueState()).toBeDefined();
     expect(manager.getDialogueState()!.phase).toBe("greeting");
   });
 });
@@ -267,8 +267,8 @@ describe("LocationManager.selectDialogueOption('close')", () => {
     const { transitionTo, dialogueState } = manager.selectDialogueOption("close");
 
     expect(transitionTo).toBe("closed");
-    expect(dialogueState).toBeNull();
-    expect(manager.getDialogueState()).toBeNull();
+    expect(dialogueState).toBeUndefined();
+    expect(manager.getDialogueState()).toBeUndefined();
   });
 
   it("closes the dialogue from farewell phase", () => {
@@ -280,7 +280,7 @@ describe("LocationManager.selectDialogueOption('close')", () => {
     const { transitionTo, dialogueState } = manager.selectDialogueOption("close");
 
     expect(transitionTo).toBe("closed");
-    expect(dialogueState).toBeNull();
+    expect(dialogueState).toBeUndefined();
   });
 });
 
@@ -294,7 +294,7 @@ describe("LocationManager.selectDialogueOption — no active session", () => {
     const { transitionTo, dialogueState } = manager.selectDialogueOption("continue");
 
     expect(transitionTo).toBe("closed");
-    expect(dialogueState).toBeNull();
+    expect(dialogueState).toBeUndefined();
   });
 });
 
@@ -308,7 +308,7 @@ describe("LocationManager.closeDialogue", () => {
 
     manager.closeDialogue();
 
-    expect(manager.getDialogueState()).toBeNull();
+    expect(manager.getDialogueState()).toBeUndefined();
   });
 
   it("is a no-op when no dialogue is active", () => {

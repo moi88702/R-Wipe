@@ -111,11 +111,11 @@ export interface DockSessionState {
   /** Options shown in the main dock menu (always present regardless of screen). */
   availableMenuOptions: DockMenuOption[];
   /** NPC currently in dialogue. Present when screen is "npc-dialogue" or "npc-shop". */
-  activeNpc?: NPCDefinition;
+  activeNpc: NPCDefinition | undefined;
   /** Current NPC dialogue snapshot. Present when screen is "npc-dialogue". */
-  dialogue?: NpcDialogueState;
+  dialogue: NpcDialogueState | undefined;
   /** Items available in the shop. Present when screen is "npc-shop". */
-  shopItems?: ShopItem[];
+  shopItems: ShopItem[] | undefined;
   /**
    * Player credit balance at this point in the dock session.
    * Updated immediately when purchaseItem / sellItem succeed.
@@ -175,6 +175,9 @@ export class StationUI {
       screen: "dock-main",
       location,
       availableMenuOptions: menuOptions,
+      activeNpc: undefined,
+      dialogue: undefined,
+      shopItems: undefined,
       playerCredits,
       undockTriggered: false,
     };
@@ -262,7 +265,7 @@ export class StationUI {
         this.sessionState = {
           ...this.sessionState!,
           screen: "npc-dialogue",
-          dialogue: dialogueState ?? undefined,
+          dialogue: dialogueState,
         };
         break;
       }
