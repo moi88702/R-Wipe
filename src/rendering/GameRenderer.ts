@@ -901,7 +901,7 @@ export class GameRenderer {
     const isGameOver = screen === "game-over";
     const isStarmap = screen === "starmap";
     const isShipyard = screen === "shipyard";
-    const isSolarSystem = screen === "solar-system";
+    const isSolarSystem = screen === "solar-system" || screen === "solar-system-paused";
     const isDocked = screen === "docked";
     // Gameplay entities stay visible behind the pause overlay.
     const drawsEntities = isGameplay || isPause;
@@ -977,6 +977,10 @@ export class GameRenderer {
 
     if (isSolarSystem && extras.solarSystem) {
       this.drawSolarSystem(extras.solarSystem);
+      // Draw pause overlay if paused
+      if (screen === "solar-system-paused") {
+        this.drawPauseOverlay();
+      }
       return;
     }
 
@@ -2337,6 +2341,9 @@ export class GameRenderer {
     const g = this.solarSystemGfx;
     g.clear();
 
+    // Draw nebula background
+    this.drawNebulaBackground(g);
+
     // Draw celestial bodies with glow effect
     for (const body of data.celestialBodies) {
       const color = (body.color.r << 16) | (body.color.g << 8) | body.color.b;
@@ -2375,6 +2382,32 @@ export class GameRenderer {
     // Draw map overlay if open
     if (data.mapOpen) {
       this.drawGalaxyMap(g);
+    }
+  }
+
+  private drawNebulaBackground(g: Graphics): void {
+    // Draw gradient nebula background
+    g.rect(0, 0, this.width, this.height).fill({ color: 0x0a0020, alpha: 1 }); // Dark blue-purple base
+
+    // Draw nebula clouds with varying colors
+    const nebulaClouds = [
+      { x: this.width * 0.2, y: this.height * 0.3, color: 0x6600cc, size: 400 }, // Purple
+      { x: this.width * 0.7, y: this.height * 0.2, color: 0xff0066, size: 350 }, // Pink/Magenta
+      { x: this.width * 0.4, y: this.height * 0.7, color: 0x0066ff, size: 380 }, // Blue
+      { x: this.width * 0.8, y: this.height * 0.6, color: 0xff6600, size: 320 }, // Orange
+    ];
+
+    for (const cloud of nebulaClouds) {
+      g.circle(cloud.x, cloud.y, cloud.size).fill({ color: cloud.color, alpha: 0.08 });
+    }
+
+    // Add some distant stars scattered across background
+    const starCount = 50;
+    for (let i = 0; i < starCount; i++) {
+      const x = (i * 73) % this.width; // Pseudo-random but deterministic
+      const y = ((i * 127) % this.height);
+      const size = 0.5 + ((i % 3) * 0.5);
+      g.circle(x, y, size).fill({ color: 0xffffff, alpha: 0.6 });
     }
   }
 
@@ -2452,15 +2485,61 @@ export class GameRenderer {
     g.circle(this.width / 2, this.height / 2, 10).stroke({ color: 0x00ffff, width: 2, alpha: 1 });
   }
 
-  private drawDockedMenu(_state: GameState): void {
-    // Use existing text fields to display docked menu
-    this.titleText.text = "DOCKED";
-    this.titleText.x = this.width / 2 - this.titleText.width / 2;
-    this.titleText.y = 100;
+  private drawPauseOverlay(): void {
+    const g = this.solarSystemGfx;
 
-    this.promptText.text = "Press [ESC] to Undock";
-    this.promptText.x = this.width / 2 - this.promptText.width / 2;
-    this.promptText.y = this.height - 60;
+    // Semi-transparent dark overlay
+    g.rect(0, 0, this.width, this.height).fill({ color: 0x000000, alpha: 0.5 });
+
+    // Pause panel
+    const panelWidth = 300;
+    const panelHeight = 150;
+    const panelX = this.width / 2 - panelWidth / 2;
+    const panelY = this.height / 2 - panelHeight / 2;
+
+    g.rect(panelX, panelY, panelWidth, panelHeight).fill({ color: 0x001a4d, alpha: 0.95 });
+    g.rect(panelX, panelY, panelWidth, panelHeight).stroke({ color: 0x00ffff, width: 2, alpha: 1 });
+
+    // Text
+    this.pauseTitle.text = "PAUSED";
+    this.pauseTitle.x = panelX + panelWidth / 2 - this.pauseTitle.width / 2;
+    this.pauseTitle.y = panelY + 30;
+
+    this.promptText.text = "Press [P] or [ESC] to Resume";
+    this.promptText.x = panelX + panelWidth / 2 - this.promptText.width / 2;
+    this.promptText.y = panelY + 100;
+  }
+
+  private drawDockedMenu(_state: GameState): void {
+    const g = this.solarSystemGfx;
+
+    // Draw semi-transparent overlay
+    g.rect(0, 0, this.width, this.height).fill({ color: 0x000000, alpha: 0.6 });
+
+    // Draw menu panel background
+    const panelWidth = 400;
+    const panelHeight = 250;
+    const panelX = this.width / 2 - panelWidth / 2;
+    const panelY = this.height / 2 - panelHeight / 2;
+
+    g.rect(panelX, panelY, panelWidth, panelHeight).fill({ color: 0x001a4d, alpha: 0.9 });
+    g.rect(panelX, panelY, panelWidth, panelHeight).stroke({ color: 0x00ffff, width: 2, alpha: 1 });
+
+    // Draw title using existing text field
+    this.titleText.text = "DOCKED AT STATION";
+    this.titleText.x = panelX + panelWidth / 2 - this.titleText.width / 2;
+    this.titleText.y = panelY + 30;
+
+    // Draw menu options
+    this.subtitleText.text = "Station Options\n\n[ESC] Undock\n[M] View Map";
+    this.subtitleText.style.fontSize = 18;
+    this.subtitleText.x = panelX + 30;
+    this.subtitleText.y = panelY + 80;
+
+    // Draw prompt
+    this.promptText.text = "Ready to explore the system?";
+    this.promptText.x = panelX + panelWidth / 2 - this.promptText.width / 2;
+    this.promptText.y = panelY + panelHeight - 40;
   }
 
   private drawShipyard(data: ShipyardRenderData): void {
