@@ -431,3 +431,115 @@ After a successful teleport the player arrives at the sister gate's exact
 position — still inside the trigger radius.  The caller is responsible for
 preventing an immediate re-trigger (e.g., one-frame cooldown flag or waiting
 until the player exits the radius before re-arming the check).
+
+## Solar System — HUD Visual Feedback
+
+`HUDRenderer` (`src/rendering/HUDRenderer.ts`) renders the in-game HUD overlays
+for solar-system combat mode, displaying:
+- Target lock indicators (reticles and lock list)
+- Ability cooldown bars (B/V/C/X/Z keys)
+- Ship status bars (health and shields)
+- Navigation waypoint markers
+
+`HUDSystem` (`src/systems/HUDSystem.ts`) is a pure-logic data construction
+system that builds `HUDRenderData` from game state each frame, converting:
+- Target lock state to displayable lock list with focused lock highlighting
+- Absolute millisecond cooldown values to 0–1 ratios (0 = ready, 1 = full)
+- Waypoint navigation data to color-coded HUD markers
+
+### HUDRenderer public API
+
+```ts
+import { HUDRenderer, type HUDRenderData } from "./src/rendering/HUDRenderer";
+
+const hud = new HUDRenderer(1280, 720);
+
+// Build HUD data from game state
+const hudData: HUDRenderData = {
+  playerLocks: targetingState,          // TargetingState (locks + focused id)
+  shipHealth: 80,                       // current health
+  shipMaxHealth: 100,                   // max health
+  shipShield: 60,                       // current shield
+  shipMaxShield: 100,                   // max shield
+  abilityCooldowns: {
+    B: 0.5,  // 0–1 ratio (0 = ready, 1 = full cooldown)
+    V: 0,
+    C: 0.3,
+    X: 0,
+    Z: 0,
+  },
+  waypointMarkers: [
+    { name: "Sol", positionKm: {...}, color: 0xffff00, type: "primary" },
+    { name: "Alpha Centauri", positionKm: {...}, color: 0xff00ff, type: "secondary" },
+  ],
+};
+
+// Render all HUD elements
+hud.renderTargetLocks(hudData);      // draws lock reticles and list
+hud.renderAbilityCooldowns(hudData); // draws cooldown bars
+hud.renderShipStatus(hudData);       // draws health/shield bars
+hud.renderWaypoints(hudData);        // draws waypoint markers
+```
+
+### HUDSystem public API
+
+```ts
+import { HUDSystem } from "./src/systems/HUDSystem";
+
+// Build HUD data from game state each frame
+const hudData = HUDSystem.buildHUDData({
+  playerTargetingState: targetingState,
+  playerHealth: 80,
+  playerMaxHealth: 100,
+  playerShield: 60,
+  playerMaxShield: 100,
+  abilityCooldownsMs: {
+    B: 1000,   // absolute milliseconds remaining
+    V: 0,
+    C: 2000,
+    X: 500,
+    Z: 0,
+  },
+  maxAbilityCooldownMs: {
+    B: 5000,   // max cooldown for each ability
+    V: 5000,
+    C: 5000,
+    X: 5000,
+    Z: 5000,
+  },
+  currentWaypoints: [...], // optional Waypoint[] from MissionLogManager
+});
+
+// Pass hudData to HUDRenderer for display
+hud.renderTargetLocks(hudData);
+// ... etc
+```
+
+### Lock display contract
+
+- All locks up to `scanner.maxSimultaneousLocks` appear in the HUD list.
+- Exactly one lock is **focused** (`isFocused === true`); it receives weapons fire.
+- Focused lock is highlighted visually (e.g., red reticle; background green).
+- When focused lock breaks (out of range or destroyed), focus auto-shifts to next lock.
+- Tab-cycling and HUD clicks change focus without breaking background locks.
+
+### Cooldown display contract
+
+- Each ability key (B/V/C/X/Z) has a cooldown bar.
+- Cooldown ratio ranges 0–1 (0 = ready, 1 = full cooldown).
+- Bar fills from left to right as cooldown progresses.
+- When ratio is 0, key is ready to press.
+
+### Status display contract
+
+- Health bar shows as green at >25% health, red at ≤25%.
+- Shield bar shows as blue; depletes first (absorbs 1 hit typically).
+- Both bars display numeric values (e.g., "H: 60/100").
+
+### Waypoint colors
+
+- `primary` waypoint: yellow (0xffff00)
+- `secondary` waypoint: magenta (0xff00ff)
+- `tertiary` waypoint: cyan (0x00ffff)
+
+These colors match the mission-log waypoint slot conventions.

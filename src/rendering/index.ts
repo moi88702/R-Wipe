@@ -7,3 +7,6 @@
  */
 
 export {}; // ensure this is treated as a module
+
+// HUD Visual Feedback System
+export { HUDRenderer, type HUDRenderData, type WaypointMarker } from "./HUDRenderer";
