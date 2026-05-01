@@ -160,5 +160,47 @@ describe("HUDSystem", () => {
 
       expect(hud.waypointMarkers).toEqual([]);
     });
+
+    it("includes player position for waypoint coordinate conversion", () => {
+      const playerPos = { x: 1000, y: 2000 };
+
+      const hud = HUDSystem.buildHUDData({
+        playerTargetingState: {
+          allLocks: [],
+          focusedLockId: undefined,
+          lastTabCycleMs: 0,
+          lastClickLockMs: 0,
+        },
+        playerHealth: 100,
+        playerMaxHealth: 100,
+        playerShield: 100,
+        playerMaxShield: 100,
+        abilityCooldownsMs: { B: 0, V: 0, C: 0, X: 0, Z: 0 },
+        maxAbilityCooldownMs: { B: 5000, V: 5000, C: 5000, X: 5000, Z: 5000 },
+        playerPositionKm: playerPos,
+      });
+
+      expect(hud.playerPositionKm).toEqual(playerPos);
+    });
+
+    it("defaults player position to origin when not provided", () => {
+      const hud = HUDSystem.buildHUDData({
+        playerTargetingState: {
+          allLocks: [],
+          focusedLockId: undefined,
+          lastTabCycleMs: 0,
+          lastClickLockMs: 0,
+        },
+        playerHealth: 100,
+        playerMaxHealth: 100,
+        playerShield: 100,
+        playerMaxShield: 100,
+        abilityCooldownsMs: { B: 0, V: 0, C: 0, X: 0, Z: 0 },
+        maxAbilityCooldownMs: { B: 5000, V: 5000, C: 5000, X: 5000, Z: 5000 },
+        // playerPositionKm not provided
+      });
+
+      expect(hud.playerPositionKm).toEqual({ x: 0, y: 0 });
+    });
   });
 });

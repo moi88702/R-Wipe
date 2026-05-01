@@ -36,6 +36,8 @@ export interface HUDRenderData {
   abilityCooldowns: Record<"B" | "V" | "C" | "X" | "Z", number>;
   /** Navigation waypoints to display. */
   waypointMarkers: WaypointMarker[];
+  /** Player ship's current position (km) — required to convert waypoints to screen coordinates. */
+  playerPositionKm: { x: number; y: number };
 }
 
 export class HUDRenderer {
@@ -215,15 +217,17 @@ export class HUDRenderer {
    * Render navigation waypoint markers.
    *
    * Draws waypoint indicators at screen-space positions with labels.
+   * Converts waypoint positions from km-space to screen coordinates using the
+   * player's current position and viewport bounds.
    */
   renderWaypoints(data: HUDRenderData): void {
     this.waypointsGfx.clear();
 
     for (const wp of data.waypointMarkers) {
-      // In a real implementation, we would convert km position to screen space
-      // and draw the marker at that location
-      const x = 100; // placeholder
-      const y = 100; // placeholder
+      // Convert km-space position to screen-space coordinates
+      const screenPos = this.kmToScreenCoordinates(wp.positionKm, data.playerPositionKm);
+      const x = screenPos.x;
+      const y = screenPos.y;
 
       // Draw waypoint diamond
       const size = 10;
@@ -235,6 +239,41 @@ export class HUDRenderer {
         .closePath()
         .stroke({ color: wp.color, width: 2 });
     }
+  }
+
+  /**
+   * Convert km-space coordinates to screen-space coordinates.
+   *
+   * Uses a simple linear projection: the player is at the centre of the screen,
+   * and the scale factor maps km to pixels. A scale of 1 km = 0.01 pixels,
+   * clamped to screen bounds so waypoints off-screen still appear near the edge.
+   *
+   * @param positionKm Position in world km-space.
+   * @param playerPositionKm Player's current position in km.
+   * @returns Screen-space pixel coordinates.
+   */
+  private kmToScreenCoordinates(
+    positionKm: { x: number; y: number },
+    playerPositionKm: { x: number; y: number },
+  ): { x: number; y: number } {
+    // Calculate relative position from player
+    const deltaX = positionKm.x - playerPositionKm.x;
+    const deltaY = positionKm.y - playerPositionKm.y;
+
+    // Scale factor: 1 km = 0.01 pixels (i.e., 100 km = 1 pixel)
+    // Adjust this factor to change zoom level
+    const scaleKmToPixels = 0.01;
+
+    // Project onto screen with player at center
+    const screenX = this.width / 2 + deltaX * scaleKmToPixels;
+    const screenY = this.height / 2 + deltaY * scaleKmToPixels;
+
+    // Clamp waypoints to stay within screen bounds (with small margin)
+    const margin = 20;
+    const clampedX = Math.max(margin, Math.min(this.width - margin, screenX));
+    const clampedY = Math.max(margin, Math.min(this.height - margin, screenY));
+
+    return { x: clampedX, y: clampedY };
   }
 
   // ─────────────────────────────────────────────────────────────────────────

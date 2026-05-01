@@ -32,6 +32,7 @@ export class HUDSystem {
     abilityCooldownsMs: Record<"B" | "V" | "C" | "X" | "Z", number>;
     maxAbilityCooldownMs: Record<"B" | "V" | "C" | "X" | "Z", number>;
     currentWaypoints?: Waypoint[];
+    playerPositionKm?: { x: number; y: number };
   }): HUDRenderData {
     // Convert absolute cooldown times to 0–1 ratios
     const abilityCooldowns: Record<"B" | "V" | "C" | "X" | "Z", number> = {
@@ -75,6 +76,7 @@ export class HUDSystem {
       shipMaxShield: options.playerMaxShield,
       abilityCooldowns,
       waypointMarkers,
+      playerPositionKm: options.playerPositionKm ?? { x: 0, y: 0 },
     };
   }
 

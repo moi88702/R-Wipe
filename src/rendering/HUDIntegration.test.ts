@@ -63,6 +63,7 @@ describe("HUD Integration — Renderer + System", () => {
       abilityCooldownsMs: { B: 1000, V: 0, C: 2000, X: 500, Z: 0 },
       maxAbilityCooldownMs: { B: 5000, V: 5000, C: 5000, X: 5000, Z: 5000 },
       currentWaypoints: waypoints,
+      playerPositionKm: { x: 0, y: 0 },
     });
 
     // Render all HUD elements
