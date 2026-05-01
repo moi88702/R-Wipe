@@ -488,7 +488,7 @@ export class GameRenderer {
 
     // Menu list items — centred column, spaced ~44px apart.
     this.menuItemTexts = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 4; i++) {
       const t = new Text({
         text: "",
         style: hudStyle(COLOR.hudWhite, 28),
@@ -2597,7 +2597,7 @@ export class GameRenderer {
     }
   }
 
-  /** Populates the 3-item main-menu list and highlights the selected one. */
+  /** Populates the 4-item main-menu list and highlights the selected one. */
   private updateMainMenu(selectedIdx: number): void {
     const items = ["PLAY", "CAMPAIGN", "SHIPYARD", "STATS"];
     this.renderMenuList(items, selectedIdx, this.height / 2 + 60, 40);
