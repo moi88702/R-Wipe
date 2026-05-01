@@ -455,6 +455,67 @@ stationUI.closeDockSession()
 - `DockMenuOption` — menu item type
 - `NpcDialogueState` — dialogue phase/options type
 
+### ShipyardManager (`src/managers/ShipyardManager.ts`)
+
+Orchestrates ship blueprint modification when docked at a shipyard station.
+Manages blueprint loading, part modifications, validation, and persistence.
+Integrates with the existing Ship Builder system (parts registry, blueprint validation).
+
+**Public API**:
+
+```ts
+// Session lifecycle
+const state = shipyardManager.openShipyard(blueprintId | null)
+  // → ShipyardSessionState (loads or creates blueprint, validates)
+
+const result = shipyardManager.addPart(partId, parentId, parentSocketId)
+  // → PartModificationResult { success, reason?, state }
+
+const result = shipyardManager.removePart(placedPartId)
+  // → PartModificationResult { success, reason?, state }
+
+const result = shipyardManager.changePart(placedPartId, newPartId)
+  // → PartModificationResult { success, reason?, state }
+
+const state = shipyardManager.renameBlueprintTo(newName)
+  // → ShipyardSessionState (updates blueprint name)
+
+const state = shipyardManager.confirmModifications()
+  // → ShipyardSessionState (sets confirmTriggered: true)
+  // throws if blueprint is invalid
+
+const state = shipyardManager.getSessionState()
+  // → ShipyardSessionState | null
+
+shipyardManager.closeShipyard()
+  // Releases session state; subsequent calls throw until next openShipyard()
+```
+
+**`ShipyardSessionState` — canonical shipyard-session snapshot**:
+- `blueprint` — the blueprint being edited (working copy)
+- `validationReport` — `AssemblyReport` from the parts assembly validator
+- `isValid` — boolean (true when validationReport.ok is true)
+- `confirmTriggered` — boolean (set true after confirmModifications(); caller drives persistence)
+- `shipStats?` — computed ship statistics (hp, speed, damage, cost, power, hitbox) when valid
+
+**Part modification flow**:
+1. **addPart** — requires parent part to exist, socket to exist and be free, part to be in registry, power budget to allow it
+2. **removePart** — cannot remove root core, cannot remove parts with children
+3. **changePart** — cannot change root core, target part type must exist in registry
+4. On each modification, blueprint is re-validated and `ShipyardSessionState` is rebuilt
+
+**Validation gates** (in `AssemblyReport.errors`):
+- Single root core
+- All parts reachable from root
+- No duplicate socket usage
+- Power budget not exceeded (total non-core powerCost ≤ core's powerCapacity)
+- All part references and sockets exist
+
+**Exports** (`src/managers/index.ts`):
+- `ShipyardManager` — the class
+- `ShipyardSessionState` — state snapshot type
+- `PartModificationResult` — result type for add/remove/change operations
+
 ## TypeScript strictness (exactOptionalPropertyTypes=true)
 
 The project uses `tsconfig.json` setting `"exactOptionalPropertyTypes": true` to enforce

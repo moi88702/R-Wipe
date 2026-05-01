@@ -38,6 +38,7 @@ Key subsystems:
 | `DockingManager` | Dock/undock lifecycle, UI trigger (Dock button), session-state transitions |
 | `LocationManager` | NPC dialogue (greeting/farewell/shop), shop inventory, buy/sell transactions |
 | `StationUI` | Docked-station UI state machine: dock menu, NPC dialogue, shop, shipyard, undock |
+| `ShipyardManager` | Ship blueprint modification: add/remove/change parts, validate, persist |
 | `ShopRegistry` | Static shop item catalogue; maps shop ids → item lists with buy/sell pricing |
 | `MissionLogManager` | Mission acceptance, log, waypoints, persistence |
 | `EnemyStationRegistry` | Static definitions for hostile enemy strongholds |

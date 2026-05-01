@@ -13,6 +13,8 @@
  *                      for the docked station experience
  *  - StationUI       — menu-driven docked-station UI state machine
  *                      (dock menu, NPC dialogue, shop, shipyard, undock)
+ *  - ShipyardManager — ship blueprint modification and part management when
+ *                      docked at a shipyard station
  *
  * Implementations will be added as each system is built out.
  */
@@ -38,3 +40,9 @@ export type {
   DockMenuOption,
   DockSessionState,
 } from "./StationUI";
+
+export { ShipyardManager } from "./ShipyardManager";
+export type {
+  ShipyardSessionState,
+  PartModificationResult,
+} from "./ShipyardManager";
