@@ -17,6 +17,11 @@ import { PowerUpManager } from "../managers/PowerUpManager";
 import { OverworldManager } from "../managers/OverworldManager";
 import { missionToLevelState } from "../managers/MissionManager";
 import { BlueprintStore } from "../managers/BlueprintStore";
+import { SolarSystemSessionManager } from "../managers/SolarSystemSessionManager";
+// TODO: Import DockingManager, FactionManager, MissionLogManager in Phase 4-7
+// import { DockingManager } from "../managers/DockingManager";
+// import { FactionManager } from "../managers/FactionManager";
+// import { MissionLogManager } from "../managers/MissionLogManager";
 import { CollisionSystem } from "../systems/CollisionSystem";
 import { GameRenderer, type PlayerBlueprintVisual, type ShipyardRenderData, type ShipyardPaletteTile } from "../rendering/GameRenderer";
 import type { MissionId, NodeId } from "../types/campaign";
@@ -33,9 +38,9 @@ import { layoutBlueprint, type Placement } from "./parts/geometry";
 import { canSnap } from "./parts/assembly";
 
 /** Menu item ids used by updateMenu / updatePause. */
-type MainMenuItem = "play" | "campaign" | "shipyard" | "stats";
+type MainMenuItem = "play" | "campaign" | "solar-system" | "shipyard" | "stats";
 type PauseMenuItem = "continue" | "stats" | "quit";
-const MAIN_MENU_ITEMS: readonly MainMenuItem[] = ["play", "campaign", "shipyard", "stats"];
+const MAIN_MENU_ITEMS: readonly MainMenuItem[] = ["play", "campaign", "solar-system", "shipyard", "stats"];
 const PAUSE_MENU_ITEMS: readonly PauseMenuItem[] = ["continue", "stats", "quit"];
 
 export interface GameManagerOptions {
@@ -60,6 +65,11 @@ export class GameManager {
   private readonly renderer: GameRenderer;
   private readonly overworld: OverworldManager;
   private readonly blueprints: BlueprintStore;
+  private solarSystem: SolarSystemSessionManager | null = null;
+  // TODO: Wire up docking, factions, mission log in Phase 4-7
+  // private docking: DockingManager | null = null;
+  // private factions: FactionManager | null = null;
+  // private missionLog: MissionLogManager | null = null;
 
   private safeTimerMs = 0;
   private menuDebounceMs = 0;
@@ -206,6 +216,10 @@ export class GameManager {
       this.updateStarmap();
     } else if (screen === "shipyard") {
       this.updateShipyard(clamped);
+    } else if (screen === "solar-system") {
+      this.updateSolarSystem(clamped);
+    } else if (screen === "docked") {
+      this.updateDockedMenu(clamped);
     }
 
     // Commit edge-trigger prev-state AFTER all update*() have consumed edges.
@@ -272,6 +286,8 @@ export class GameManager {
         this.startNewRun();
       } else if (pick === "campaign") {
         this.openStarmap();
+      } else if (pick === "solar-system") {
+        this.openSolarSystem();
       } else if (pick === "shipyard") {
         this.openShipyard();
       } else {
@@ -808,6 +824,135 @@ export class GameManager {
     this.state.finalizeRun("level-timeout");
     void outcome;
     this.openStarmap();
+  }
+
+  // ── Screen: solar system (open-world exploration) ─────────────────────────
+
+  private openSolarSystem(): void {
+    // Lazy-initialize solar system managers if not yet created
+    if (!this.solarSystem) {
+      this.initializeSolarSystemManagers();
+    }
+
+    if (!this.solarSystem) {
+      console.error("Failed to initialize solar system managers");
+      return;
+    }
+
+    this.menuSelection = 0;
+    this.menuDebounceMs = 350;
+    this.state.setScreen("solar-system");
+  }
+
+  private initializeSolarSystemManagers(): void {
+    // Load the first system (Sol)
+    const initialSystem = {
+      seed: { name: "Sol", timestamp: Date.now(), randomSeed: 12345 },
+      celestialBodies: [
+        {
+          id: "star-sol",
+          name: "Sol",
+          type: "star" as const,
+          position: { x: 0, y: 0 },
+          radius: 696,
+          mass: 1.989e30,
+          gravityStrength: 274,
+          color: { r: 255, g: 200, b: 0 },
+          orbital: {
+            parentId: null,
+            semiMajorAxis: 0,
+            eccentricity: 0,
+            inclination: 0,
+            longitudeAscendingNode: 0,
+            argumentOfPeriapsis: 0,
+            meanAnomalyAtEpoch: 0,
+            orbitalPeriodMs: 0,
+            currentAnomaly: 0,
+          },
+          isPrimaryGravitySource: true,
+        },
+      ],
+      locations: [],
+      initialFactionAssignments: {},
+      currentFactionControl: {},
+      stateChangeLog: { entries: [] },
+      lastUpdatedAt: Date.now(),
+    };
+
+    // For now, use a default minimal blueprint
+    // TODO: Wire this to use the player's actual equipped blueprint
+    const dummyBlueprint = {
+      id: "starter-blueprint",
+      name: "Starter Ship",
+      hullId: "light-frigate",
+      installedUpgrades: {},
+      createdAt: Date.now(),
+      modifiedAt: Date.now(),
+    };
+
+    // Create the session manager
+    this.solarSystem = new SolarSystemSessionManager(
+      initialSystem,
+      dummyBlueprint,
+    );
+
+    // TODO: Initialize DockingManager, FactionManager, MissionLogManager in Phase 4-7
+  }
+
+  private updateSolarSystem(deltaMs: number): void {
+    if (!this.solarSystem) {
+      this.state.setScreen("main-menu");
+      return;
+    }
+
+    // Handle pause
+    if (this.wasPausePressed() && this.menuDebounceMs === 0) {
+      this.state.setScreen("solar-system-paused");
+      this.menuDebounceMs = 350;
+      return;
+    }
+
+    // Poll input
+    const input = this.input.poll();
+
+    // Update ship physics (gravity, thrust, etc.)
+    this.solarSystem.updateShipPhysics(input, deltaMs);
+
+    // Check for nearby locations
+    this.solarSystem.updateNearbyLocations();
+
+    // Check for docking button press
+    const nearby = this.solarSystem.getNearbyLocations();
+    if (nearby.length > 0 && input.menuConfirm && this.menuDebounceMs === 0) {
+      // Attempt to dock at the first nearby location
+      const location = nearby[0];
+      if (location && this.solarSystem.dock(location.id)) {
+        this.state.setScreen("docked");
+        this.menuDebounceMs = 350;
+        return;
+      }
+    }
+
+    // TODO: Implement solar system rendering
+    // For now, skip rendering to unblock the game loop
+    // this.renderer.renderFrame(this.state.getGameState(), deltaMs, {
+    //   menuSelection: this.menuSelection,
+    //   lastRun: this.state.getLastRun(),
+    //   starmap: null,
+    //   shipyard: null,
+    // });
+  }
+
+  private updateDockedMenu(_deltaMs: number): void {
+    // Placeholder for docked menu logic
+    // TODO: Implement docking menu with NPC interaction, missions, undocking
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      if (this.solarSystem) {
+        this.solarSystem.undock();
+      }
+      this.state.setScreen("solar-system");
+      this.menuDebounceMs = 350;
+    }
   }
 
   // ── Run lifecycle ────────────────────────────────────────────────────────

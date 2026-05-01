@@ -488,7 +488,7 @@ export class GameRenderer {
 
     // Menu list items — centred column, spaced ~44px apart.
     this.menuItemTexts = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
       const t = new Text({
         text: "",
         style: hudStyle(COLOR.hudWhite, 28),

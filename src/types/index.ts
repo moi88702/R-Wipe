@@ -568,7 +568,10 @@ export type ScreenType =
   | "stats"
   | "pause"
   | "starmap"
-  | "shipyard";
+  | "shipyard"
+  | "solar-system"
+  | "solar-system-paused"
+  | "docked";
 
 /**
  * Dev-only cheat payload parsed from URL query params. Every field is optional
