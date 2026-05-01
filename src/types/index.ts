@@ -173,6 +173,13 @@ export interface InputState {
    * Always `false` when the key was not pressed this frame.
    */
   mapTogglePulse?: boolean;
+
+  // ── Solar-system zoom ────────────────────────────────────────────────────
+  /**
+   * Scroll wheel delta — positive to zoom in, negative to zoom out (solar-system).
+   * Accumulates scroll events per frame; cleared by InputHandler.endFrame().
+   */
+  zoomDelta?: number;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

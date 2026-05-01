@@ -40,6 +40,10 @@ export class InputHandler {
   private quickLockPulse = false;
   private mapTogglePulse = false;
 
+  // ── Solar-system zoom ──────────────────────────────────────────────────
+  private zoomDelta = 0;
+  private readonly boundWheel: (e: WheelEvent) => void;
+
   // ── Pointer state (mouse + primary touch, used by menu screens) ────────
   private pointerPos: { x: number; y: number } | null = null;
   private pointerDownPulse: { x: number; y: number } | null = null;
@@ -80,9 +84,17 @@ export class InputHandler {
       this.keysPressed.delete(e.code);
     };
 
+    this.boundWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      // Negative deltaY = scroll up = zoom in
+      // Positive deltaY = scroll down = zoom out
+      this.zoomDelta -= Math.sign(e.deltaY) * 0.1;
+    };
+
     if (typeof window !== "undefined") {
       window.addEventListener("keydown", this.boundKeyDown);
       window.addEventListener("keyup", this.boundKeyUp);
+      window.addEventListener("wheel", this.boundWheel, { passive: false });
     }
   }
 
@@ -260,6 +272,9 @@ export class InputHandler {
       cycleTargetPulse: this.cycleTargetPulse,
       quickLockPulse: this.quickLockPulse,
       mapTogglePulse: this.mapTogglePulse,
+
+      // ── Solar-system zoom ──────────────────────────────────────────────
+      zoomDelta: this.zoomDelta,
     };
   }
 
@@ -284,6 +299,8 @@ export class InputHandler {
     this.cycleTargetPulse = false;
     this.quickLockPulse = false;
     this.mapTogglePulse = false;
+    // Solar-system zoom (accumulates per frame, then clears)
+    this.zoomDelta = 0;
   }
 
   // ── Test helpers ─────────────────────────────────────────────────────────

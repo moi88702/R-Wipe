@@ -2337,14 +2337,22 @@ export class GameRenderer {
     const g = this.solarSystemGfx;
     g.clear();
 
-    // Draw celestial bodies
+    // Draw celestial bodies with glow effect
     for (const body of data.celestialBodies) {
       const color = (body.color.r << 16) | (body.color.g << 8) | body.color.b;
-      const screenRadius = Math.max(5, body.radius / (200 / data.zoomLevel));
-      g.circle(this.width / 2 + body.position.x / 100 * data.zoomLevel,
-               this.height / 2 + body.position.y / 100 * data.zoomLevel,
-               screenRadius)
-       .fill({ color, alpha: 0.9 });
+      const screenRadius = Math.max(8, body.radius / (200 / data.zoomLevel));
+      const centerX = this.width / 2 + body.position.x / 100 * data.zoomLevel;
+      const centerY = this.height / 2 + body.position.y / 100 * data.zoomLevel;
+
+      // Draw outer glow
+      g.circle(centerX, centerY, screenRadius + 2)
+        .stroke({ color, width: 2, alpha: 0.3 });
+      // Draw main body
+      g.circle(centerX, centerY, screenRadius)
+        .fill({ color, alpha: 0.95 });
+      // Draw highlight
+      g.circle(centerX - screenRadius * 0.3, centerY - screenRadius * 0.3, screenRadius * 0.4)
+        .fill({ color: 0xffffff, alpha: 0.4 });
     }
 
     // Draw locations (docking stations)
@@ -2354,27 +2362,75 @@ export class GameRenderer {
       const nearby = data.nearbyLocations.includes(loc.id);
       const color = nearby ? 0x00ff00 : 0xcccccc;
 
-      // Draw location marker as a square
-      g.rect(x - 8, y - 8, 16, 16).stroke({ color, width: 2, alpha: 0.8 });
+      // Draw location marker as a diamond with pulsing outer ring
+      g.rect(x - 10, y - 10, 20, 20).stroke({ color, width: 2, alpha: 0.8 });
+      if (nearby) {
+        g.rect(x - 14, y - 14, 28, 28).stroke({ color, width: 1, alpha: 0.5 });
+      }
     }
 
-    // Draw player ship at center
-    const shipX = this.width / 2;
-    const shipY = this.height / 2;
-    const shipColor = 0x00ffff;
-    g.circle(shipX, shipY, 8).fill({ color: shipColor, alpha: 1 });
-
-    // Draw ship heading indicator
-    const headingRad = (data.playerHeading * Math.PI) / 180;
-    const headingLen = 20;
-    const headX = shipX + Math.sin(headingRad) * headingLen;
-    const headY = shipY - Math.cos(headingRad) * headingLen;
-    g.moveTo(shipX, shipY).lineTo(headX, headY).stroke({ color: shipColor, width: 2, alpha: 0.7 });
+    // Draw player ship at center (delta-wing fighter)
+    this.drawDeltaWing(g, this.width / 2, this.height / 2, data.playerHeading);
 
     // Draw map overlay if open
     if (data.mapOpen) {
       this.drawGalaxyMap(g);
     }
+  }
+
+  private drawDeltaWing(g: Graphics, centerX: number, centerY: number, headingDegrees: number): void {
+    // Convert heading to radians for drawing
+    const headingRad = (headingDegrees * Math.PI) / 180;
+
+    // Ship dimensions
+    const len = 16; // nose-to-tail
+    const width = 10; // wing-to-wing
+
+    // Calculate ship orientation vectors
+    const forwardX = Math.sin(headingRad);
+    const forwardY = -Math.cos(headingRad);
+    const rightX = Math.cos(headingRad);
+    const rightY = Math.sin(headingRad);
+
+    // Calculate ship points (delta-wing fighter shape)
+    const nose = {
+      x: centerX + forwardX * len,
+      y: centerY + forwardY * len,
+    };
+
+    const wingLeft = {
+      x: centerX - rightX * width - forwardX * (len * 0.5),
+      y: centerY - rightY * width - forwardY * (len * 0.5),
+    };
+
+    const wingRight = {
+      x: centerX + rightX * width - forwardX * (len * 0.5),
+      y: centerY + rightY * width - forwardY * (len * 0.5),
+    };
+
+    const tail = {
+      x: centerX - forwardX * (len * 0.3),
+      y: centerY - forwardY * (len * 0.3),
+    };
+
+    // Draw main hull (cyan)
+    g.moveTo(nose.x, nose.y);
+    g.lineTo(wingLeft.x, wingLeft.y);
+    g.lineTo(tail.x, tail.y);
+    g.lineTo(wingRight.x, wingRight.y);
+    g.lineTo(nose.x, nose.y);
+    g.fill({ color: 0x00ffff, alpha: 0.9 });
+    g.stroke({ color: 0x00ff99, width: 2, alpha: 1 });
+
+    // Draw cockpit (brighter accent)
+    const cockpitX = centerX + forwardX * (len * 0.4);
+    const cockpitY = centerY + forwardY * (len * 0.4);
+    g.circle(cockpitX, cockpitY, 3).fill({ color: 0xffff00, alpha: 1 });
+
+    // Draw engine glow at tail
+    const engineX = centerX - forwardX * (len * 0.25);
+    const engineY = centerY - forwardY * (len * 0.25);
+    g.circle(engineX, engineY, 2).fill({ color: 0xff6600, alpha: 0.8 });
   }
 
   private drawGalaxyMap(g: Graphics): void {

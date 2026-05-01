@@ -846,7 +846,7 @@ export class GameManager {
   }
 
   private initializeSolarSystemManagers(): void {
-    // Load the first system (Sol)
+    // Load the first system (Sol) with planets and stations
     const initialSystem = {
       seed: { name: "Sol", timestamp: Date.now(), randomSeed: 12345 },
       celestialBodies: [
@@ -872,8 +872,75 @@ export class GameManager {
           },
           isPrimaryGravitySource: true,
         },
+        {
+          id: "planet-earth",
+          name: "Earth",
+          type: "planet" as const,
+          position: { x: 150, y: 0 },
+          radius: 64,
+          mass: 5.972e24,
+          gravityStrength: 9.81,
+          color: { r: 100, g: 150, b: 255 },
+          orbital: {
+            parentId: "star-sol",
+            semiMajorAxis: 150,
+            eccentricity: 0.0167,
+            inclination: 0,
+            longitudeAscendingNode: 0,
+            argumentOfPeriapsis: 102.9,
+            meanAnomalyAtEpoch: 100,
+            orbitalPeriodMs: 365.25 * 24 * 60 * 60 * 1000,
+            currentAnomaly: 100,
+          },
+          isPrimaryGravitySource: false,
+        },
+        {
+          id: "planet-mars",
+          name: "Mars",
+          type: "planet" as const,
+          position: { x: 228, y: 50 },
+          radius: 34,
+          mass: 6.417e23,
+          gravityStrength: 3.71,
+          color: { r: 200, g: 100, b: 80 },
+          orbital: {
+            parentId: "star-sol",
+            semiMajorAxis: 228,
+            eccentricity: 0.0934,
+            inclination: 1.85,
+            longitudeAscendingNode: 49.6,
+            argumentOfPeriapsis: 286.5,
+            meanAnomalyAtEpoch: 19,
+            orbitalPeriodMs: 687 * 24 * 60 * 60 * 1000,
+            currentAnomaly: 19,
+          },
+          isPrimaryGravitySource: false,
+        },
       ],
-      locations: [],
+      locations: [
+        {
+          id: "station-earth-orbit",
+          name: "Earth Station",
+          type: "station" as const,
+          bodyId: "planet-earth",
+          position: { x: 10, y: 0 },
+          dockingRadius: 30,
+          controllingFaction: "neutral",
+          npcs: [],
+          shops: [],
+        },
+        {
+          id: "outpost-mars",
+          name: "Curiosity Base",
+          type: "outpost" as const,
+          bodyId: "planet-mars",
+          position: { x: 6, y: 2 },
+          dockingRadius: 25,
+          controllingFaction: "neutral",
+          npcs: [],
+          shops: [],
+        },
+      ],
       initialFactionAssignments: {},
       currentFactionControl: {},
       stateChangeLog: { entries: [] },
@@ -896,6 +963,18 @@ export class GameManager {
       initialSystem,
       dummyBlueprint,
     );
+
+    // Place player near Earth station and start docked
+    const sessionState = this.solarSystem.getSessionState();
+    // Station is at Earth (150, 0) + local offset (10, 0) = (160, 0) in system coords
+    sessionState.playerPosition = { x: 160, y: 0 };
+    sessionState.playerVelocity = { x: 0, y: 0 };
+    sessionState.playerHeading = 0;
+    sessionState.zoomLevel = 0.8; // Zoomed out to show planets
+
+    // Dock at the station
+    this.solarSystem.updateNearbyLocations();
+    this.solarSystem.dock("station-earth-orbit");
 
     // TODO: Initialize DockingManager, FactionManager, MissionLogManager in Phase 4-7
   }
@@ -937,6 +1016,11 @@ export class GameManager {
     // Handle map toggle (M key)
     if (input.mapTogglePulse) {
       this.mapOpen = !this.mapOpen;
+    }
+
+    // Handle zoom (scroll wheel)
+    if (input.zoomDelta) {
+      this.solarSystem.adjustZoom(input.zoomDelta);
     }
 
     // TODO: Implement solar system rendering
