@@ -23,7 +23,7 @@ import { SolarSystemSessionManager } from "../managers/SolarSystemSessionManager
 // import { FactionManager } from "../managers/FactionManager";
 // import { MissionLogManager } from "../managers/MissionLogManager";
 import { CollisionSystem } from "../systems/CollisionSystem";
-import { GameRenderer, type PlayerBlueprintVisual, type ShipyardRenderData, type ShipyardPaletteTile } from "../rendering/GameRenderer";
+import { GameRenderer, type PlayerBlueprintVisual, type ShipyardRenderData, type ShipyardPaletteTile, type SolarSystemRenderData } from "../rendering/GameRenderer";
 import type { MissionId, NodeId } from "../types/campaign";
 import type { Blueprint, PartCategory, PlacedPart } from "../types/shipBuilder";
 import { STARTER_SECTOR } from "./campaign/StarterSector";
@@ -1593,6 +1593,10 @@ export class GameManager {
       bombCredits: this.player.getBombCredits(),
       starmap: state.screen === "starmap" ? this.buildStarmapExtras() : null,
       shipyard: state.screen === "shipyard" ? this.buildShipyardExtras() : null,
+      solarSystem:
+        state.screen === "solar-system" || state.screen === "solar-system-paused"
+          ? this.buildSolarSystemExtras()
+          : null,
       playerBlueprint: this.buildPlayerBlueprintVisual(),
     });
   }
@@ -1617,6 +1621,34 @@ export class GameManager {
         colour: pl.def.colour,
         shape: { width: pl.def.shape.width, height: pl.def.shape.height },
       })),
+    };
+  }
+
+  /** Collects the data the renderer needs for the solar system view. */
+  private buildSolarSystemExtras(): SolarSystemRenderData | null {
+    if (!this.solarSystem) return null;
+
+    const sessionState = this.solarSystem.getSessionState();
+    const system = this.solarSystem.getCurrentSystem();
+
+    return {
+      playerPosition: sessionState.playerPosition,
+      playerHeading: sessionState.playerHeading,
+      celestialBodies: system.celestialBodies.map((body) => ({
+        id: body.id,
+        name: body.name,
+        position: body.position,
+        radius: body.radius,
+        color: body.color,
+      })),
+      locations: system.locations.map((loc) => ({
+        id: loc.id,
+        name: loc.name,
+        position: loc.position,
+        dockingRadius: loc.dockingRadius,
+      })),
+      nearbyLocations: sessionState.nearbyLocations,
+      zoomLevel: sessionState.zoomLevel,
     };
   }
 

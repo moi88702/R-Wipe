@@ -198,6 +198,26 @@ export interface StarmapRenderData {
   readonly selectedMissionLabel: string | null;
 }
 
+export interface SolarSystemRenderData {
+  readonly playerPosition: { x: number; y: number };
+  readonly playerHeading: number;
+  readonly celestialBodies: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly position: { x: number; y: number };
+    readonly radius: number;
+    readonly color: { r: number; g: number; b: number };
+  }>;
+  readonly locations: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly position: { x: number; y: number };
+    readonly dockingRadius: number;
+  }>;
+  readonly nearbyLocations: string[];
+  readonly zoomLevel: number;
+}
+
 const COLOR = {
   bg: 0x0a0a14,
   player: 0x00ffff,
@@ -355,6 +375,9 @@ export class GameRenderer {
   private readonly starmapCreditsText: Text;
   private readonly starmapPrompt: Text;
   private readonly starmapNodeLabels: Text[] = [];
+
+  // Solar system overlay elements.
+  private readonly solarSystemGfx: Graphics;
 
   // Shipyard overlay elements.
   private readonly shipyardGfx: Graphics;
@@ -677,6 +700,10 @@ export class GameRenderer {
     this.starmapGfx = new Graphics();
     this.menuLayer.addChild(this.starmapGfx);
 
+    // Solar system overlay — drawn into its own Graphics layer
+    this.solarSystemGfx = new Graphics();
+    this.menuLayer.addChild(this.solarSystemGfx);
+
     this.starmapTitle = new Text({
       text: "",
       style: new TextStyle({
@@ -855,6 +882,7 @@ export class GameRenderer {
       bombCredits: number;
       starmap: StarmapRenderData | null;
       shipyard: ShipyardRenderData | null;
+      solarSystem: SolarSystemRenderData | null;
       playerBlueprint: PlayerBlueprintVisual | null;
     },
   ): void {
@@ -872,10 +900,12 @@ export class GameRenderer {
     const isGameOver = screen === "game-over";
     const isStarmap = screen === "starmap";
     const isShipyard = screen === "shipyard";
+    const isSolarSystem = screen === "solar-system";
+    const isDocked = screen === "docked";
     // Gameplay entities stay visible behind the pause overlay.
     const drawsEntities = isGameplay || isPause;
 
-    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard;
+    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isDocked;
     this.titleText.visible = isMenu;
     this.subtitleText.visible = isMenu;
     this.promptText.visible = isMenu || isPause;
@@ -900,6 +930,8 @@ export class GameRenderer {
     this.starmapPrompt.visible = isStarmap;
     for (const t of this.starmapNodeLabels) t.visible = isStarmap;
     if (!isStarmap) this.starmapGfx.clear();
+    // Solar system overlay toggles
+    if (!isSolarSystem && !isDocked) this.solarSystemGfx.clear();
     // Shipyard overlay toggles
     this.shipyardTitle.visible = isShipyard;
     this.shipyardStatsText.visible = isShipyard;
@@ -939,6 +971,16 @@ export class GameRenderer {
 
     if (isShipyard && extras.shipyard) {
       this.drawShipyard(extras.shipyard);
+      return;
+    }
+
+    if (isSolarSystem && extras.solarSystem) {
+      this.drawSolarSystem(extras.solarSystem);
+      return;
+    }
+
+    if (isDocked) {
+      // TODO: Draw docked menu
       return;
     }
 
@@ -2288,6 +2330,46 @@ export class GameRenderer {
    * in the centre (with placements, open sockets, and an optional drag-ghost),
    * a stats sheet on the right, and action buttons along the bottom.
    */
+
+  private drawSolarSystem(data: SolarSystemRenderData): void {
+    const g = this.solarSystemGfx;
+    g.clear();
+
+    // Draw celestial bodies
+    for (const body of data.celestialBodies) {
+      const color = (body.color.r << 16) | (body.color.g << 8) | body.color.b;
+      const screenRadius = Math.max(5, body.radius / (200 / data.zoomLevel));
+      g.circle(this.width / 2 + body.position.x / 100 * data.zoomLevel,
+               this.height / 2 + body.position.y / 100 * data.zoomLevel,
+               screenRadius)
+       .fill({ color, alpha: 0.9 });
+    }
+
+    // Draw locations (docking stations)
+    for (const loc of data.locations) {
+      const x = this.width / 2 + loc.position.x / 100 * data.zoomLevel;
+      const y = this.height / 2 + loc.position.y / 100 * data.zoomLevel;
+      const nearby = data.nearbyLocations.includes(loc.id);
+      const color = nearby ? 0x00ff00 : 0xcccccc;
+
+      // Draw location marker as a square
+      g.rect(x - 8, y - 8, 16, 16).stroke({ color, width: 2, alpha: 0.8 });
+    }
+
+    // Draw player ship at center
+    const shipX = this.width / 2;
+    const shipY = this.height / 2;
+    const shipColor = 0x00ffff;
+    g.circle(shipX, shipY, 8).fill({ color: shipColor, alpha: 1 });
+
+    // Draw ship heading indicator
+    const headingRad = (data.playerHeading * Math.PI) / 180;
+    const headingLen = 20;
+    const headX = shipX + Math.sin(headingRad) * headingLen;
+    const headY = shipY - Math.cos(headingRad) * headingLen;
+    g.moveTo(shipX, shipY).lineTo(headX, headY).stroke({ color: shipColor, width: 2, alpha: 0.7 });
+  }
+
   private drawShipyard(data: ShipyardRenderData): void {
     const g = this.shipyardGfx;
     g.clear();
