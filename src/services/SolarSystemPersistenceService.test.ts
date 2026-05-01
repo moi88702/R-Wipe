@@ -214,6 +214,126 @@ describe("SolarSystemPersistenceService", () => {
       expect(() => svc.load()).toThrow(StorageMigrationError);
     });
 
+    it("throws StorageMigrationError when zoomLevel is missing", () => {
+      const storage = new InMemoryStorage();
+      storage.setItem(
+        "rwipe.solarsystem.v1",
+        JSON.stringify({
+          schemaVersion: 1,
+          data: {
+            shipState: createMockShipState(),
+            dockedLocationId: null,
+            primaryGravitySourceId: "sun",
+            // missing zoomLevel
+            discoveredLocations: [],
+            savedAtMs: Date.now(),
+          },
+        }),
+      );
+      const svc = new SolarSystemPersistenceService(storage);
+      expect(() => svc.load()).toThrow(StorageMigrationError);
+    });
+
+    it("throws StorageMigrationError when zoomLevel is not a number", () => {
+      const storage = new InMemoryStorage();
+      storage.setItem(
+        "rwipe.solarsystem.v1",
+        JSON.stringify({
+          schemaVersion: 1,
+          data: {
+            shipState: createMockShipState(),
+            dockedLocationId: null,
+            primaryGravitySourceId: "sun",
+            zoomLevel: "not-a-number",
+            discoveredLocations: [],
+            savedAtMs: Date.now(),
+          },
+        }),
+      );
+      const svc = new SolarSystemPersistenceService(storage);
+      expect(() => svc.load()).toThrow(StorageMigrationError);
+    });
+
+    it("throws StorageMigrationError when discoveredLocations is missing", () => {
+      const storage = new InMemoryStorage();
+      storage.setItem(
+        "rwipe.solarsystem.v1",
+        JSON.stringify({
+          schemaVersion: 1,
+          data: {
+            shipState: createMockShipState(),
+            dockedLocationId: null,
+            primaryGravitySourceId: "sun",
+            zoomLevel: 1.5,
+            // missing discoveredLocations
+            savedAtMs: Date.now(),
+          },
+        }),
+      );
+      const svc = new SolarSystemPersistenceService(storage);
+      expect(() => svc.load()).toThrow(StorageMigrationError);
+    });
+
+    it("throws StorageMigrationError when discoveredLocations is not an array", () => {
+      const storage = new InMemoryStorage();
+      storage.setItem(
+        "rwipe.solarsystem.v1",
+        JSON.stringify({
+          schemaVersion: 1,
+          data: {
+            shipState: createMockShipState(),
+            dockedLocationId: null,
+            primaryGravitySourceId: "sun",
+            zoomLevel: 1.5,
+            discoveredLocations: { "0": "loc-1" }, // object instead of array
+            savedAtMs: Date.now(),
+          },
+        }),
+      );
+      const svc = new SolarSystemPersistenceService(storage);
+      expect(() => svc.load()).toThrow(StorageMigrationError);
+    });
+
+    it("throws StorageMigrationError when savedAtMs is missing", () => {
+      const storage = new InMemoryStorage();
+      storage.setItem(
+        "rwipe.solarsystem.v1",
+        JSON.stringify({
+          schemaVersion: 1,
+          data: {
+            shipState: createMockShipState(),
+            dockedLocationId: null,
+            primaryGravitySourceId: "sun",
+            zoomLevel: 1.5,
+            discoveredLocations: [],
+            // missing savedAtMs
+          },
+        }),
+      );
+      const svc = new SolarSystemPersistenceService(storage);
+      expect(() => svc.load()).toThrow(StorageMigrationError);
+    });
+
+    it("throws StorageMigrationError when savedAtMs is not a number", () => {
+      const storage = new InMemoryStorage();
+      storage.setItem(
+        "rwipe.solarsystem.v1",
+        JSON.stringify({
+          schemaVersion: 1,
+          data: {
+            shipState: createMockShipState(),
+            dockedLocationId: null,
+            primaryGravitySourceId: "sun",
+            zoomLevel: 1.5,
+            discoveredLocations: [],
+            savedAtMs: "not-a-number",
+          },
+        }),
+      );
+      const svc = new SolarSystemPersistenceService(storage);
+      expect(() => svc.load()).toThrow(StorageMigrationError);
+    });
+
     it("throws when stored version is newer than app version", () => {
       const storage = new InMemoryStorage();
       // Simulate a future version

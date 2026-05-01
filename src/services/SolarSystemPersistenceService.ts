@@ -75,7 +75,10 @@ export class SolarSystemPersistenceService {
         raw !== null &&
         "shipState" in raw &&
         "dockedLocationId" in raw &&
-        "primaryGravitySourceId" in raw,
+        "primaryGravitySourceId" in raw &&
+        typeof raw.zoomLevel === "number" &&
+        Array.isArray(raw.discoveredLocations) &&
+        typeof raw.savedAtMs === "number",
     });
   }
 
