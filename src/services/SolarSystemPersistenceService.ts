@@ -76,6 +76,9 @@ export class SolarSystemPersistenceService {
         "shipState" in raw &&
         "dockedLocationId" in raw &&
         "primaryGravitySourceId" in raw &&
+        "zoomLevel" in raw &&
+        "discoveredLocations" in raw &&
+        "savedAtMs" in raw &&
         typeof raw.zoomLevel === "number" &&
         Array.isArray(raw.discoveredLocations) &&
         typeof raw.savedAtMs === "number",
