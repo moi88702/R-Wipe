@@ -399,6 +399,22 @@ The game loop must call `undock()` from the dock-menu "Undock" handler.
 - `DockResult` — return type of `dock()`
 - `UndockResult` — return type of `undock()`
 
+## Key new subsystems (task d8d5e9a5)
+
+### SolarSystemPersistenceService (`src/services/SolarSystemPersistenceService.ts`)
+
+Provides versioned save/load for all solar system session state, following the
+pattern established by `MissionLogManager`, `FactionManager`, and `OverworldManager`.
+Uses `VersionedSlot<T>` from `LocalStorageService` for schema versioning and
+migration support.
+
+**Persisted data** (via `PersistedSolarSystemState` interface):
+- **Ship state**: `CapitalShipState` (position, velocity, heading, health, shields, weapons)
+- **Target locks**: `TargetingState` (all locks, focused lock, timestamps)
+- **Docking state**: `dockedLocationId`, `PreDockSnapshot` (for undocking)
+- **Navigation**: `primaryGravitySourceId`, `zoomLevel`, `discoveredLocations` (string array)
+- **Enemy stations**: `Record<stationId, EnemyStationState>` (hull, shields, alert level, active ships)
+- **Metadata**: `savedAtMs` (reload detection timestamp)
 ## Key new subsystems (task 96a9552c)
 
 ### StationUI (`src/managers/StationUI.ts`)
@@ -464,6 +480,68 @@ Integrates with the existing Ship Builder system (parts registry, blueprint vali
 **Public API**:
 
 ```ts
+import { SolarSystemPersistenceService } from "./src/services/SolarSystemPersistenceService";
+import type { PersistedSolarSystemState } from "./src/services/SolarSystemPersistenceService";
+
+const persistence = new SolarSystemPersistenceService();
+
+// Build snapshot from current session
+const snapshot: PersistedSolarSystemState = {
+  shipState: player.shipState,
+  playerTargetingState: player.targetingState,
+  dockedLocationId: session.dockedLocationId,
+  preDockSnapshot: dockingManager.getPreDockSnapshot(),
+  primaryGravitySourceId: session.primaryGravitySourceId,
+  zoomLevel: session.zoomLevel,
+  discoveredLocations: Array.from(session.discoveredLocations),
+  enemyStationStates: buildEnemyStationMap(enemyStations),
+  savedAtMs: Date.now(),
+};
+
+// Save (typically on game exit or critical state change)
+persistence.save(snapshot);
+
+// Load (typically on game init)
+const loaded = persistence.load();
+if (loaded) {
+  restoreShipState(loaded.shipState);
+  restorePlayerLocks(loaded.playerTargetingState);
+  restoreSessionNavigation(
+    loaded.primaryGravitySourceId,
+    loaded.zoomLevel,
+    loaded.discoveredLocations,
+  );
+  // ...etc
+}
+
+// Clear (on "new game" or "delete save")
+persistence.clear();
+```
+
+**Storage slot**:
+- **Key**: `"rwipe.solarsystem.v1"`
+- **Current version**: `1`
+- **Migrations**: Defined in `solarSystemMigrations` (currently empty)
+
+**Migrations and schema evolution**: To add a v1→v2 migration:
+1. Add a transform function to `solarSystemMigrations[1]` in `LocalStorageService.ts`.
+2. Bump `SOLAR_SYSTEM_SCHEMA_VERSION` to `2` in the same commit.
+3. The migration chain runs automatically on load for any save older than the app version.
+
+**Validation**: The service validates the loaded payload before returning it,
+checking for required fields (`shipState`, `dockedLocationId`, `primaryGravitySourceId`).
+If validation fails or the stored version is incompatible, a `StorageMigrationError`
+is thrown; callers typically catch and fall back to a fresh session (no persisted
+progress).
+
+**Testing boundary**: `SolarSystemPersistenceService.test.ts` uses `InMemoryStorage`
+and tests the full save/load lifecycle at the service boundary — what goes in must
+come out unchanged (except for `savedAtMs` timestamp). No mocking of the underlying
+`VersionedSlot` or `LocalStorageService`.
+
+**Exports** (`src/services/index.ts`):
+- `SolarSystemPersistenceService` — the class
+- `PersistedSolarSystemState` — the persisted data type
 // Session lifecycle
 const state = shipyardManager.openShipyard(blueprintId | null)
   // → ShipyardSessionState (loads or creates blueprint, validates)
