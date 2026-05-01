@@ -2718,8 +2718,8 @@ export class GameRenderer {
 
   /** Populates the 4-item main-menu list and highlights the selected one. */
   private updateMainMenu(selectedIdx: number): void {
-    const items = ["PLAY", "CAMPAIGN", "SHIPYARD", "STATS"];
-    this.renderMenuList(items, selectedIdx, this.height / 2 + 60, 40);
+    const items = ["PLAY", "CAMPAIGN", "SOLAR SYSTEM", "SHIPYARD", "STATS"];
+    this.renderMenuList(items, selectedIdx, this.height / 2 + 40, 40);
   }
 
   /** Populates the 3-item pause-menu list and highlights the selected one. */
