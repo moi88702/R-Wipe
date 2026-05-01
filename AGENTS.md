@@ -398,3 +398,95 @@ The game loop must call `undock()` from the dock-menu "Undock" handler.
 - `PreDockSnapshot` — saved state type
 - `DockResult` — return type of `dock()`
 - `UndockResult` — return type of `undock()`
+
+## Key new subsystems (task 96a9552c)
+
+### StationUI (`src/managers/StationUI.ts`)
+
+State machine for the docked-station UI experience. Orchestrates NPC dialogue,
+shop transactions, and menu navigation. Delegates actual NPC/shop data to `LocationManager`;
+integrates with `DockingManager` to signal undock requests.
+
+**Public API**:
+
+```ts
+// Session lifecycle
+const state = stationUI.openDockMenu(location, playerCredits)
+  // → DockSessionState (screen: "dock-main", menu options, credits)
+
+const updatedState = stationUI.selectMenuItem("npc" | "shipyard" | "undock")
+  // → DockSessionState (screen transitions, dialogue initiated, or undockTriggered: true)
+
+// NPC dialogue
+const updatedState = stationUI.selectDialogueOption("continue" | "shop" | "close")
+  // → DockSessionState (advances phase, opens shop, or closes dialogue)
+
+// Shop
+const purchaseResult = stationUI.purchaseItem(itemId)
+  // → PurchaseResult { success, reason?, newBalance? }
+const sellResult = stationUI.sellItem(itemId)
+  // → SellResult { success, creditsEarned, reason? }
+
+// Navigation
+const state = stationUI.returnToMainMenu()
+  // → DockSessionState (clears dialogue/shop, returns to dock-main)
+
+stationUI.closeDockSession()
+  // Releases internal state; subsequent calls throw until next openDockMenu()
+```
+
+**`DockSessionState` — canonical dock-session snapshot**:
+- `screen` — "dock-main" | "npc-dialogue" | "npc-shop" | "shipyard"
+- `location` — the docked `Location` object
+- `availableMenuOptions` — [{ id, label, available }]
+- `activeNpc` — `NPCDefinition | undefined`
+- `dialogue` — `NpcDialogueState | undefined` (greeting/farewell phase + options)
+- `shopItems` — `ShopItem[] | undefined`
+- `playerCredits` — number (updated in-session by purchase/sell)
+- `undockTriggered` — boolean (set true after "Undock" selection; caller drives transition)
+
+**TypeScript strictness note** (`exactOptionalPropertyTypes=true`):
+- `activeNpc`, `dialogue`, `shopItems` are explicitly typed as `T | undefined`
+  (not optional `T?`). All assignments must include these properties, even when `undefined`.
+
+**Exports** (`src/managers/index.ts`):
+- `StationUI` — the class
+- `DockSessionState` — state snapshot type
+- `DockMenuOption` — menu item type
+- `NpcDialogueState` — dialogue phase/options type
+
+## TypeScript strictness (exactOptionalPropertyTypes=true)
+
+The project uses `tsconfig.json` setting `"exactOptionalPropertyTypes": true` to enforce
+strict type contracts. This means:
+
+1. **Optional properties** (declared as `prop?: Type`) can only be absent or have the declared type,
+   **not** explicitly assigned `undefined`.
+2. **Explicit `Type | undefined`** properties must **always** be present in object literals, but
+   can be assigned `undefined`.
+
+### Rationale
+
+With `exactOptionalPropertyTypes=true`, the compiler treats `prop?: Type` as `prop: Type | never`
+(i.e., the property must be absent, not `undefined`). This prevents accidental bugs where code
+checks `if (prop)` expecting absence but receives an explicit `undefined` instead.
+
+### Pattern
+
+```ts
+// ❌ Fails: optional property assigned undefined
+const state = { x: 1, y?: 2 };
+// state.y = undefined;  // Type error: undefined not assignable to number
+
+// ✅ Passes: explicit union type, always present
+interface State { x: number; y: number | undefined; }
+const state: State = { x: 1, y: undefined };  // OK
+```
+
+### Impact on this codebase
+
+- `DockSessionState.activeNpc`, `dialogue`, `shopItems` are **`T | undefined`**, not **`T?`**.
+- `LocationManager.getDialogueState()` returns `NpcDialogueState | undefined`, not `null`.
+- `DialogueTransition.dialogueState` is `NpcDialogueState | undefined`, not `null`.
+- All object literals assigning these properties must include them (even if `undefined`).
+- Tests check `.toBeUndefined()`, not `.toBeNull()`.
