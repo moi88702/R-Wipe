@@ -94,7 +94,7 @@ export class InputHandler {
       e.preventDefault();
       // Negative deltaY = scroll up = zoom in
       // Positive deltaY = scroll down = zoom out
-      this.zoomDelta -= Math.sign(e.deltaY) * 0.1;
+      this.zoomDelta -= Math.sign(e.deltaY) * 0.5;
     };
 
     if (typeof window !== "undefined") {

@@ -23,16 +23,17 @@ import type { InputState } from "../types/index";
 
 export const DEFAULT_SHIP_CONTROL_CONFIG: ShipControlConfig = {
   hullMass: 5000,
-  thrusterPower: 100,
-  strafePower: 75,
-  turnRateRadPerS: Math.PI / 2, // 90 degrees per second
-  maxSpeedMs: 500,
+  thrusterPower: 5000,
+  strafePower: 3750,
+  turnRateRadPerS: Math.PI,  // 180 degrees per second (snappier)
+  maxSpeedMs: 30000,
 };
 
 export class SolarSystemSessionManager {
   private sessionState: SolarSystemSessionState;
   private shipState: CapitalShipState;
   private targetingState: TargetingState;
+  private _lastThrustActive = false;
 
   constructor(system: SolarSystemState, blueprint: CapitalShipBlueprint) {
     this.sessionState = this.initializeSessionState(system);
@@ -113,6 +114,10 @@ export class SolarSystemSessionManager {
       .filter((l): l is Location => l !== undefined);
   }
 
+  getLastThrustActive(): boolean {
+    return this._lastThrustActive;
+  }
+
   // ── Physics Update ────────────────────────────────────────────────────
 
   /**
@@ -156,6 +161,7 @@ export class SolarSystemSessionManager {
     this.sessionState.playerPosition = shipResult.position;
     this.sessionState.playerVelocity = shipResult.velocity;
     this.sessionState.playerHeading = (shipResult.headingRadians * 180) / Math.PI;
+    this._lastThrustActive = shipResult.isThrustActive;
 
     // Apply gravity acceleration
     const gravityResult = GravitySystem.applyGravity(
@@ -178,13 +184,20 @@ export class SolarSystemSessionManager {
   /**
    * Check which locations are nearby (within docking range).
    * Called once per frame to update the nearby locations list.
+   *
+   * `Location.position` is an offset from its parent body's centre, so the
+   * absolute world position is `parentBody.position + location.position`.
    */
   updateNearbyLocations(): void {
     const nearby: string[] = [];
+    const bodies = this.sessionState.currentSystem.celestialBodies;
     for (const loc of this.sessionState.currentSystem.locations) {
+      const parent = bodies.find((b) => b.id === loc.bodyId);
+      const worldX = (parent?.position.x ?? 0) + loc.position.x;
+      const worldY = (parent?.position.y ?? 0) + loc.position.y;
       const distance = Math.hypot(
-        this.sessionState.playerPosition.x - loc.position.x,
-        this.sessionState.playerPosition.y - loc.position.y,
+        this.sessionState.playerPosition.x - worldX,
+        this.sessionState.playerPosition.y - worldY,
       );
       if (distance <= loc.dockingRadius) {
         nearby.push(loc.id);
@@ -192,6 +205,21 @@ export class SolarSystemSessionManager {
       }
     }
     this.sessionState.nearbyLocations = nearby;
+  }
+
+  /**
+   * Returns the absolute world position of a location (parent body offset
+   * plus the location's local position). Returns the local position if the
+   * parent body is unknown.
+   */
+  getLocationWorldPosition(loc: Location): { x: number; y: number } {
+    const parent = this.sessionState.currentSystem.celestialBodies.find(
+      (b) => b.id === loc.bodyId,
+    );
+    return {
+      x: (parent?.position.x ?? 0) + loc.position.x,
+      y: (parent?.position.y ?? 0) + loc.position.y,
+    };
   }
 
   // ── Docking ──────────────────────────────────────────────────────────
@@ -224,7 +252,7 @@ export class SolarSystemSessionManager {
   // ── Zoom ─────────────────────────────────────────────────────────────
 
   setZoomLevel(level: number): void {
-    this.sessionState.zoomLevel = Math.max(0.5, Math.min(3.0, level));
+    this.sessionState.zoomLevel = Math.max(0.02, Math.min(20.0, level));
   }
 
   adjustZoom(delta: number): void {

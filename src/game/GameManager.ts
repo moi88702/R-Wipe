@@ -18,12 +18,15 @@ import { OverworldManager } from "../managers/OverworldManager";
 import { missionToLevelState } from "../managers/MissionManager";
 import { BlueprintStore } from "../managers/BlueprintStore";
 import { SolarSystemSessionManager } from "../managers/SolarSystemSessionManager";
+import { SystemGateRegistry } from "./data/SystemGateRegistry";
+import { GateTeleportSystem } from "./solarsystem/GateTeleportSystem";
 // TODO: Import DockingManager, FactionManager, MissionLogManager in Phase 4-7
 // import { DockingManager } from "../managers/DockingManager";
 // import { FactionManager } from "../managers/FactionManager";
 // import { MissionLogManager } from "../managers/MissionLogManager";
 import { CollisionSystem } from "../systems/CollisionSystem";
-import { GameRenderer, type PlayerBlueprintVisual, type ShipyardRenderData, type ShipyardPaletteTile, type SolarSystemRenderData } from "../rendering/GameRenderer";
+import { GameRenderer, type GalaxyMapData, type PlayerBlueprintVisual, type ShipyardRenderData, type ShipyardPaletteTile, type SolarSystemRenderData } from "../rendering/GameRenderer";
+import type { SolarSystemState, SystemGate } from "../types/solarsystem";
 import type { MissionId, NodeId } from "../types/campaign";
 import type { Blueprint, PartCategory, PlacedPart } from "../types/shipBuilder";
 import { STARTER_SECTOR } from "./campaign/StarterSector";
@@ -36,6 +39,29 @@ import {
 import { computeShipStats } from "./parts/stats";
 import { layoutBlueprint, type Placement } from "./parts/geometry";
 import { canSnap } from "./parts/assembly";
+
+interface SolarEnemyBase {
+  id: string;
+  name: string;
+  position: { x: number; y: number };
+  health: number;
+  maxHealth: number;
+  alertLevel: "dormant" | "alerted" | "combat";
+  alertRadiusKm: number;
+  lastSpawnMs: number;
+  spawnIntervalMs: number;
+  maxShips: number;
+}
+
+interface SolarEnemyShip {
+  id: string;
+  baseId: string;
+  position: { x: number; y: number };
+  velocity: { x: number; y: number };
+  heading: number;
+  health: number;
+  maxHealth: number;
+}
 
 /** Menu item ids used by updateMenu / updatePause. */
 type MainMenuItem = "play" | "campaign" | "solar-system" | "shipyard" | "stats";
@@ -67,6 +93,29 @@ export class GameManager {
   private readonly blueprints: BlueprintStore;
   private solarSystem: SolarSystemSessionManager | null = null;
   private mapOpen = false;
+  /** Cooldown after gate jump so the player doesn't immediately re-trigger the sister gate. */
+  private gateCooldownMs = 0;
+  /** Solar systems the player has entered at least once (used to colour the galaxy map). */
+  private readonly visitedSystems: Set<string> = new Set();
+  /** Lazy-built per-system data, keyed by `systemId` (matches SystemGate.systemId). */
+  private readonly systemRegistry: Map<string, SolarSystemState> = new Map();
+  /** Active solar-system id (matches SystemGate.systemId — e.g. "sol"). */
+  private currentSystemId = "sol";
+  /** Docked station menu state. */
+  private dockedMenuSelection = 0;
+  private dockedStatusMsg: string | null = null;
+  private dockedStatusMs = 0;
+  /** Solar-system enemy tracking. */
+  private solarEnemyBases: SolarEnemyBase[] = [];
+  private solarEnemyShips: SolarEnemyShip[] = [];
+  private solarEnemyNextId = 0;
+  /** Fire edge tracking for solar-system shooting. */
+  private prevSolarFirePressed = false;
+  /** Laser flash FX (counts down from 200ms to 0). */
+  private laserFlashMs = 0;
+  private laserFlashTarget: { x: number; y: number } | null = null;
+  /** Where the shipyard should return when ESC is pressed. */
+  private shipyardReturnScreen: "main-menu" | "docked" = "main-menu";
   // TODO: Wire up docking, factions, mission log in Phase 4-7
   // private docking: DockingManager | null = null;
   // private factions: FactionManager | null = null;
@@ -219,6 +268,8 @@ export class GameManager {
       this.updateShipyard(clamped);
     } else if (screen === "solar-system") {
       this.updateSolarSystem(clamped);
+    } else if (screen === "solar-system-paused") {
+      this.updateSolarSystemPaused();
     } else if (screen === "docked") {
       this.updateDockedMenu(clamped);
     }
@@ -293,6 +344,7 @@ export class GameManager {
       } else if (pick === "solar-system") {
         this.openSolarSystem();
       } else if (pick === "shipyard") {
+        this.shipyardReturnScreen = "main-menu";
         this.openShipyard();
       } else {
         this.openStats("main-menu");
@@ -373,6 +425,8 @@ export class GameManager {
     this.shipyardNextPlacedIdx = this.shipyardBlueprint.parts.length;
     this.menuDebounceMs = MENU_DEBOUNCE_MS;
     this.state.setScreen("shipyard");
+    // shipyardReturnScreen defaults to "main-menu"; callers opening from docked
+    // set it to "docked" before calling openShipyard().
   }
 
   private updateShipyard(deltaMs: number): void {
@@ -385,7 +439,8 @@ export class GameManager {
     // Keyboard back — discard changes.
     if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
       this.shipyardBlueprint = null;
-      this.state.setScreen("main-menu");
+      this.state.setScreen(this.shipyardReturnScreen);
+      this.shipyardReturnScreen = "main-menu";
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
@@ -449,7 +504,8 @@ export class GameManager {
     }
     if (rectHit(layout.backBtn, gx, gy)) {
       this.shipyardBlueprint = null;
-      this.state.setScreen("main-menu");
+      this.state.setScreen(this.shipyardReturnScreen);
+      this.shipyardReturnScreen = "main-menu";
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
@@ -849,109 +905,13 @@ export class GameManager {
   }
 
   private initializeSolarSystemManagers(): void {
-    // Load the first system (Sol) with planets and stations
-    const initialSystem = {
-      seed: { name: "Sol", timestamp: Date.now(), randomSeed: 12345 },
-      celestialBodies: [
-        {
-          id: "star-sol",
-          name: "Sol",
-          type: "star" as const,
-          position: { x: 0, y: 0 },
-          radius: 696,
-          mass: 1.989e30,
-          gravityStrength: 274,
-          color: { r: 255, g: 200, b: 0 },
-          orbital: {
-            parentId: null,
-            semiMajorAxis: 0,
-            eccentricity: 0,
-            inclination: 0,
-            longitudeAscendingNode: 0,
-            argumentOfPeriapsis: 0,
-            meanAnomalyAtEpoch: 0,
-            orbitalPeriodMs: 0,
-            currentAnomaly: 0,
-          },
-          isPrimaryGravitySource: true,
-        },
-        {
-          id: "planet-earth",
-          name: "Earth",
-          type: "planet" as const,
-          position: { x: 150, y: 0 },
-          radius: 64,
-          mass: 5.972e24,
-          gravityStrength: 9.81,
-          color: { r: 100, g: 150, b: 255 },
-          orbital: {
-            parentId: "star-sol",
-            semiMajorAxis: 150,
-            eccentricity: 0.0167,
-            inclination: 0,
-            longitudeAscendingNode: 0,
-            argumentOfPeriapsis: 102.9,
-            meanAnomalyAtEpoch: 100,
-            orbitalPeriodMs: 365.25 * 24 * 60 * 60 * 1000,
-            currentAnomaly: 100,
-          },
-          isPrimaryGravitySource: false,
-        },
-        {
-          id: "planet-mars",
-          name: "Mars",
-          type: "planet" as const,
-          position: { x: 228, y: 50 },
-          radius: 34,
-          mass: 6.417e23,
-          gravityStrength: 3.71,
-          color: { r: 200, g: 100, b: 80 },
-          orbital: {
-            parentId: "star-sol",
-            semiMajorAxis: 228,
-            eccentricity: 0.0934,
-            inclination: 1.85,
-            longitudeAscendingNode: 49.6,
-            argumentOfPeriapsis: 286.5,
-            meanAnomalyAtEpoch: 19,
-            orbitalPeriodMs: 687 * 24 * 60 * 60 * 1000,
-            currentAnomaly: 19,
-          },
-          isPrimaryGravitySource: false,
-        },
-      ],
-      locations: [
-        {
-          id: "station-earth-orbit",
-          name: "Earth Station",
-          type: "station" as const,
-          bodyId: "planet-earth",
-          position: { x: 10, y: 0 },
-          dockingRadius: 30,
-          controllingFaction: "neutral",
-          npcs: [],
-          shops: [],
-        },
-        {
-          id: "outpost-mars",
-          name: "Curiosity Base",
-          type: "outpost" as const,
-          bodyId: "planet-mars",
-          position: { x: 6, y: 2 },
-          dockingRadius: 25,
-          controllingFaction: "neutral",
-          npcs: [],
-          shops: [],
-        },
-      ],
-      initialFactionAssignments: {},
-      currentFactionControl: {},
-      stateChangeLog: { entries: [] },
-      lastUpdatedAt: Date.now(),
-    };
+    // Build (or retrieve) the Sol system and use it as the starting point.
+    const sol = this.getOrBuildSystemState("sol");
+    this.systemRegistry.set("sol", sol);
+    this.visitedSystems.add("sol");
+    this.currentSystemId = "sol";
 
-    // For now, use a default minimal blueprint
-    // TODO: Wire this to use the player's actual equipped blueprint
+    // Minimal blueprint placeholder until real loadout integration lands.
     const dummyBlueprint = {
       id: "starter-blueprint",
       name: "Starter Ship",
@@ -961,25 +921,200 @@ export class GameManager {
       modifiedAt: Date.now(),
     };
 
-    // Create the session manager
-    this.solarSystem = new SolarSystemSessionManager(
-      initialSystem,
-      dummyBlueprint,
-    );
+    this.solarSystem = new SolarSystemSessionManager(sol, dummyBlueprint);
 
-    // Place player near Earth station and start docked
+    // Spawn the player just outside Earth Station's docking ring so the
+    // station is visible on screen but the player isn't auto-docked.
     const sessionState = this.solarSystem.getSessionState();
-    // Station is at Earth (150, 0) + local offset (10, 0) = (160, 0) in system coords
-    sessionState.playerPosition = { x: 160, y: 0 };
+    sessionState.playerPosition = { x: 110, y: 0 }; // ~50 km left of Earth Station (160, 0)
     sessionState.playerVelocity = { x: 0, y: 0 };
-    sessionState.playerHeading = 0;
-    sessionState.zoomLevel = 0.8; // Zoomed out to show planets
+    sessionState.playerHeading = 90; // Face east, toward the station
+    sessionState.zoomLevel = 1.0;
 
-    // Dock at the station
-    this.solarSystem.updateNearbyLocations();
-    this.solarSystem.dock("station-earth-orbit");
+    // Initialize the pirate base in Sol system.
+    this.solarEnemyBases = [
+      {
+        id: "pirate-base-sol",
+        name: "Pirate Stronghold",
+        position: { x: 250, y: 120 },
+        health: 500,
+        maxHealth: 500,
+        alertLevel: "dormant",
+        alertRadiusKm: 180,
+        lastSpawnMs: 0,
+        spawnIntervalMs: 6000,
+        maxShips: 5,
+      },
+    ];
+    this.solarEnemyShips = [];
+    this.solarEnemyNextId = 0;
+    this.prevSolarFirePressed = false;
+    this.laserFlashMs = 0;
+    this.laserFlashTarget = null;
+  }
 
-    // TODO: Initialize DockingManager, FactionManager, MissionLogManager in Phase 4-7
+  /**
+   * Returns the SolarSystemState for a given system id, building it lazily
+   * the first time it is requested. Three systems are supported: `sol`,
+   * `kepler-442`, `proxima-centauri` — matching the SystemGateRegistry.
+   */
+  private getOrBuildSystemState(systemId: string): SolarSystemState {
+    const cached = this.systemRegistry.get(systemId);
+    if (cached) return cached;
+
+    let built: SolarSystemState;
+    if (systemId === "sol") built = this.buildSolSystem();
+    else if (systemId === "kepler-442") built = this.buildKeplerSystem();
+    else if (systemId === "proxima-centauri") built = this.buildProximaSystem();
+    else built = this.buildGenericSystem(systemId);
+
+    this.systemRegistry.set(systemId, built);
+    return built;
+  }
+
+  private buildSolSystem(): SolarSystemState {
+    return {
+      seed: { name: "Sol", timestamp: Date.now(), randomSeed: 12345 },
+      celestialBodies: [
+        {
+          id: "star-sol", name: "Sol", type: "star",
+          position: { x: 0, y: 0 }, radius: 696, mass: 1.989e30, gravityStrength: 274,
+          color: { r: 255, g: 200, b: 0 },
+          orbital: this.staticOrbit(),
+          isPrimaryGravitySource: true,
+        },
+        {
+          id: "planet-earth", name: "Earth", type: "planet",
+          position: { x: 150, y: 0 }, radius: 64, mass: 5.972e24, gravityStrength: 9.81,
+          color: { r: 100, g: 150, b: 255 },
+          orbital: this.staticOrbit("star-sol", 150),
+          isPrimaryGravitySource: false,
+        },
+        {
+          id: "planet-mars", name: "Mars", type: "planet",
+          position: { x: 228, y: 50 }, radius: 34, mass: 6.417e23, gravityStrength: 3.71,
+          color: { r: 200, g: 100, b: 80 },
+          orbital: this.staticOrbit("star-sol", 228),
+          isPrimaryGravitySource: false,
+        },
+      ],
+      locations: [
+        {
+          id: "station-earth-orbit", name: "Earth Station", type: "station",
+          bodyId: "planet-earth", position: { x: 10, y: 0 }, dockingRadius: 30,
+          controllingFaction: "neutral", npcs: [], shops: [],
+        },
+        {
+          id: "outpost-mars", name: "Curiosity Base", type: "outpost",
+          bodyId: "planet-mars", position: { x: 6, y: 2 }, dockingRadius: 25,
+          controllingFaction: "neutral", npcs: [], shops: [],
+        },
+      ],
+      initialFactionAssignments: {},
+      currentFactionControl: {},
+      stateChangeLog: { entries: [] },
+      lastUpdatedAt: Date.now(),
+    };
+  }
+
+  private buildKeplerSystem(): SolarSystemState {
+    return {
+      seed: { name: "Kepler-442", timestamp: Date.now(), randomSeed: 24680 },
+      celestialBodies: [
+        {
+          id: "star-kepler-442", name: "Kepler-442", type: "star",
+          position: { x: 0, y: 0 }, radius: 600, mass: 1.4e30, gravityStrength: 240,
+          color: { r: 255, g: 180, b: 90 },
+          orbital: this.staticOrbit(),
+          isPrimaryGravitySource: true,
+        },
+        {
+          id: "planet-kepler-442b", name: "Kepler-442b", type: "planet",
+          position: { x: 200, y: -40 }, radius: 80, mass: 8.4e24, gravityStrength: 11.2,
+          color: { r: 120, g: 200, b: 130 },
+          orbital: this.staticOrbit("star-kepler-442", 204),
+          isPrimaryGravitySource: false,
+        },
+      ],
+      locations: [
+        {
+          id: "station-kepler-orbital", name: "Kepler Orbital", type: "station",
+          bodyId: "planet-kepler-442b", position: { x: 14, y: 0 }, dockingRadius: 30,
+          controllingFaction: "neutral", npcs: [], shops: [],
+        },
+      ],
+      initialFactionAssignments: {},
+      currentFactionControl: {},
+      stateChangeLog: { entries: [] },
+      lastUpdatedAt: Date.now(),
+    };
+  }
+
+  private buildProximaSystem(): SolarSystemState {
+    return {
+      seed: { name: "Proxima Centauri", timestamp: Date.now(), randomSeed: 13579 },
+      celestialBodies: [
+        {
+          id: "star-proxima", name: "Proxima Centauri", type: "star",
+          position: { x: 0, y: 0 }, radius: 200, mass: 2.4e29, gravityStrength: 60,
+          color: { r: 255, g: 100, b: 80 },
+          orbital: this.staticOrbit(),
+          isPrimaryGravitySource: true,
+        },
+        {
+          id: "planet-proxima-b", name: "Proxima b", type: "planet",
+          position: { x: 90, y: 30 }, radius: 50, mass: 7.6e24, gravityStrength: 10.5,
+          color: { r: 180, g: 90, b: 70 },
+          orbital: this.staticOrbit("star-proxima", 95),
+          isPrimaryGravitySource: false,
+        },
+      ],
+      locations: [
+        {
+          id: "outpost-proxima-b", name: "Frontier Outpost", type: "outpost",
+          bodyId: "planet-proxima-b", position: { x: 8, y: 0 }, dockingRadius: 25,
+          controllingFaction: "neutral", npcs: [], shops: [],
+        },
+      ],
+      initialFactionAssignments: {},
+      currentFactionControl: {},
+      stateChangeLog: { entries: [] },
+      lastUpdatedAt: Date.now(),
+    };
+  }
+
+  private buildGenericSystem(systemId: string): SolarSystemState {
+    return {
+      seed: { name: systemId, timestamp: Date.now(), randomSeed: 1 },
+      celestialBodies: [
+        {
+          id: `${systemId}-primary`, name: systemId, type: "star",
+          position: { x: 0, y: 0 }, radius: 400, mass: 1e30, gravityStrength: 200,
+          color: { r: 200, g: 200, b: 200 },
+          orbital: this.staticOrbit(),
+          isPrimaryGravitySource: true,
+        },
+      ],
+      locations: [],
+      initialFactionAssignments: {},
+      currentFactionControl: {},
+      stateChangeLog: { entries: [] },
+      lastUpdatedAt: Date.now(),
+    };
+  }
+
+  private staticOrbit(parentId: string | null = null, semiMajorAxis = 0) {
+    return {
+      parentId,
+      semiMajorAxis,
+      eccentricity: 0,
+      inclination: 0,
+      longitudeAscendingNode: 0,
+      argumentOfPeriapsis: 0,
+      meanAnomalyAtEpoch: 0,
+      orbitalPeriodMs: 0,
+      currentAnomaly: 0,
+    };
   }
 
   private updateSolarSystem(deltaMs: number): void {
@@ -988,62 +1123,295 @@ export class GameManager {
       return;
     }
 
-    // Handle pause
+    // Pause toggle (ESC / P)
     if (this.wasPausePressed() && this.menuDebounceMs === 0) {
       this.state.setScreen("solar-system-paused");
       this.menuDebounceMs = 350;
       return;
     }
 
-    // Poll input
     const input = this.input.poll();
 
-    // Update ship physics (gravity, thrust, etc.)
-    this.solarSystem.updateShipPhysics(input, deltaMs);
+    // Map toggle (M)
+    if (input.mapTogglePulse) {
+      this.mapOpen = !this.mapOpen;
+    }
 
-    // Check for nearby locations
+    // While the galaxy map is open, don't drive ship physics — just allow
+    // the player to read and close it again.
+    if (!this.mapOpen) {
+      this.solarSystem.updateShipPhysics(input, deltaMs);
+    }
+
+    // Proximity updates: stations + gates
     this.solarSystem.updateNearbyLocations();
 
-    // Check for docking button press
-    const nearby = this.solarSystem.getNearbyLocations();
-    if (nearby.length > 0 && input.menuConfirm && this.menuDebounceMs === 0) {
-      // Attempt to dock at the first nearby location
-      const location = nearby[0];
-      if (location && this.solarSystem.dock(location.id)) {
-        this.state.setScreen("docked");
+    this.gateCooldownMs = Math.max(0, this.gateCooldownMs - deltaMs);
+    const playerPos = this.solarSystem.getSessionState().playerPosition;
+    const gates = SystemGateRegistry.getGatesBySystem(this.currentSystemId);
+    const nearbyGate = this.gateCooldownMs > 0
+      ? null
+      : GateTeleportSystem.checkGateProximity(playerPos, gates as SystemGate[]);
+
+    // Confirm action: dock if a station is in range, else jump if a gate is.
+    if (input.menuConfirm && this.menuDebounceMs === 0) {
+      const nearbyStations = this.solarSystem.getNearbyLocations();
+      if (nearbyStations.length > 0) {
+        const loc = nearbyStations[0];
+        if (loc && this.solarSystem.dock(loc.id)) {
+          this.dockedMenuSelection = 0;
+          this.menuSelection = 0;
+          this.state.setScreen("docked");
+          this.menuDebounceMs = 350;
+          return;
+        }
+      } else if (nearbyGate) {
+        this.attemptGateJump(nearbyGate);
         this.menuDebounceMs = 350;
         return;
       }
     }
 
-    // Handle map toggle (M key)
-    if (input.mapTogglePulse) {
-      this.mapOpen = !this.mapOpen;
+    // Fire weapon (Space — edge triggered, only when map is closed and no dock action this frame).
+    const fireEdge = input.fire && !this.prevSolarFirePressed;
+    this.prevSolarFirePressed = input.fire ?? false;
+    if (fireEdge && !this.mapOpen && this.menuDebounceMs === 0) {
+      this.fireSolarWeapon(playerPos, this.solarSystem.getSessionState().playerHeading);
     }
 
-    // Handle zoom (scroll wheel)
+    this.laserFlashMs = Math.max(0, this.laserFlashMs - deltaMs);
+
     if (input.zoomDelta) {
       this.solarSystem.adjustZoom(input.zoomDelta);
     }
 
-    // TODO: Implement solar system rendering
-    // For now, skip rendering to unblock the game loop
-    // this.renderer.renderFrame(this.state.getGameState(), deltaMs, {
-    //   menuSelection: this.menuSelection,
-    //   lastRun: this.state.getLastRun(),
-    //   starmap: null,
-    //   shipyard: null,
-    // });
+    // Update enemy bases and ships only in Sol system for now.
+    if (this.currentSystemId === "sol") {
+      this.updateSolarEnemies(deltaMs, playerPos);
+    }
   }
 
-  private updateDockedMenu(_deltaMs: number): void {
-    // Placeholder for docked menu logic
-    // TODO: Implement docking menu with NPC interaction, missions, undocking
-    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
-      if (this.solarSystem) {
-        this.solarSystem.undock();
+  private fireSolarWeapon(playerPos: { x: number; y: number }, headingDeg: number): void {
+    const headingRad = (headingDeg * Math.PI) / 180;
+    const fwdX = Math.sin(headingRad);
+    const fwdY = -Math.cos(headingRad);
+    const maxRangeKm = 120;
+    const halfConeDeg = 45;
+
+    let bestDist = Infinity;
+    let bestShip: SolarEnemyShip | null = null;
+
+    for (const ship of this.solarEnemyShips) {
+      const dx = ship.position.x - playerPos.x;
+      const dy = ship.position.y - playerPos.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > maxRangeKm) continue;
+      // Check angle within cone
+      const dotNorm = (dx * fwdX + dy * fwdY) / dist;
+      const angleDeg = (Math.acos(Math.max(-1, Math.min(1, dotNorm))) * 180) / Math.PI;
+      if (angleDeg > halfConeDeg) continue;
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestShip = ship;
       }
+    }
+
+    if (bestShip) {
+      bestShip.health -= 34; // One-third of max health per shot
+      this.laserFlashTarget = { ...bestShip.position };
+      this.laserFlashMs = 200;
+      if (bestShip.health <= 0) {
+        this.solarEnemyShips = this.solarEnemyShips.filter((s) => s.id !== bestShip!.id);
+        // Register kill on the base's counter
+        const base = this.solarEnemyBases.find((b) => b.id === bestShip!.baseId);
+        if (base) {
+          // Damage base slightly when all its ships are killed
+          const remaining = this.solarEnemyShips.filter((s) => s.baseId === base.id);
+          if (remaining.length === 0) {
+            base.health = Math.max(0, base.health - 50);
+          }
+        }
+      }
+    } else {
+      // Miss: draw line in facing direction to max range
+      this.laserFlashTarget = {
+        x: playerPos.x + fwdX * maxRangeKm,
+        y: playerPos.y + fwdY * maxRangeKm,
+      };
+      this.laserFlashMs = 100;
+    }
+  }
+
+  private updateSolarEnemies(deltaMs: number, playerPos: { x: number; y: number }): void {
+    const nowMs = Date.now();
+
+    for (const base of this.solarEnemyBases) {
+      if (base.health <= 0) continue;
+
+      // Update alert state based on player proximity.
+      const distToBase = Math.hypot(
+        playerPos.x - base.position.x,
+        playerPos.y - base.position.y,
+      );
+      if (base.alertLevel === "dormant" && distToBase <= base.alertRadiusKm) {
+        base.alertLevel = "alerted";
+      }
+      if (base.alertLevel === "alerted") {
+        base.alertLevel = "combat";
+      }
+
+      if (base.alertLevel !== "combat") continue;
+
+      // Spawn new ships if below cap.
+      const activeForBase = this.solarEnemyShips.filter((s) => s.baseId === base.id).length;
+      const timeSinceSpawn = nowMs - base.lastSpawnMs;
+      if (activeForBase < base.maxShips && timeSinceSpawn >= base.spawnIntervalMs) {
+        const angle = Math.random() * Math.PI * 2;
+        const spawnRadius = 20; // spawn 20 km from base
+        const newShip: SolarEnemyShip = {
+          id: `enemy-${++this.solarEnemyNextId}`,
+          baseId: base.id,
+          position: {
+            x: base.position.x + Math.cos(angle) * spawnRadius,
+            y: base.position.y + Math.sin(angle) * spawnRadius,
+          },
+          velocity: { x: 0, y: 0 },
+          heading: 0,
+          health: 100,
+          maxHealth: 100,
+        };
+        this.solarEnemyShips.push(newShip);
+        base.lastSpawnMs = nowMs;
+      }
+    }
+
+    // Move ships toward player (slow patrol speed).
+    const enemySpeedMs = 8000; // m/s top speed
+    const accelMs2 = 3000;    // m/s² thrust
+    const dtS = deltaMs / 1000;
+
+    for (const ship of this.solarEnemyShips) {
+      const dx = playerPos.x - ship.position.x;
+      const dy = playerPos.y - ship.position.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      const dirX = dx / dist;
+      const dirY = dy / dist;
+
+      ship.velocity.x += dirX * accelMs2 * dtS;
+      ship.velocity.y += dirY * accelMs2 * dtS;
+
+      // Cap speed
+      const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
+      if (speed > enemySpeedMs) {
+        ship.velocity.x = (ship.velocity.x / speed) * enemySpeedMs;
+        ship.velocity.y = (ship.velocity.y / speed) * enemySpeedMs;
+      }
+
+      // Integrate position (km)
+      ship.position.x += (ship.velocity.x * dtS) / 1000;
+      ship.position.y += (ship.velocity.y * dtS) / 1000;
+
+      // Update heading to face player
+      ship.heading = (Math.atan2(dirX, -dirY) * 180) / Math.PI;
+    }
+  }
+
+  private attemptGateJump(sourceGate: SystemGate): void {
+    if (!this.solarSystem) return;
+    const sister = SystemGateRegistry.getSisterGate(sourceGate.id);
+    if (!sister) return;
+
+    const destSystemId = sister.systemId;
+    const destSystem = this.getOrBuildSystemState(destSystemId);
+    const result = GateTeleportSystem.teleport(
+      this.solarSystem.getSessionState(),
+      sourceGate,
+      sister,
+      destSystem,
+    );
+    if (result.success) {
+      this.currentSystemId = destSystemId;
+      this.visitedSystems.add(destSystemId);
+      // Prevent immediate re-trigger inside sister gate's radius.
+      this.gateCooldownMs = 1500;
+    }
+  }
+
+  private updateSolarSystemPaused(): void {
+    if (this.wasPausePressed() && this.menuDebounceMs === 0) {
       this.state.setScreen("solar-system");
+      this.menuDebounceMs = 350;
+      return;
+    }
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.state.setScreen("main-menu");
+      this.menuDebounceMs = 350;
+    }
+  }
+
+  private getDockedMenuItems(): readonly string[] {
+    const dockedLocId = this.solarSystem?.getSessionState().dockedLocationId ?? null;
+    const hasShipyard =
+      dockedLocId === "station-earth-orbit" || dockedLocId === "outpost-mars";
+    if (hasShipyard) {
+      return ["Repair Bay", "Shop", "Missions", "Shipyard", "Galaxy Map", "Undock"];
+    }
+    return ["Repair Bay", "Shop", "Missions", "Galaxy Map", "Undock"];
+  }
+
+  private updateDockedMenu(deltaMs: number): void {
+    if (!this.solarSystem) {
+      this.state.setScreen("main-menu");
+      return;
+    }
+    this.dockedStatusMs = Math.max(0, this.dockedStatusMs - deltaMs);
+    if (this.dockedStatusMs === 0) this.dockedStatusMsg = null;
+
+    const menuItems = this.getDockedMenuItems();
+
+    // ESC undocks immediately.
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.solarSystem.undock();
+      this.state.setScreen("solar-system");
+      this.menuDebounceMs = 350;
+      return;
+    }
+
+    // Up/Down navigate menu.
+    this.stepMenuSelection(menuItems.length);
+    this.dockedMenuSelection = this.menuSelection;
+
+    // Enter selects.
+    if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
+      const item = menuItems[this.dockedMenuSelection];
+      if (item === "Undock") {
+        this.solarSystem.undock();
+        this.state.setScreen("solar-system");
+        this.menuDebounceMs = 350;
+        return;
+      }
+      if (item === "Galaxy Map") {
+        this.mapOpen = true;
+        this.solarSystem.undock();
+        this.state.setScreen("solar-system");
+        this.menuDebounceMs = 350;
+        return;
+      }
+      if (item === "Shipyard") {
+        this.shipyardReturnScreen = "docked";
+        this.openShipyard();
+        return;
+      }
+      if (item === "Repair Bay") {
+        this.dockedStatusMsg = "Hull repaired — no charge today.";
+        this.dockedStatusMs = 1500;
+      } else if (item === "Shop") {
+        this.dockedStatusMsg = "Shop inventory empty (coming soon).";
+        this.dockedStatusMs = 1500;
+      } else if (item === "Missions") {
+        this.dockedStatusMsg = "No missions available.";
+        this.dockedStatusMs = 1500;
+      }
       this.menuDebounceMs = 350;
     }
   }
@@ -1687,7 +2055,7 @@ export class GameManager {
       starmap: state.screen === "starmap" ? this.buildStarmapExtras() : null,
       shipyard: state.screen === "shipyard" ? this.buildShipyardExtras() : null,
       solarSystem:
-        state.screen === "solar-system" || state.screen === "solar-system-paused"
+        state.screen === "solar-system" || state.screen === "solar-system-paused" || state.screen === "docked"
           ? this.buildSolarSystemExtras()
           : null,
       playerBlueprint: this.buildPlayerBlueprintVisual(),
@@ -1724,25 +2092,156 @@ export class GameManager {
     const sessionState = this.solarSystem.getSessionState();
     const system = this.solarSystem.getCurrentSystem();
 
+    // Resolve absolute world positions for stations (Location.position is an
+    // offset from the parent body — the renderer needs the absolute coords).
+    const bodiesById = new Map(system.celestialBodies.map((b) => [b.id, b]));
+    const locations = system.locations.map((loc) => {
+      const parent = bodiesById.get(loc.bodyId);
+      return {
+        id: loc.id,
+        name: loc.name,
+        worldPosition: {
+          x: (parent?.position.x ?? 0) + loc.position.x,
+          y: (parent?.position.y ?? 0) + loc.position.y,
+        },
+        dockingRadius: loc.dockingRadius,
+      };
+    });
+
+    // Gates currently in this system.
+    const gateDefs = SystemGateRegistry.getGatesBySystem(this.currentSystemId);
+    const gates = gateDefs.map((g) => ({
+      id: g.id,
+      name: g.name,
+      position: g.position,
+      triggerRadius: g.triggerRadius,
+      destinationSystemName: this.systemDisplayName(g.destinationSystemId),
+    }));
+
+    // Find which gate (if any) the player is approaching this frame.
+    let nearbyGateId: string | null = null;
+    if (this.gateCooldownMs <= 0) {
+      const inRange = GateTeleportSystem.checkGateProximity(
+        sessionState.playerPosition,
+        gateDefs as SystemGate[],
+      );
+      nearbyGateId = inRange?.id ?? null;
+    }
+
+    // Galaxy map (reuses gate registry to derive nodes + edges).
+    const galaxyMap: GalaxyMapData = this.buildGalaxyMapData();
+
+    // Docked context (only meaningful when screen === "docked").
+    const dockedLocId = sessionState.dockedLocationId;
+    const dockedLoc = dockedLocId
+      ? system.locations.find((l) => l.id === dockedLocId)
+      : null;
+    const menuItems = this.getDockedMenuItems();
+    const dockedSection = dockedLoc
+      ? {
+          locationName: this.dockedStatusMsg ?? dockedLoc.name,
+          menuItems,
+          menuSelection: this.dockedMenuSelection,
+        }
+      : undefined;
+
+    // Laser flash FX
+    const laserFlash = this.laserFlashMs > 0 && this.laserFlashTarget
+      ? {
+          targetX: this.laserFlashTarget.x,
+          targetY: this.laserFlashTarget.y,
+          alpha: this.laserFlashMs / 200,
+        }
+      : undefined;
+
+    // Enemy ships and stations for this system
+    const enemyShips = this.currentSystemId === "sol"
+      ? this.solarEnemyShips.map((s) => ({
+          id: s.id,
+          position: s.position,
+          heading: s.heading,
+          health: s.health,
+          maxHealth: s.maxHealth,
+        }))
+      : [];
+    const enemyStations = this.currentSystemId === "sol"
+      ? this.solarEnemyBases.map((b) => ({
+          id: b.id,
+          name: b.name,
+          position: b.position,
+          health: b.health,
+          maxHealth: b.maxHealth,
+          alertLevel: b.alertLevel,
+        }))
+      : [];
+
     return {
       playerPosition: sessionState.playerPosition,
+      playerVelocity: sessionState.playerVelocity,
       playerHeading: sessionState.playerHeading,
+      thrustActive: this.solarSystem.getLastThrustActive(),
+      currentSystemName: system.seed.name,
       celestialBodies: system.celestialBodies.map((body) => ({
         id: body.id,
         name: body.name,
+        type: body.type,
         position: body.position,
         radius: body.radius,
         color: body.color,
       })),
-      locations: system.locations.map((loc) => ({
-        id: loc.id,
-        name: loc.name,
-        position: loc.position,
-        dockingRadius: loc.dockingRadius,
-      })),
+      locations,
+      gates,
       nearbyLocations: sessionState.nearbyLocations,
+      nearbyGateId,
       zoomLevel: sessionState.zoomLevel,
       mapOpen: this.mapOpen,
+      galaxyMap,
+      enemyShips,
+      enemyStations,
+      ...(laserFlash ? { laserFlash } : {}),
+      ...(dockedSection ? { docked: dockedSection } : {}),
+    };
+  }
+
+  private systemDisplayName(systemId: string): string {
+    if (systemId === "sol") return "Sol";
+    if (systemId === "kepler-442") return "Kepler-442";
+    if (systemId === "proxima-centauri") return "Proxima Centauri";
+    return systemId;
+  }
+
+  private buildGalaxyMapData(): GalaxyMapData {
+    // Layout: place each known system at a fixed position so the map is stable.
+    const positions: Record<string, { x: number; y: number }> = {
+      "sol": { x: 0, y: 0 },
+      "kepler-442": { x: 1200, y: -300 },
+      "proxima-centauri": { x: -400, y: 900 },
+    };
+    const knownIds = ["sol", "kepler-442", "proxima-centauri"];
+    const systems = knownIds.map((id) => ({
+      id,
+      name: this.systemDisplayName(id),
+      x: positions[id]?.x ?? 0,
+      y: positions[id]?.y ?? 0,
+      visited: this.visitedSystems.has(id),
+    }));
+
+    // De-duplicate gate edges (each pair has two SystemGate entries).
+    const seenEdges = new Set<string>();
+    const edges: Array<{ fromSystemId: string; toSystemId: string }> = [];
+    for (const g of SystemGateRegistry.getAllGates()) {
+      const a = g.systemId;
+      const b = g.destinationSystemId;
+      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+      if (seenEdges.has(key)) continue;
+      seenEdges.add(key);
+      edges.push({ fromSystemId: a, toSystemId: b });
+    }
+
+    return {
+      currentSystemId: this.currentSystemId,
+      systems,
+      edges,
     };
   }
 

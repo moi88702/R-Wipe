@@ -6,7 +6,5 @@
  * Implementations will be added as each visual feature is built out.
  */
 
-export {}; // ensure this is treated as a module
-
 // HUD Visual Feedback System
 export { HUDRenderer, type HUDRenderData, type WaypointMarker } from "./HUDRenderer";

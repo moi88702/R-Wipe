@@ -200,10 +200,14 @@ export interface StarmapRenderData {
 
 export interface SolarSystemRenderData {
   readonly playerPosition: { x: number; y: number };
+  readonly playerVelocity: { x: number; y: number };
   readonly playerHeading: number;
+  readonly thrustActive: boolean;
+  readonly currentSystemName: string;
   readonly celestialBodies: ReadonlyArray<{
     readonly id: string;
     readonly name: string;
+    readonly type?: "star" | "planet" | "moon" | "asteroid" | "station";
     readonly position: { x: number; y: number };
     readonly radius: number;
     readonly color: { r: number; g: number; b: number };
@@ -211,12 +215,66 @@ export interface SolarSystemRenderData {
   readonly locations: ReadonlyArray<{
     readonly id: string;
     readonly name: string;
-    readonly position: { x: number; y: number };
+    /**
+     * Absolute world position (km). Callers must add the parent body offset
+     * before passing in — `Location.position` alone is the local offset.
+     */
+    readonly worldPosition: { x: number; y: number };
     readonly dockingRadius: number;
   }>;
+  readonly gates: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly position: { x: number; y: number };
+    readonly triggerRadius: number;
+    readonly destinationSystemName: string;
+  }>;
   readonly nearbyLocations: string[];
+  readonly nearbyGateId: string | null;
   readonly zoomLevel: number;
   readonly mapOpen?: boolean;
+  readonly galaxyMap?: GalaxyMapData;
+  readonly enemyShips: ReadonlyArray<{
+    readonly id: string;
+    readonly position: { x: number; y: number };
+    readonly heading: number;
+    readonly health: number;
+    readonly maxHealth: number;
+  }>;
+  readonly enemyStations: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly position: { x: number; y: number };
+    readonly health: number;
+    readonly maxHealth: number;
+    readonly alertLevel: "dormant" | "alerted" | "combat";
+  }>;
+  readonly laserFlash?: {
+    readonly targetX: number;
+    readonly targetY: number;
+    readonly alpha: number;
+  };
+  /** Populated when screen === "docked"; drives drawDockedMenu. */
+  readonly docked?: {
+    readonly locationName: string;
+    readonly menuItems: ReadonlyArray<string>;
+    readonly menuSelection: number;
+  };
+}
+
+export interface GalaxyMapData {
+  readonly currentSystemId: string;
+  readonly systems: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly x: number;
+    readonly y: number;
+    readonly visited: boolean;
+  }>;
+  readonly edges: ReadonlyArray<{
+    readonly fromSystemId: string;
+    readonly toSystemId: string;
+  }>;
 }
 
 const COLOR = {
@@ -379,6 +437,21 @@ export class GameRenderer {
 
   // Solar system overlay elements.
   private readonly solarSystemGfx: Graphics;
+  // Solar-system label pools — bodies, stations, gates, enemy ships/bases.
+  private readonly solarBodyLabels: Text[] = [];
+  private readonly solarLocationLabels: Text[] = [];
+  private readonly solarGateLabels: Text[] = [];
+  private readonly solarEnemyLabels: Text[] = [];
+  private readonly solarEnemyStationLabels: Text[] = [];
+  // Galaxy-map text pool — system names.
+  private readonly galaxySystemLabels: Text[] = [];
+  // Solar-system status / system-name banner.
+  private readonly solarSystemNameText: Text;
+  private readonly solarApproachText: Text;
+  // Docked screen elements.
+  private readonly dockedTitle: Text;
+  private readonly dockedHint: Text;
+  private readonly dockedMenuLabels: Text[] = [];
 
   // Shipyard overlay elements.
   private readonly shipyardGfx: Graphics;
@@ -705,6 +778,52 @@ export class GameRenderer {
     this.solarSystemGfx = new Graphics();
     this.menuLayer.addChild(this.solarSystemGfx);
 
+    // System-name banner (top-centre while flying in solar mode)
+    this.solarSystemNameText = new Text({
+      text: "",
+      style: hudStyle(COLOR.hudCyan, 22),
+    });
+    this.solarSystemNameText.anchor.set(0.5, 0);
+    this.solarSystemNameText.x = width / 2;
+    this.solarSystemNameText.y = 16;
+    this.solarSystemNameText.visible = false;
+    this.menuLayer.addChild(this.solarSystemNameText);
+
+    // Approach prompt (e.g., "[E] DOCK", "[E] JUMP")
+    this.solarApproachText = new Text({
+      text: "",
+      style: hudStyle(COLOR.hudAmber, 22),
+    });
+    this.solarApproachText.anchor.set(0.5, 1);
+    this.solarApproachText.x = width / 2;
+    this.solarApproachText.y = height - 32;
+    this.solarApproachText.visible = false;
+    this.menuLayer.addChild(this.solarApproachText);
+
+    // Docked screen — title + hint. Menu items live in a pool.
+    this.dockedTitle = new Text({
+      text: "",
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: 32,
+        fill: COLOR.hudCyan,
+        fontWeight: "bold",
+      }),
+    });
+    this.dockedTitle.anchor.set(0.5, 0);
+    this.dockedTitle.x = width / 2;
+    this.dockedTitle.visible = false;
+    this.menuLayer.addChild(this.dockedTitle);
+
+    this.dockedHint = new Text({
+      text: "",
+      style: hudStyle(COLOR.hudWhite, 14),
+    });
+    this.dockedHint.anchor.set(0.5, 1);
+    this.dockedHint.x = width / 2;
+    this.dockedHint.visible = false;
+    this.menuLayer.addChild(this.dockedHint);
+
     this.starmapTitle = new Text({
       text: "",
       style: new TextStyle({
@@ -906,14 +1025,30 @@ export class GameRenderer {
     // Gameplay entities stay visible behind the pause overlay.
     const drawsEntities = isGameplay || isPause;
 
+    const isSolarPaused = screen === "solar-system-paused";
     this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isDocked;
     this.titleText.visible = isMenu;
     this.subtitleText.visible = isMenu;
-    this.promptText.visible = isMenu || isPause;
+    this.promptText.visible = isMenu || isPause || isSolarPaused;
     this.gameOverTitle.visible = isGameOver;
     this.gameOverStats.visible = isGameOver;
     this.gameOverPrompt.visible = isGameOver;
-    this.pauseTitle.visible = isPause;
+    this.pauseTitle.visible = isPause || isSolarPaused;
+    // Solar system view labels
+    this.solarSystemNameText.visible = isSolarSystem;
+    // solarApproachText visibility is set inside drawSolarSystem each frame.
+    if (!isSolarSystem) this.solarApproachText.visible = false;
+    for (const t of this.solarBodyLabels) t.visible = isSolarSystem;
+    for (const t of this.solarLocationLabels) t.visible = isSolarSystem;
+    for (const t of this.solarGateLabels) t.visible = isSolarSystem;
+    for (const t of this.solarEnemyLabels) t.visible = isSolarSystem;
+    for (const t of this.solarEnemyStationLabels) t.visible = isSolarSystem;
+    // Galaxy-map labels visible only when galaxy map drawn (set in drawGalaxyMap).
+    if (!isSolarSystem) for (const t of this.galaxySystemLabels) t.visible = false;
+    // Docked screen labels
+    this.dockedTitle.visible = isDocked;
+    this.dockedHint.visible = isDocked;
+    for (const t of this.dockedMenuLabels) t.visible = isDocked;
     // Stats overlay elements
     this.statsTitle.visible = isStats;
     this.statsColCurrentHeader.visible = isStats;
@@ -985,8 +1120,7 @@ export class GameRenderer {
     }
 
     if (isDocked) {
-      // Draw docked menu overlay
-      this.drawDockedMenu(state);
+      this.drawDockedMenu(extras.solarSystem);
       return;
     }
 
@@ -2341,95 +2475,314 @@ export class GameRenderer {
     const g = this.solarSystemGfx;
     g.clear();
 
-    // Draw nebula background
+    // Background
     this.drawNebulaBackground(g);
 
-    // Draw celestial bodies with glow effect
-    for (const body of data.celestialBodies) {
+    // World → screen: camera follows the player. 1 km = `kmToPx` pixels.
+    const kmToPx = Math.max(0.05, data.zoomLevel);
+    const camX = data.playerPosition.x;
+    const camY = data.playerPosition.y;
+    const cx = this.width / 2;
+    const cy = this.height / 2;
+    const w2s = (wx: number, wy: number) => ({
+      x: cx + (wx - camX) * kmToPx,
+      y: cy + (wy - camY) * kmToPx,
+    });
+    const offscreen = (sx: number, sy: number, pad = 80): boolean =>
+      sx < -pad || sx > this.width + pad || sy < -pad || sy > this.height + pad;
+
+    // ── Celestial bodies ───────────────────────────────────────────────────
+    this.ensureTextPool(this.solarBodyLabels, data.celestialBodies.length, 13);
+    for (let i = 0; i < data.celestialBodies.length; i++) {
+      const body = data.celestialBodies[i]!;
+      const label = this.solarBodyLabels[i]!;
       const color = (body.color.r << 16) | (body.color.g << 8) | body.color.b;
-      const screenRadius = Math.max(8, body.radius / (200 / data.zoomLevel));
-      const centerX = this.width / 2 + body.position.x / 100 * data.zoomLevel;
-      const centerY = this.height / 2 + body.position.y / 100 * data.zoomLevel;
+      const radiusPx = Math.max(6, Math.min(80, body.radius * 0.1 * kmToPx));
+      const p = w2s(body.position.x, body.position.y);
 
-      // Draw outer glow
-      g.circle(centerX, centerY, screenRadius + 2)
-        .stroke({ color, width: 2, alpha: 0.3 });
-      // Draw main body
-      g.circle(centerX, centerY, screenRadius)
-        .fill({ color, alpha: 0.95 });
-      // Draw highlight
-      g.circle(centerX - screenRadius * 0.3, centerY - screenRadius * 0.3, screenRadius * 0.4)
-        .fill({ color: 0xffffff, alpha: 0.4 });
-    }
-
-    // Draw locations (docking stations)
-    for (const loc of data.locations) {
-      const x = this.width / 2 + loc.position.x / 100 * data.zoomLevel;
-      const y = this.height / 2 + loc.position.y / 100 * data.zoomLevel;
-      const nearby = data.nearbyLocations.includes(loc.id);
-      const color = nearby ? 0x00ff00 : 0xcccccc;
-
-      // Draw location marker as a diamond with pulsing outer ring
-      g.rect(x - 10, y - 10, 20, 20).stroke({ color, width: 2, alpha: 0.8 });
-      if (nearby) {
-        g.rect(x - 14, y - 14, 28, 28).stroke({ color, width: 1, alpha: 0.5 });
+      if (offscreen(p.x, p.y, radiusPx + 40)) {
+        label.visible = false;
+        continue;
       }
+
+      // Glow ring
+      g.circle(p.x, p.y, radiusPx + 4)
+        .stroke({ color, width: 2, alpha: 0.25 });
+      // Body
+      g.circle(p.x, p.y, radiusPx)
+        .fill({ color, alpha: 0.95 });
+      // Highlight
+      g.circle(p.x - radiusPx * 0.3, p.y - radiusPx * 0.3, radiusPx * 0.35)
+        .fill({ color: 0xffffff, alpha: 0.35 });
+
+      // Name label below body
+      label.text = body.name;
+      label.x = p.x;
+      label.y = p.y + radiusPx + 6;
+      label.anchor.set(0.5, 0);
+      label.style.fill = color;
+      label.visible = true;
+    }
+    // Hide unused body labels
+    for (let i = data.celestialBodies.length; i < this.solarBodyLabels.length; i++) {
+      this.solarBodyLabels[i]!.visible = false;
     }
 
-    // Draw player ship at center (delta-wing fighter)
-    this.drawDeltaWing(g, this.width / 2, this.height / 2, data.playerHeading);
+    // ── Stations / outposts (docking targets) ─────────────────────────────
+    this.ensureTextPool(this.solarLocationLabels, data.locations.length, 12);
+    for (let i = 0; i < data.locations.length; i++) {
+      const loc = data.locations[i]!;
+      const label = this.solarLocationLabels[i]!;
+      const p = w2s(loc.worldPosition.x, loc.worldPosition.y);
 
-    // Draw map overlay if open
-    if (data.mapOpen) {
-      this.drawGalaxyMap(g);
+      if (offscreen(p.x, p.y)) {
+        label.visible = false;
+        continue;
+      }
+
+      const nearby = data.nearbyLocations.includes(loc.id);
+      const color = nearby ? 0x66ff66 : 0xcccccc;
+      const dockPx = loc.dockingRadius * kmToPx;
+
+      // Dock-radius ring (faint when far, brighter when nearby)
+      g.circle(p.x, p.y, Math.max(12, dockPx))
+        .stroke({ color, width: 1, alpha: nearby ? 0.6 : 0.2 });
+
+      // Diamond marker
+      g.moveTo(p.x, p.y - 9)
+        .lineTo(p.x + 9, p.y)
+        .lineTo(p.x, p.y + 9)
+        .lineTo(p.x - 9, p.y)
+        .lineTo(p.x, p.y - 9)
+        .stroke({ color, width: 2, alpha: 0.95 });
+
+      label.text = loc.name;
+      label.x = p.x;
+      label.y = p.y - 14;
+      label.anchor.set(0.5, 1);
+      label.style.fill = color;
+      label.visible = true;
+    }
+    for (let i = data.locations.length; i < this.solarLocationLabels.length; i++) {
+      this.solarLocationLabels[i]!.visible = false;
     }
 
-    // Draw touch controls for mobile
-    if (typeof window !== "undefined" && window.innerWidth < 768) {
-      this.drawTouchControls(g);
+    // ── Gates ─────────────────────────────────────────────────────────────
+    this.ensureTextPool(this.solarGateLabels, data.gates.length, 12);
+    for (let i = 0; i < data.gates.length; i++) {
+      const gate = data.gates[i]!;
+      const label = this.solarGateLabels[i]!;
+      const p = w2s(gate.position.x, gate.position.y);
+
+      // Gates are usually far off-screen; render a directional indicator at edge.
+      if (offscreen(p.x, p.y, 0)) {
+        const dx = p.x - cx;
+        const dy = p.y - cy;
+        const len = Math.hypot(dx, dy) || 1;
+        const margin = 32;
+        const t = Math.min(
+          (cx - margin) / Math.abs(dx || 1),
+          (cy - margin) / Math.abs(dy || 1),
+        );
+        const ex = cx + (dx / len) * Math.min(len, Math.max(cx, cy) - margin);
+        const ey = cy + (dy / len) * Math.min(len, Math.max(cx, cy) - margin);
+        // Use t to nudge along the longer axis so the marker hits the screen edge
+        void t;
+        const color = data.nearbyGateId === gate.id ? 0xffff66 : 0x99ccff;
+        // Triangle pointer pointing along (dx, dy)
+        const ang = Math.atan2(dy, dx);
+        const s = 10;
+        g.moveTo(ex + Math.cos(ang) * s, ey + Math.sin(ang) * s)
+          .lineTo(
+            ex + Math.cos(ang + 2.4) * s,
+            ey + Math.sin(ang + 2.4) * s,
+          )
+          .lineTo(
+            ex + Math.cos(ang - 2.4) * s,
+            ey + Math.sin(ang - 2.4) * s,
+          )
+          .lineTo(ex + Math.cos(ang) * s, ey + Math.sin(ang) * s)
+          .fill({ color, alpha: 0.9 });
+
+        label.text = `→ ${gate.destinationSystemName}`;
+        label.x = ex - Math.cos(ang) * 28;
+        label.y = ey - Math.sin(ang) * 28;
+        label.anchor.set(0.5, 0.5);
+        label.style.fill = color;
+        label.visible = true;
+        continue;
+      }
+
+      const color = data.nearbyGateId === gate.id ? 0xffff66 : 0x99ccff;
+      const ringPx = Math.max(20, gate.triggerRadius * kmToPx);
+      // Outer ring + cross — recognisable gate shape
+      g.circle(p.x, p.y, ringPx)
+        .stroke({ color, width: 2, alpha: 0.85 });
+      g.circle(p.x, p.y, ringPx * 0.6)
+        .stroke({ color, width: 1, alpha: 0.5 });
+      g.moveTo(p.x - ringPx, p.y).lineTo(p.x + ringPx, p.y).stroke({ color, width: 1, alpha: 0.6 });
+      g.moveTo(p.x, p.y - ringPx).lineTo(p.x, p.y + ringPx).stroke({ color, width: 1, alpha: 0.6 });
+
+      label.text = `${gate.name}\n→ ${gate.destinationSystemName}`;
+      label.x = p.x;
+      label.y = p.y + ringPx + 6;
+      label.anchor.set(0.5, 0);
+      label.style.fill = color;
+      label.visible = true;
     }
-  }
+    for (let i = data.gates.length; i < this.solarGateLabels.length; i++) {
+      this.solarGateLabels[i]!.visible = false;
+    }
 
-  private drawTouchControls(g: Graphics): void {
-    const buttonSize = 50;
-    const padding = 10;
-    const bottomY = this.height - buttonSize - padding;
-    const rightX = this.width - buttonSize - padding;
+    // ── Enemy stations ────────────────────────────────────────────────────
+    this.ensureTextPool(this.solarEnemyStationLabels, data.enemyStations.length, 11);
+    for (let i = 0; i < data.enemyStations.length; i++) {
+      const base = data.enemyStations[i]!;
+      const label = this.solarEnemyStationLabels[i]!;
+      const p = w2s(base.position.x, base.position.y);
 
-    // Thrust button (bottom right area)
-    g.rect(rightX - buttonSize * 2 - 10, bottomY, buttonSize, buttonSize)
-      .fill({ color: 0x00ff00, alpha: 0.4 })
-      .stroke({ color: 0x00ff00, width: 2, alpha: 0.8 });
+      if (offscreen(p.x, p.y, 40)) {
+        // Off-screen indicator
+        const dx2 = p.x - cx;
+        const dy2 = p.y - cy;
+        const ang2 = Math.atan2(dy2, dx2);
+        const margin = 40;
+        const edgeX = cx + Math.cos(ang2) * (Math.min(cx, cy) - margin);
+        const edgeY = cy + Math.sin(ang2) * (Math.min(cx, cy) - margin);
+        g.moveTo(edgeX + Math.cos(ang2) * 10, edgeY + Math.sin(ang2) * 10)
+          .lineTo(edgeX + Math.cos(ang2 + 2.4) * 10, edgeY + Math.sin(ang2 + 2.4) * 10)
+          .lineTo(edgeX + Math.cos(ang2 - 2.4) * 10, edgeY + Math.sin(ang2 - 2.4) * 10)
+          .lineTo(edgeX + Math.cos(ang2) * 10, edgeY + Math.sin(ang2) * 10)
+          .fill({ color: 0xff4444, alpha: 0.8 });
+        label.visible = false;
+        continue;
+      }
 
-    // Strafe left button
-    g.rect(padding, bottomY, buttonSize, buttonSize)
-      .fill({ color: 0xff6600, alpha: 0.4 })
-      .stroke({ color: 0xff6600, width: 2, alpha: 0.8 });
+      const alertColor = base.alertLevel === "combat"
+        ? 0xff2222
+        : base.alertLevel === "alerted"
+          ? 0xff8800
+          : 0xaa4444;
+      const r = 12;
+      // Hexagon shape for enemy base
+      g.poly(
+        Array.from({ length: 6 }, (_, k) => {
+          const a = (k / 6) * Math.PI * 2;
+          return [p.x + Math.cos(a) * r, p.y + Math.sin(a) * r] as [number, number];
+        }).flat(),
+      ).fill({ color: alertColor, alpha: 0.9 });
+      g.circle(p.x, p.y, r + 3).stroke({ color: alertColor, width: 1, alpha: 0.5 });
+      // Health bar
+      if (base.maxHealth > 0) {
+        const barW = 36;
+        const ratio = base.health / base.maxHealth;
+        g.rect(p.x - barW / 2, p.y + r + 4, barW, 4).fill({ color: 0x333333, alpha: 0.7 });
+        g.rect(p.x - barW / 2, p.y + r + 4, barW * ratio, 4).fill({ color: alertColor, alpha: 0.9 });
+      }
+      label.text = `${base.name}\n${base.alertLevel.toUpperCase()}`;
+      label.x = p.x;
+      label.y = p.y - r - 14;
+      label.anchor.set(0.5, 1);
+      label.style.fill = alertColor;
+      label.visible = true;
+    }
+    for (let i = data.enemyStations.length; i < this.solarEnemyStationLabels.length; i++) {
+      this.solarEnemyStationLabels[i]!.visible = false;
+    }
 
-    // Strafe right button
-    g.rect(padding + buttonSize + 10, bottomY, buttonSize, buttonSize)
-      .fill({ color: 0xff6600, alpha: 0.4 })
-      .stroke({ color: 0xff6600, width: 2, alpha: 0.8 });
+    // ── Enemy ships ───────────────────────────────────────────────────────
+    this.ensureTextPool(this.solarEnemyLabels, data.enemyShips.length, 10);
+    for (let i = 0; i < data.enemyShips.length; i++) {
+      const ship = data.enemyShips[i]!;
+      const label = this.solarEnemyLabels[i]!;
+      const p = w2s(ship.position.x, ship.position.y);
 
-    // Turn left (bottom center-left)
-    g.circle(this.width / 4, bottomY + buttonSize / 2, buttonSize / 2)
-      .fill({ color: 0x0066ff, alpha: 0.4 })
-      .stroke({ color: 0x0066ff, width: 2, alpha: 0.8 });
+      if (offscreen(p.x, p.y)) {
+        label.visible = false;
+        continue;
+      }
 
-    // Turn right (bottom center-right)
-    g.circle(this.width * 3 / 4, bottomY + buttonSize / 2, buttonSize / 2)
-      .fill({ color: 0x0066ff, alpha: 0.4 })
-      .stroke({ color: 0x0066ff, width: 2, alpha: 0.8 });
+      // Draw enemy as small red triangle
+      this.drawDeltaWing(g, p.x, p.y, ship.heading, 0xff3333, 10);
+      // Health bar
+      const barW = 24;
+      const ratio = ship.health / ship.maxHealth;
+      g.rect(p.x - barW / 2, p.y + 13, barW, 3).fill({ color: 0x333333, alpha: 0.7 });
+      g.rect(p.x - barW / 2, p.y + 13, barW * ratio, 3).fill({ color: 0xff3333, alpha: 0.9 });
+      label.visible = false; // no label for individual ships
+    }
+    for (let i = data.enemyShips.length; i < this.solarEnemyLabels.length; i++) {
+      this.solarEnemyLabels[i]!.visible = false;
+    }
 
-    // Dock button (top right)
-    g.rect(rightX, padding, buttonSize, buttonSize)
-      .fill({ color: 0xffff00, alpha: 0.4 })
-      .stroke({ color: 0xffff00, width: 2, alpha: 0.8 });
+    // ── Thrust exhaust ────────────────────────────────────────────────────
+    if (data.thrustActive) {
+      const headRad = (data.playerHeading * Math.PI) / 180;
+      const backX = cx - Math.sin(headRad) * 18;
+      const backY = cy + Math.cos(headRad) * 18;
+      // Inner flame
+      g.circle(backX, backY, 5).fill({ color: 0x66aaff, alpha: 0.9 });
+      g.circle(backX - Math.sin(headRad) * 8, backY + Math.cos(headRad) * 8, 4)
+        .fill({ color: 0x4488ff, alpha: 0.6 });
+      g.circle(backX - Math.sin(headRad) * 14, backY + Math.cos(headRad) * 14, 2)
+        .fill({ color: 0x2266ff, alpha: 0.3 });
+    }
 
-    // Map button (top center-right)
-    g.rect(rightX - buttonSize - 10, padding, buttonSize, buttonSize)
-      .fill({ color: 0x6600ff, alpha: 0.4 })
-      .stroke({ color: 0x6600ff, width: 2, alpha: 0.8 });
+    // ── Velocity vector ───────────────────────────────────────────────────
+    const speed = Math.hypot(data.playerVelocity.x, data.playerVelocity.y);
+    if (speed > 500) {
+      const velScale = Math.min(60, speed / 800) * kmToPx;
+      const velDirX = data.playerVelocity.x / speed;
+      const velDirY = data.playerVelocity.y / speed;
+      const tipX = cx + velDirX * velScale;
+      const tipY = cy + velDirY * velScale;
+      g.moveTo(cx, cy).lineTo(tipX, tipY).stroke({ color: 0x00ffaa, width: 1, alpha: 0.5 });
+      // Arrowhead
+      const perpX = -velDirY;
+      const perpY = velDirX;
+      g.moveTo(tipX, tipY)
+        .lineTo(tipX - velDirX * 5 + perpX * 4, tipY - velDirY * 5 + perpY * 4)
+        .lineTo(tipX - velDirX * 5 - perpX * 4, tipY - velDirY * 5 - perpY * 4)
+        .lineTo(tipX, tipY)
+        .fill({ color: 0x00ffaa, alpha: 0.5 });
+    }
+
+    // ── Laser flash FX ────────────────────────────────────────────────────
+    if (data.laserFlash) {
+      const tp = w2s(data.laserFlash.targetX, data.laserFlash.targetY);
+      const alpha = data.laserFlash.alpha;
+      g.moveTo(cx, cy).lineTo(tp.x, tp.y).stroke({ color: 0x00ffff, width: 2, alpha });
+      g.circle(tp.x, tp.y, 6).fill({ color: 0xffffff, alpha: alpha * 0.8 });
+    }
+
+    // ── Player ship at view centre ────────────────────────────────────────
+    this.drawDeltaWing(g, cx, cy, data.playerHeading);
+
+    // ── HUD: system name banner + approach prompt ─────────────────────────
+    this.solarSystemNameText.text = data.currentSystemName.toUpperCase();
+
+    if (data.nearbyLocations.length > 0) {
+      const id = data.nearbyLocations[0]!;
+      const loc = data.locations.find((l) => l.id === id);
+      this.solarApproachText.text = `[ENTER] DOCK — ${loc?.name ?? "STATION"}`;
+      this.solarApproachText.style.fill = 0x66ff66;
+      this.solarApproachText.visible = true;
+    } else if (data.nearbyGateId) {
+      const gate = data.gates.find((g2) => g2.id === data.nearbyGateId);
+      this.solarApproachText.text = `[ENTER] JUMP — ${gate?.destinationSystemName ?? "GATE"}`;
+      this.solarApproachText.style.fill = 0xffff66;
+      this.solarApproachText.visible = true;
+    } else {
+      this.solarApproachText.visible = false;
+    }
+
+    // Galaxy map overlay (M)
+    if (data.mapOpen && data.galaxyMap) {
+      this.drawGalaxyMap(g, data.galaxyMap);
+    } else {
+      // Hide all galaxy-map labels when map is closed
+      for (const t of this.galaxySystemLabels) t.visible = false;
+    }
   }
 
   private drawNebulaBackground(g: Graphics): void {
@@ -2458,13 +2811,20 @@ export class GameRenderer {
     }
   }
 
-  private drawDeltaWing(g: Graphics, centerX: number, centerY: number, headingDegrees: number): void {
+  private drawDeltaWing(
+    g: Graphics,
+    centerX: number,
+    centerY: number,
+    headingDegrees: number,
+    hullColor = 0x00ffff,
+    scale = 1,
+  ): void {
     // Convert heading to radians for drawing
     const headingRad = (headingDegrees * Math.PI) / 180;
 
     // Ship dimensions
-    const len = 16; // nose-to-tail
-    const width = 10; // wing-to-wing
+    const len = 16 * scale; // nose-to-tail
+    const width = 10 * scale; // wing-to-wing
 
     // Calculate ship orientation vectors
     const forwardX = Math.sin(headingRad);
@@ -2493,14 +2853,14 @@ export class GameRenderer {
       y: centerY - forwardY * (len * 0.3),
     };
 
-    // Draw main hull (cyan)
+    // Draw main hull
     g.moveTo(nose.x, nose.y);
     g.lineTo(wingLeft.x, wingLeft.y);
     g.lineTo(tail.x, tail.y);
     g.lineTo(wingRight.x, wingRight.y);
     g.lineTo(nose.x, nose.y);
-    g.fill({ color: 0x00ffff, alpha: 0.9 });
-    g.stroke({ color: 0x00ff99, width: 2, alpha: 1 });
+    g.fill({ color: hullColor, alpha: 0.9 });
+    g.stroke({ color: hullColor === 0x00ffff ? 0x00ff99 : hullColor, width: 2 * scale, alpha: 1 });
 
     // Draw cockpit (brighter accent)
     const cockpitX = centerX + forwardX * (len * 0.4);
@@ -2513,23 +2873,78 @@ export class GameRenderer {
     g.circle(engineX, engineY, 2).fill({ color: 0xff6600, alpha: 0.8 });
   }
 
-  private drawGalaxyMap(g: Graphics): void {
-    // Semi-transparent overlay
-    g.rect(0, 0, this.width, this.height).fill({ color: 0x000000, alpha: 0.7 });
+  private drawGalaxyMap(g: Graphics, map: GalaxyMapData): void {
+    // Semi-transparent backdrop
+    g.rect(0, 0, this.width, this.height).fill({ color: 0x000018, alpha: 0.85 });
 
-    // Draw grid lines
-    const gridSize = 100;
-    const gridColor = 0x333333;
-    for (let x = 0; x < this.width; x += gridSize) {
-      g.moveTo(x, 0).lineTo(x, this.height).stroke({ color: gridColor, width: 1, alpha: 0.3 });
+    // Title
+    const titleY = 40;
+    g.rect(this.width / 2 - 200, titleY - 8, 400, 36)
+      .fill({ color: 0x001a4d, alpha: 0.6 })
+      .stroke({ color: 0x00ffff, width: 1, alpha: 0.6 });
+
+    // Compute centred bounding box of map.systems → screen coords
+    if (map.systems.length === 0) return;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const s of map.systems) {
+      if (s.x < minX) minX = s.x;
+      if (s.x > maxX) maxX = s.x;
+      if (s.y < minY) minY = s.y;
+      if (s.y > maxY) maxY = s.y;
     }
-    for (let y = 0; y < this.height; y += gridSize) {
-      g.moveTo(0, y).lineTo(this.width, y).stroke({ color: gridColor, width: 1, alpha: 0.3 });
+    const padX = 120;
+    const padY = 120;
+    const spanX = Math.max(1, maxX - minX);
+    const spanY = Math.max(1, maxY - minY);
+    const scale = Math.min(
+      (this.width - 2 * padX) / spanX,
+      (this.height - 2 * padY) / spanY,
+    );
+    const offsetX = padX + ((this.width - 2 * padX) - spanX * scale) / 2;
+    const offsetY = padY + ((this.height - 2 * padY) - spanY * scale) / 2;
+    const project = (x: number, y: number) => ({
+      x: offsetX + (x - minX) * scale,
+      y: offsetY + (y - minY) * scale,
+    });
+
+    // Edges (gate connections)
+    for (const e of map.edges) {
+      const a = map.systems.find((s) => s.id === e.fromSystemId);
+      const b = map.systems.find((s) => s.id === e.toSystemId);
+      if (!a || !b) continue;
+      const ap = project(a.x, a.y);
+      const bp = project(b.x, b.y);
+      const visited = a.visited && b.visited;
+      g.moveTo(ap.x, ap.y)
+        .lineTo(bp.x, bp.y)
+        .stroke({ color: visited ? 0x66ccff : 0x4a6680, width: 2, alpha: 0.85 });
     }
 
-    // Draw current system marker (in center)
-    g.circle(this.width / 2, this.height / 2, 10).fill({ color: 0x00ffff, alpha: 1 });
-    g.circle(this.width / 2, this.height / 2, 10).stroke({ color: 0x00ffff, width: 2, alpha: 1 });
+    // System nodes + labels
+    this.ensureTextPool(this.galaxySystemLabels, map.systems.length, 14);
+    for (let i = 0; i < map.systems.length; i++) {
+      const s = map.systems[i]!;
+      const label = this.galaxySystemLabels[i]!;
+      const p = project(s.x, s.y);
+      const isCurrent = s.id === map.currentSystemId;
+      const color = isCurrent ? 0x00ffff : s.visited ? 0xffcc66 : 0x9999aa;
+      const r = isCurrent ? 12 : 8;
+      g.circle(p.x, p.y, r + 3).stroke({ color, width: 2, alpha: isCurrent ? 1 : 0.7 });
+      g.circle(p.x, p.y, r).fill({ color, alpha: isCurrent ? 1 : 0.85 });
+      if (isCurrent) {
+        // Pulse halo
+        g.circle(p.x, p.y, r + 8).stroke({ color, width: 1, alpha: 0.5 });
+      }
+      label.text = s.name;
+      label.x = p.x;
+      label.y = p.y + r + 6;
+      label.anchor.set(0.5, 0);
+      label.style.fill = color;
+      label.visible = true;
+    }
+    for (let i = map.systems.length; i < this.galaxySystemLabels.length; i++) {
+      this.galaxySystemLabels[i]!.visible = false;
+    }
   }
 
   private drawPauseOverlay(): void {
@@ -2539,54 +2954,77 @@ export class GameRenderer {
     g.rect(0, 0, this.width, this.height).fill({ color: 0x000000, alpha: 0.5 });
 
     // Pause panel
-    const panelWidth = 300;
-    const panelHeight = 150;
+    const panelWidth = 320;
+    const panelHeight = 160;
     const panelX = this.width / 2 - panelWidth / 2;
     const panelY = this.height / 2 - panelHeight / 2;
 
     g.rect(panelX, panelY, panelWidth, panelHeight).fill({ color: 0x001a4d, alpha: 0.95 });
     g.rect(panelX, panelY, panelWidth, panelHeight).stroke({ color: 0x00ffff, width: 2, alpha: 1 });
 
-    // Text
     this.pauseTitle.text = "PAUSED";
-    this.pauseTitle.x = panelX + panelWidth / 2 - this.pauseTitle.width / 2;
+    this.pauseTitle.x = this.width / 2 - this.pauseTitle.width / 2;
     this.pauseTitle.y = panelY + 30;
 
     this.promptText.text = "Press [P] or [ESC] to Resume";
-    this.promptText.x = panelX + panelWidth / 2 - this.promptText.width / 2;
-    this.promptText.y = panelY + 100;
+    this.promptText.x = this.width / 2 - this.promptText.width / 2;
+    this.promptText.y = panelY + panelHeight - 40;
   }
 
-  private drawDockedMenu(_state: GameState): void {
+  private drawDockedMenu(data: SolarSystemRenderData | null): void {
     const g = this.solarSystemGfx;
+    g.clear();
 
-    // Draw semi-transparent overlay
-    g.rect(0, 0, this.width, this.height).fill({ color: 0x000000, alpha: 0.6 });
+    // Dim space backdrop
+    this.drawNebulaBackground(g);
+    g.rect(0, 0, this.width, this.height).fill({ color: 0x000010, alpha: 0.7 });
 
-    // Draw menu panel background
-    const panelWidth = 400;
-    const panelHeight = 250;
+    const docked = data?.docked;
+    const title = docked?.locationName ?? "DOCKED";
+    const items = docked?.menuItems ?? ["Undock"];
+    const sel = docked?.menuSelection ?? 0;
+
+    // Panel
+    const panelWidth = 480;
+    const panelHeight = 360;
     const panelX = this.width / 2 - panelWidth / 2;
     const panelY = this.height / 2 - panelHeight / 2;
 
-    g.rect(panelX, panelY, panelWidth, panelHeight).fill({ color: 0x001a4d, alpha: 0.9 });
+    g.rect(panelX, panelY, panelWidth, panelHeight).fill({ color: 0x001a4d, alpha: 0.95 });
     g.rect(panelX, panelY, panelWidth, panelHeight).stroke({ color: 0x00ffff, width: 2, alpha: 1 });
 
-    // Draw title using existing text field
-    this.titleText.text = "DOCKED AT STATION";
-    this.titleText.x = panelX + panelWidth / 2 - this.titleText.width / 2;
-    this.titleText.y = panelY + 30;
+    // Title bar
+    g.rect(panelX, panelY, panelWidth, 50).fill({ color: 0x00334d, alpha: 0.9 });
+    g.moveTo(panelX, panelY + 50)
+      .lineTo(panelX + panelWidth, panelY + 50)
+      .stroke({ color: 0x00ffff, width: 1, alpha: 0.7 });
 
-    // Draw menu options
-    this.subtitleText.text = "Station Options\n\n[ESC] Undock\n[M] View Map";
-    this.subtitleText.style.fontSize = 18;
-    this.subtitleText.x = panelX + 30;
-    this.subtitleText.y = panelY + 80;
+    this.dockedTitle.text = `◈  ${title.toUpperCase()}  ◈`;
+    this.dockedTitle.x = this.width / 2;
+    this.dockedTitle.y = panelY + 8;
 
-    // Draw prompt
-    this.promptText.text = "Ready to explore the system?";
-    this.promptText.x = panelX + panelWidth / 2 - this.promptText.width / 2;
-    this.promptText.y = panelY + panelHeight - 40;
+    // Menu items
+    this.ensureTextPool(this.dockedMenuLabels, items.length, 22);
+    const itemTopY = panelY + 80;
+    const itemSpacing = 38;
+    for (let i = 0; i < items.length; i++) {
+      const t = this.dockedMenuLabels[i]!;
+      const isSel = i === sel;
+      t.text = isSel ? `▶  ${items[i]}` : `   ${items[i]}`;
+      t.x = panelX + 50;
+      t.y = itemTopY + i * itemSpacing;
+      t.anchor.set(0, 0);
+      t.style.fill = isSel ? 0xffcc33 : 0xddeeff;
+      t.visible = true;
+    }
+    for (let i = items.length; i < this.dockedMenuLabels.length; i++) {
+      this.dockedMenuLabels[i]!.visible = false;
+    }
+
+    // Hint
+    this.dockedHint.text = "[↑/↓] navigate    [ENTER] select    [ESC] undock";
+    this.dockedHint.x = this.width / 2;
+    this.dockedHint.y = panelY + panelHeight - 20;
   }
 
   private drawShipyard(data: ShipyardRenderData): void {

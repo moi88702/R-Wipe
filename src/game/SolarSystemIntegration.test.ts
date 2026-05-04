@@ -32,7 +32,6 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { GameManager } from "./GameManager";
-import { InputHandler } from "../input/InputHandler";
 import type { Application } from "pixi.js";
 
 describe("Solar System Integration", () => {
@@ -137,18 +136,14 @@ describe("Solar System Integration", () => {
     });
 
     it("updateSolarSystem() processes W key (thrust forward)", () => {
-      const beforePos = manager["solarSystem"]?.getSessionState().playerPosition;
-
       manager["input"].simulateKeyDown("KeyW");
       manager.tick(16);
       manager["input"].simulateKeyUp("KeyW");
       manager["input"].endFrame();
 
-      const afterPos = manager["solarSystem"]?.getSessionState().playerPosition;
-
       // Position may not change significantly in 16ms, but velocity should
-      const beforeVel = manager["solarSystem"]?.getSessionState().playerVelocity;
-      expect(beforeVel).toBeDefined();
+      const vel = manager["solarSystem"]?.getSessionState().playerVelocity;
+      expect(vel).toBeDefined();
     });
 
     it("buildSolarSystemExtras() provides complete rendering data", () => {
@@ -213,7 +208,6 @@ describe("Solar System Integration", () => {
     });
 
     it("Arrow keys provide strafe input", () => {
-      const inputLeft = manager["input"].poll();
       manager["input"].simulateKeyDown("ArrowLeft");
       const withLeft = manager["input"].poll();
       expect(withLeft.strafeLeft).toBe(true);

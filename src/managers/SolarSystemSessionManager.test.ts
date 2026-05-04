@@ -199,7 +199,7 @@ describe("SolarSystemSessionManager", () => {
 
       const velocity = manager.getSessionState().playerVelocity;
       const speed = Math.hypot(velocity.x, velocity.y);
-      expect(speed).toBeLessThanOrEqual(500); // maxSpeedMs from config
+      expect(speed).toBeLessThanOrEqual(30000); // maxSpeedMs from config
     });
   });
 
@@ -321,11 +321,11 @@ describe("SolarSystemSessionManager", () => {
 
   describe("Zoom control", () => {
     it("setZoomLevel() clamps to valid range", () => {
-      manager.setZoomLevel(0.1); // Below min 0.5
-      expect(manager.getSessionState().zoomLevel).toBe(0.5);
+      manager.setZoomLevel(0.001); // Below min 0.02
+      expect(manager.getSessionState().zoomLevel).toBe(0.02);
 
-      manager.setZoomLevel(5.0); // Above max 3.0
-      expect(manager.getSessionState().zoomLevel).toBe(3.0);
+      manager.setZoomLevel(100); // Above max 20.0
+      expect(manager.getSessionState().zoomLevel).toBe(20.0);
 
       manager.setZoomLevel(1.5); // Within range
       expect(manager.getSessionState().zoomLevel).toBe(1.5);
