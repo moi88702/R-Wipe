@@ -18,7 +18,6 @@ import type {
 import type { CapitalShipState, CapitalShipBlueprint } from "../types/capital-ship";
 import type { TargetingState } from "../systems/combat/types";
 import { ShipControlManager, type ShipControlConfig } from "../game/solarsystem/ShipControlManager";
-import { GravitySystem } from "../game/solarsystem/GravitySystem";
 import type { InputState } from "../types/index";
 
 export const DEFAULT_SHIP_CONTROL_CONFIG: ShipControlConfig = {
@@ -162,16 +161,6 @@ export class SolarSystemSessionManager {
     this.sessionState.playerVelocity = shipResult.velocity;
     this.sessionState.playerHeading = (shipResult.headingRadians * 180) / Math.PI;
     this._lastThrustActive = shipResult.isThrustActive;
-
-    // Apply gravity acceleration
-    const gravityResult = GravitySystem.applyGravity(
-      this.sessionState.playerPosition,
-      this.sessionState.playerVelocity,
-      primaryBody,
-      deltaMs,
-    );
-
-    this.sessionState.playerVelocity = gravityResult;
 
     // Sync ship state with session state (visual consistency)
     this.shipState.position = this.sessionState.playerPosition;

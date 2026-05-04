@@ -236,11 +236,23 @@ export interface SolarSystemRenderData {
   readonly galaxyMap?: GalaxyMapData;
   readonly enemyShips: ReadonlyArray<{
     readonly id: string;
+    readonly typeIdx: number;
+    readonly color: number;
     readonly position: { x: number; y: number };
     readonly heading: number;
     readonly health: number;
     readonly maxHealth: number;
   }>;
+  readonly enemyProjectiles: ReadonlyArray<{
+    readonly id: string;
+    readonly position: { x: number; y: number };
+    readonly color: number;
+  }>;
+  readonly playerHealth: number;
+  readonly playerMaxHealth: number;
+  readonly playerShield: number;
+  readonly playerMaxShield: number;
+  readonly damageFlash: number;
   readonly enemyStations: ReadonlyArray<{
     readonly id: string;
     readonly name: string;
@@ -2691,6 +2703,8 @@ export class GameRenderer {
     }
 
     // ── Enemy ships ───────────────────────────────────────────────────────
+    // Scale enemy size with zoom so they shrink when zoomed out.
+    const enemyScale = Math.max(0.3, Math.min(1.5, 0.6 * kmToPx));
     this.ensureTextPool(this.solarEnemyLabels, data.enemyShips.length, 10);
     for (let i = 0; i < data.enemyShips.length; i++) {
       const ship = data.enemyShips[i]!;
@@ -2702,17 +2716,25 @@ export class GameRenderer {
         continue;
       }
 
-      // Draw enemy as small red triangle
-      this.drawDeltaWing(g, p.x, p.y, ship.heading, 0xff3333, 10);
-      // Health bar
-      const barW = 24;
+      this.drawDeltaWing(g, p.x, p.y, ship.heading, ship.color, enemyScale);
+      // Health bar (scales slightly with enemy size)
+      const barW = Math.max(16, 24 * enemyScale);
       const ratio = ship.health / ship.maxHealth;
-      g.rect(p.x - barW / 2, p.y + 13, barW, 3).fill({ color: 0x333333, alpha: 0.7 });
-      g.rect(p.x - barW / 2, p.y + 13, barW * ratio, 3).fill({ color: 0xff3333, alpha: 0.9 });
-      label.visible = false; // no label for individual ships
+      const barY = p.y + Math.max(9, 13 * enemyScale);
+      g.rect(p.x - barW / 2, barY, barW, 3).fill({ color: 0x333333, alpha: 0.7 });
+      g.rect(p.x - barW / 2, barY, barW * ratio, 3).fill({ color: ship.color, alpha: 0.9 });
+      label.visible = false;
     }
     for (let i = data.enemyShips.length; i < this.solarEnemyLabels.length; i++) {
       this.solarEnemyLabels[i]!.visible = false;
+    }
+
+    // ── Enemy projectiles ─────────────────────────────────────────────────
+    for (const proj of data.enemyProjectiles) {
+      const p = w2s(proj.position.x, proj.position.y);
+      if (offscreen(p.x, p.y, 10)) continue;
+      g.circle(p.x, p.y, 3).fill({ color: proj.color, alpha: 0.9 });
+      g.circle(p.x, p.y, 5).fill({ color: proj.color, alpha: 0.3 });
     }
 
     // ── Thrust exhaust ────────────────────────────────────────────────────
@@ -2757,6 +2779,33 @@ export class GameRenderer {
 
     // ── Player ship at view centre ────────────────────────────────────────
     this.drawDeltaWing(g, cx, cy, data.playerHeading);
+
+    // ── Damage flash overlay ──────────────────────────────────────────────
+    if (data.damageFlash > 0) {
+      g.rect(0, 0, this.width, this.height)
+        .fill({ color: 0xff0000, alpha: data.damageFlash * 0.25 });
+    }
+
+    // ── HUD: player health + shield bars (bottom-left) ────────────────────
+    {
+      const hudX = 16;
+      const hudY = this.height - 56;
+      const barW = 160;
+      const barH = 12;
+
+      // Shield bar (blue)
+      const shieldRatio = data.playerMaxShield > 0 ? data.playerShield / data.playerMaxShield : 0;
+      g.rect(hudX, hudY, barW, barH).fill({ color: 0x111133, alpha: 0.75 });
+      g.rect(hudX, hudY, barW * shieldRatio, barH).fill({ color: 0x3399ff, alpha: 0.9 });
+      g.rect(hudX, hudY, barW, barH).stroke({ color: 0x3399ff, width: 1, alpha: 0.5 });
+
+      // Health bar (green / red)
+      const healthRatio = data.playerMaxHealth > 0 ? data.playerHealth / data.playerMaxHealth : 0;
+      const healthColor = healthRatio > 0.25 ? 0x44ff66 : 0xff3333;
+      g.rect(hudX, hudY + barH + 4, barW, barH).fill({ color: 0x113311, alpha: 0.75 });
+      g.rect(hudX, hudY + barH + 4, barW * healthRatio, barH).fill({ color: healthColor, alpha: 0.9 });
+      g.rect(hudX, hudY + barH + 4, barW, barH).stroke({ color: healthColor, width: 1, alpha: 0.5 });
+    }
 
     // ── HUD: system name banner + approach prompt ─────────────────────────
     this.solarSystemNameText.text = data.currentSystemName.toUpperCase();

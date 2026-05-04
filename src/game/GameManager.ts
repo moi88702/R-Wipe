@@ -56,12 +56,64 @@ interface SolarEnemyBase {
 interface SolarEnemyShip {
   id: string;
   baseId: string;
+  typeIdx: number;
   position: { x: number; y: number };
   velocity: { x: number; y: number };
   heading: number;
   health: number;
   maxHealth: number;
+  weapon0CooldownMs: number;
+  weapon1CooldownMs: number;
 }
+
+interface SolarEnemyProjectile {
+  id: string;
+  weaponIdx: number;
+  position: { x: number; y: number };
+  velocity: { x: number; y: number };
+  lifeMs: number;
+  damage: number;
+}
+
+const SOLAR_ENEMY_TYPES = [
+  { name: "Scout",       color: 0xff5555, health:  60, speed: 14000 },
+  { name: "Interceptor", color: 0xff8822, health:  80, speed: 16000 },
+  { name: "Fighter",     color: 0xff2266, health: 100, speed: 11000 },
+  { name: "Gunship",     color: 0xcc2222, health: 180, speed:  7000 },
+  { name: "Destroyer",   color: 0x990033, health: 250, speed:  5500 },
+  { name: "Predator",    color: 0xff9900, health:  90, speed: 15000 },
+  { name: "Wraith",      color: 0xcc44ff, health:  70, speed: 18000 },
+  { name: "Titan",       color: 0xff3300, health: 400, speed:  4000 },
+  { name: "Spectre",     color: 0xff44aa, health:  80, speed: 17000 },
+  { name: "Ravager",     color: 0xffaa00, health: 130, speed: 10000 },
+] as const;
+
+const SOLAR_WEAPONS = [
+  { name: "X-Ray Laser",       damage: 12, range: 80,  cooldownMs: 1400, speed: 80000, color: 0x88ffff },
+  { name: "Hyper Laser",       damage: 22, range: 100, cooldownMs: 2000, speed: 90000, color: 0xffff44 },
+  { name: "Plasma Bolt",       damage: 18, range: 70,  cooldownMs: 2200, speed: 25000, color: 0xff8800 },
+  { name: "Nuclear Missile",   damage: 55, range: 150, cooldownMs: 8000, speed: 12000, color: 0xff4400 },
+  { name: "Antimatter Missile",damage: 75, range: 200, cooldownMs:10000, speed: 18000, color: 0xff00ff },
+  { name: "Ion Cannon",        damage: 16, range: 85,  cooldownMs: 1800, speed: 70000, color: 0x4488ff },
+  { name: "Photon Torpedo",    damage: 38, range: 120, cooldownMs: 5000, speed: 20000, color: 0xaaffff },
+  { name: "Graviton Beam",     damage: 10, range: 60,  cooldownMs: 1500, speed: 60000, color: 0xaa44ff },
+  { name: "Quantum Disruptor", damage: 30, range: 55,  cooldownMs: 2800, speed: 50000, color: 0x00ffaa },
+  { name: "Neutron Burst",     damage: 45, range: 90,  cooldownMs: 5500, speed: 40000, color: 0xffff88 },
+] as const;
+
+// Which two weapons each enemy type carries (indices into SOLAR_WEAPONS).
+const ENEMY_WEAPON_LOADOUT: ReadonlyArray<readonly [number, number]> = [
+  [0, 2], // Scout:       X-Ray Laser + Plasma Bolt
+  [1, 5], // Interceptor: Hyper Laser + Ion Cannon
+  [2, 6], // Fighter:     Plasma Bolt + Photon Torpedo
+  [3, 5], // Gunship:     Nuclear Missile + Ion Cannon
+  [1, 3], // Destroyer:   Hyper Laser + Nuclear Missile
+  [0, 4], // Predator:    X-Ray Laser + Antimatter Missile
+  [8, 1], // Wraith:      Quantum Disruptor + Hyper Laser
+  [9, 4], // Titan:       Neutron Burst + Antimatter Missile
+  [7, 6], // Spectre:     Graviton Beam + Photon Torpedo
+  [3, 8], // Ravager:     Nuclear Missile + Quantum Disruptor
+];
 
 /** Menu item ids used by updateMenu / updatePause. */
 type MainMenuItem = "play" | "campaign" | "solar-system" | "shipyard" | "stats";
@@ -108,7 +160,15 @@ export class GameManager {
   /** Solar-system enemy tracking. */
   private solarEnemyBases: SolarEnemyBase[] = [];
   private solarEnemyShips: SolarEnemyShip[] = [];
+  private solarEnemyProjectiles: SolarEnemyProjectile[] = [];
   private solarEnemyNextId = 0;
+  /** Player health in solar system mode (separate from arcade health). */
+  private solarPlayerHealth = 100;
+  private readonly solarPlayerMaxHealth = 100;
+  private solarPlayerShield = 50;
+  private readonly solarPlayerMaxShield = 50;
+  /** Flash overlay when player takes damage (counts down ms). */
+  private solarDamageFlashMs = 0;
   /** Fire edge tracking for solar-system shooting. */
   private prevSolarFirePressed = false;
   /** Laser flash FX (counts down from 200ms to 0). */
@@ -942,15 +1002,19 @@ export class GameManager {
         alertLevel: "dormant",
         alertRadiusKm: 180,
         lastSpawnMs: 0,
-        spawnIntervalMs: 6000,
-        maxShips: 5,
+        spawnIntervalMs: 5000,
+        maxShips: 6,
       },
     ];
     this.solarEnemyShips = [];
+    this.solarEnemyProjectiles = [];
     this.solarEnemyNextId = 0;
     this.prevSolarFirePressed = false;
     this.laserFlashMs = 0;
     this.laserFlashTarget = null;
+    this.solarPlayerHealth = this.solarPlayerMaxHealth;
+    this.solarPlayerShield = this.solarPlayerMaxShield;
+    this.solarDamageFlashMs = 0;
   }
 
   /**
@@ -978,21 +1042,21 @@ export class GameManager {
       celestialBodies: [
         {
           id: "star-sol", name: "Sol", type: "star",
-          position: { x: 0, y: 0 }, radius: 696, mass: 1.989e30, gravityStrength: 274,
+          position: { x: 0, y: 0 }, radius: 696, mass: 1.989e30, gravityStrength: 0,
           color: { r: 255, g: 200, b: 0 },
           orbital: this.staticOrbit(),
           isPrimaryGravitySource: true,
         },
         {
           id: "planet-earth", name: "Earth", type: "planet",
-          position: { x: 150, y: 0 }, radius: 64, mass: 5.972e24, gravityStrength: 9.81,
+          position: { x: 150, y: 0 }, radius: 64, mass: 5.972e24, gravityStrength: 0,
           color: { r: 100, g: 150, b: 255 },
           orbital: this.staticOrbit("star-sol", 150),
           isPrimaryGravitySource: false,
         },
         {
           id: "planet-mars", name: "Mars", type: "planet",
-          position: { x: 228, y: 50 }, radius: 34, mass: 6.417e23, gravityStrength: 3.71,
+          position: { x: 228, y: 50 }, radius: 34, mass: 6.417e23, gravityStrength: 0,
           color: { r: 200, g: 100, b: 80 },
           orbital: this.staticOrbit("star-sol", 228),
           isPrimaryGravitySource: false,
@@ -1023,14 +1087,14 @@ export class GameManager {
       celestialBodies: [
         {
           id: "star-kepler-442", name: "Kepler-442", type: "star",
-          position: { x: 0, y: 0 }, radius: 600, mass: 1.4e30, gravityStrength: 240,
+          position: { x: 0, y: 0 }, radius: 600, mass: 1.4e30, gravityStrength: 0,
           color: { r: 255, g: 180, b: 90 },
           orbital: this.staticOrbit(),
           isPrimaryGravitySource: true,
         },
         {
           id: "planet-kepler-442b", name: "Kepler-442b", type: "planet",
-          position: { x: 200, y: -40 }, radius: 80, mass: 8.4e24, gravityStrength: 11.2,
+          position: { x: 200, y: -40 }, radius: 80, mass: 8.4e24, gravityStrength: 0,
           color: { r: 120, g: 200, b: 130 },
           orbital: this.staticOrbit("star-kepler-442", 204),
           isPrimaryGravitySource: false,
@@ -1056,14 +1120,14 @@ export class GameManager {
       celestialBodies: [
         {
           id: "star-proxima", name: "Proxima Centauri", type: "star",
-          position: { x: 0, y: 0 }, radius: 200, mass: 2.4e29, gravityStrength: 60,
+          position: { x: 0, y: 0 }, radius: 200, mass: 2.4e29, gravityStrength: 0,
           color: { r: 255, g: 100, b: 80 },
           orbital: this.staticOrbit(),
           isPrimaryGravitySource: true,
         },
         {
           id: "planet-proxima-b", name: "Proxima b", type: "planet",
-          position: { x: 90, y: 30 }, radius: 50, mass: 7.6e24, gravityStrength: 10.5,
+          position: { x: 90, y: 30 }, radius: 50, mass: 7.6e24, gravityStrength: 0,
           color: { r: 180, g: 90, b: 70 },
           orbital: this.staticOrbit("star-proxima", 95),
           isPrimaryGravitySource: false,
@@ -1089,7 +1153,7 @@ export class GameManager {
       celestialBodies: [
         {
           id: `${systemId}-primary`, name: systemId, type: "star",
-          position: { x: 0, y: 0 }, radius: 400, mass: 1e30, gravityStrength: 200,
+          position: { x: 0, y: 0 }, radius: 400, mass: 1e30, gravityStrength: 0,
           color: { r: 200, g: 200, b: 200 },
           orbital: this.staticOrbit(),
           isPrimaryGravitySource: true,
@@ -1244,76 +1308,155 @@ export class GameManager {
 
   private updateSolarEnemies(deltaMs: number, playerPos: { x: number; y: number }): void {
     const nowMs = Date.now();
+    const dtS = deltaMs / 1000;
 
+    // ── Bases: alert escalation + spawning ────────────────────────────────
     for (const base of this.solarEnemyBases) {
       if (base.health <= 0) continue;
 
-      // Update alert state based on player proximity.
-      const distToBase = Math.hypot(
-        playerPos.x - base.position.x,
-        playerPos.y - base.position.y,
-      );
+      const distToBase = Math.hypot(playerPos.x - base.position.x, playerPos.y - base.position.y);
       if (base.alertLevel === "dormant" && distToBase <= base.alertRadiusKm) {
-        base.alertLevel = "alerted";
+        base.alertLevel = "combat"; // skip "alerted" for snappier gameplay
       }
-      if (base.alertLevel === "alerted") {
-        base.alertLevel = "combat";
-      }
-
       if (base.alertLevel !== "combat") continue;
 
-      // Spawn new ships if below cap.
       const activeForBase = this.solarEnemyShips.filter((s) => s.baseId === base.id).length;
       const timeSinceSpawn = nowMs - base.lastSpawnMs;
       if (activeForBase < base.maxShips && timeSinceSpawn >= base.spawnIntervalMs) {
         const angle = Math.random() * Math.PI * 2;
-        const spawnRadius = 20; // spawn 20 km from base
+        const typeIdx = this.solarEnemyNextId % SOLAR_ENEMY_TYPES.length;
+        const typeDef = SOLAR_ENEMY_TYPES[typeIdx]!;
+        const loadout = ENEMY_WEAPON_LOADOUT[typeIdx]!;
         const newShip: SolarEnemyShip = {
           id: `enemy-${++this.solarEnemyNextId}`,
           baseId: base.id,
+          typeIdx,
           position: {
-            x: base.position.x + Math.cos(angle) * spawnRadius,
-            y: base.position.y + Math.sin(angle) * spawnRadius,
+            x: base.position.x + Math.cos(angle) * 20,
+            y: base.position.y + Math.sin(angle) * 20,
           },
           velocity: { x: 0, y: 0 },
           heading: 0,
-          health: 100,
-          maxHealth: 100,
+          health: typeDef.health,
+          maxHealth: typeDef.health,
+          weapon0CooldownMs: Math.random() * SOLAR_WEAPONS[loadout[0]]!.cooldownMs,
+          weapon1CooldownMs: Math.random() * SOLAR_WEAPONS[loadout[1]]!.cooldownMs,
         };
         this.solarEnemyShips.push(newShip);
         base.lastSpawnMs = nowMs;
       }
     }
 
-    // Move ships toward player (slow patrol speed).
-    const enemySpeedMs = 8000; // m/s top speed
-    const accelMs2 = 3000;    // m/s² thrust
-    const dtS = deltaMs / 1000;
-
+    // ── Ships: movement + firing ──────────────────────────────────────────
     for (const ship of this.solarEnemyShips) {
+      const typeDef = SOLAR_ENEMY_TYPES[ship.typeIdx]!;
+      const loadout = ENEMY_WEAPON_LOADOUT[ship.typeIdx]!;
+
       const dx = playerPos.x - ship.position.x;
       const dy = playerPos.y - ship.position.y;
       const dist = Math.hypot(dx, dy) || 1;
       const dirX = dx / dist;
       const dirY = dy / dist;
 
+      const accelMs2 = typeDef.speed * 0.4;
       ship.velocity.x += dirX * accelMs2 * dtS;
       ship.velocity.y += dirY * accelMs2 * dtS;
 
-      // Cap speed
       const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
-      if (speed > enemySpeedMs) {
-        ship.velocity.x = (ship.velocity.x / speed) * enemySpeedMs;
-        ship.velocity.y = (ship.velocity.y / speed) * enemySpeedMs;
+      if (speed > typeDef.speed) {
+        ship.velocity.x = (ship.velocity.x / speed) * typeDef.speed;
+        ship.velocity.y = (ship.velocity.y / speed) * typeDef.speed;
       }
 
-      // Integrate position (km)
       ship.position.x += (ship.velocity.x * dtS) / 1000;
       ship.position.y += (ship.velocity.y * dtS) / 1000;
-
-      // Update heading to face player
       ship.heading = (Math.atan2(dirX, -dirY) * 180) / Math.PI;
+
+      // Weapon 0 fire
+      ship.weapon0CooldownMs = Math.max(0, ship.weapon0CooldownMs - deltaMs);
+      if (ship.weapon0CooldownMs === 0) {
+        const wDef = SOLAR_WEAPONS[loadout[0]]!;
+        if (dist <= wDef.range) {
+          this.fireEnemyWeapon(ship, loadout[0], playerPos, dist);
+          ship.weapon0CooldownMs = wDef.cooldownMs;
+        }
+      }
+
+      // Weapon 1 fire
+      ship.weapon1CooldownMs = Math.max(0, ship.weapon1CooldownMs - deltaMs);
+      if (ship.weapon1CooldownMs === 0) {
+        const wDef = SOLAR_WEAPONS[loadout[1]]!;
+        if (dist <= wDef.range) {
+          this.fireEnemyWeapon(ship, loadout[1], playerPos, dist);
+          ship.weapon1CooldownMs = wDef.cooldownMs;
+        }
+      }
     }
+
+    // ── Projectiles: movement + player collision ──────────────────────────
+    const hitRadius = 5; // km — proximity hit
+    this.solarDamageFlashMs = Math.max(0, this.solarDamageFlashMs - deltaMs);
+
+    this.solarEnemyProjectiles = this.solarEnemyProjectiles.filter((p) => {
+      p.lifeMs -= deltaMs;
+      if (p.lifeMs <= 0) return false;
+
+      p.position.x += (p.velocity.x * dtS) / 1000;
+      p.position.y += (p.velocity.y * dtS) / 1000;
+
+      const dpx = p.position.x - playerPos.x;
+      const dpy = p.position.y - playerPos.y;
+      if (dpx * dpx + dpy * dpy <= hitRadius * hitRadius) {
+        // Hit player — shield absorbs first
+        let dmg = p.damage;
+        if (this.solarPlayerShield > 0) {
+          const absorbed = Math.min(this.solarPlayerShield, dmg);
+          this.solarPlayerShield -= absorbed;
+          dmg -= absorbed;
+        }
+        this.solarPlayerHealth = Math.max(0, this.solarPlayerHealth - dmg);
+        this.solarDamageFlashMs = 300;
+        if (this.solarPlayerHealth <= 0) {
+          // Respawn — reset health and position
+          this.solarPlayerHealth = this.solarPlayerMaxHealth;
+          this.solarPlayerShield = this.solarPlayerMaxShield;
+          if (this.solarSystem) {
+            const ss = this.solarSystem.getSessionState();
+            ss.playerPosition = { x: 110, y: 0 };
+            ss.playerVelocity = { x: 0, y: 0 };
+          }
+        }
+        return false;
+      }
+      return true;
+    });
+  }
+
+  private fireEnemyWeapon(
+    ship: SolarEnemyShip,
+    weaponIdx: number,
+    playerPos: { x: number; y: number },
+    dist: number,
+  ): void {
+    const wDef = SOLAR_WEAPONS[weaponIdx]!;
+    const dx = playerPos.x - ship.position.x;
+    const dy = playerPos.y - ship.position.y;
+    const dn = dist || 1;
+    // Slight inaccuracy for gameplay feel (±5° spread)
+    const spread = (Math.random() - 0.5) * 0.175;
+    const cosS = Math.cos(spread);
+    const sinS = Math.sin(spread);
+    const dirX = (dx / dn) * cosS - (dy / dn) * sinS;
+    const dirY = (dx / dn) * sinS + (dy / dn) * cosS;
+
+    this.solarEnemyProjectiles.push({
+      id: `proj-${++this.solarEnemyNextId}`,
+      weaponIdx,
+      position: { x: ship.position.x, y: ship.position.y },
+      velocity: { x: dirX * wDef.speed, y: dirY * wDef.speed },
+      lifeMs: (wDef.range / wDef.speed) * 1_000_000, // life = range / speed (km/(m/s) * 1000 * 1000)
+      damage: wDef.damage,
+    });
   }
 
   private attemptGateJump(sourceGate: SystemGate): void {
@@ -2158,10 +2301,19 @@ export class GameManager {
     const enemyShips = this.currentSystemId === "sol"
       ? this.solarEnemyShips.map((s) => ({
           id: s.id,
+          typeIdx: s.typeIdx,
+          color: SOLAR_ENEMY_TYPES[s.typeIdx]?.color ?? 0xff3333,
           position: s.position,
           heading: s.heading,
           health: s.health,
           maxHealth: s.maxHealth,
+        }))
+      : [];
+    const enemyProjectiles = this.currentSystemId === "sol"
+      ? this.solarEnemyProjectiles.map((p) => ({
+          id: p.id,
+          position: p.position,
+          color: SOLAR_WEAPONS[p.weaponIdx]?.color ?? 0xff4444,
         }))
       : [];
     const enemyStations = this.currentSystemId === "sol"
@@ -2197,7 +2349,13 @@ export class GameManager {
       mapOpen: this.mapOpen,
       galaxyMap,
       enemyShips,
+      enemyProjectiles,
       enemyStations,
+      playerHealth: this.solarPlayerHealth,
+      playerMaxHealth: this.solarPlayerMaxHealth,
+      playerShield: this.solarPlayerShield,
+      playerMaxShield: this.solarPlayerMaxShield,
+      damageFlash: this.solarDamageFlashMs > 0 ? this.solarDamageFlashMs / 300 : 0,
       ...(laserFlash ? { laserFlash } : {}),
       ...(dockedSection ? { docked: dockedSection } : {}),
     };
