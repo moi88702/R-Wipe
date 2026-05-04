@@ -90,7 +90,22 @@
         top: 10px;
         right: 10px;
       }
-      /* Rotation hint shown only when a phone is held in portrait. */
+      /* Portrait-rotated mode: the container is sized landscape and CSS-rotated
+         +90° CW so the 1280×720 game fills the portrait screen. Only active for
+         menus and solar-system; arcade gameplay shows the rotate hint instead. */
+      #game-container.portrait-rotated {
+        /* Swap width/height so it's landscape-sized before rotation */
+        width: 100dvh !important;
+        height: 100vw !important;
+        /* Center then rotate */
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%) rotate(90deg);
+        transform-origin: 50% 50%;
+      }
+
+      /* Rotate hint: shown only when playing arcade mode in portrait. */
       #rotate-hint {
         display: none;
         position: fixed;
@@ -104,18 +119,22 @@
         justify-content: center;
         z-index: 100;
         padding: 24px;
+        flex-direction: column;
+        gap: 16px;
       }
-      @media (orientation: portrait) and (max-width: 900px) {
-        #rotate-hint {
-          display: flex;
-        }
+      body.show-rotate-hint #rotate-hint {
+        display: flex;
       }
     </style>
   </head>
   <body>
     <div id="game-container"></div>
     <button id="fullscreen-btn" type="button" aria-label="Toggle fullscreen">⛶</button>
-    <div id="rotate-hint">Rotate your device to landscape to play</div>
+    <div id="rotate-hint">
+      <div style="font-size:48px">↻</div>
+      <div>Rotate to landscape to play the arcade mode</div>
+      <div style="font-size:13px;opacity:0.6">Solar system &amp; menus work in portrait</div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

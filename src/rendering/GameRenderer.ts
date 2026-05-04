@@ -266,11 +266,20 @@ export interface SolarSystemRenderData {
     readonly targetY: number;
     readonly alpha: number;
   };
+  /** Solar-system pause menu selection (0=Resume, 1=Quit). */
+  readonly pauseMenuSelection?: number;
   /** Populated when screen === "docked"; drives drawDockedMenu. */
   readonly docked?: {
     readonly locationName: string;
     readonly menuItems: ReadonlyArray<string>;
     readonly menuSelection: number;
+  };
+  /** Virtual on-screen controls for touch play in solar system. */
+  readonly virtualControls?: {
+    readonly thrustActive: boolean;
+    readonly leftActive: boolean;
+    readonly rightActive: boolean;
+    readonly fireActive: boolean;
   };
 }
 
@@ -1126,7 +1135,7 @@ export class GameRenderer {
       this.drawSolarSystem(extras.solarSystem);
       // Draw pause overlay if paused
       if (screen === "solar-system-paused") {
-        this.drawPauseOverlay();
+        this.drawPauseOverlay(extras.solarSystem?.pauseMenuSelection ?? 0);
       }
       return;
     }
@@ -2832,6 +2841,67 @@ export class GameRenderer {
       // Hide all galaxy-map labels when map is closed
       for (const t of this.galaxySystemLabels) t.visible = false;
     }
+
+    // ── Virtual touch controls (always visible) ───────────────────────────
+    if (!data.mapOpen) {
+      this.drawSolarVirtualControls(g, data.virtualControls);
+    }
+  }
+
+  private drawSolarVirtualControls(
+    g: Graphics,
+    vc?: { thrustActive: boolean; leftActive: boolean; rightActive: boolean; fireActive: boolean },
+  ): void {
+    const alpha = 0.55;
+    const activeAlpha = 0.9;
+    const btnBorder = 0x336688;
+    const activeBorder = 0x00ffff;
+
+    const drawBtn = (
+      x: number, y: number, w: number, h: number,
+      label: string, active: boolean,
+    ): void => {
+      g.roundRect(x, y, w, h, 10)
+        .fill({ color: active ? 0x003355 : 0x000e1a, alpha: active ? activeAlpha : alpha })
+        .stroke({ color: active ? activeBorder : btnBorder, width: active ? 2 : 1 });
+      // Label drawn via solarSystemGfx — we'll use a small rect + text trick:
+      // Since we can't add Text nodes dynamically here, draw an inner indicator shape
+      if (label === "▲") {
+        g.moveTo(x + w / 2, y + h * 0.22)
+          .lineTo(x + w * 0.72, y + h * 0.72)
+          .lineTo(x + w * 0.28, y + h * 0.72)
+          .lineTo(x + w / 2, y + h * 0.22)
+          .fill({ color: active ? 0x00ffff : 0x4499aa, alpha: active ? 1 : 0.7 });
+      } else if (label === "◄") {
+        g.moveTo(x + w * 0.72, y + h * 0.28)
+          .lineTo(x + w * 0.28, y + h / 2)
+          .lineTo(x + w * 0.72, y + h * 0.72)
+          .lineTo(x + w * 0.72, y + h * 0.28)
+          .fill({ color: active ? 0x00ffff : 0x4499aa, alpha: active ? 1 : 0.7 });
+      } else if (label === "►") {
+        g.moveTo(x + w * 0.28, y + h * 0.28)
+          .lineTo(x + w * 0.72, y + h / 2)
+          .lineTo(x + w * 0.28, y + h * 0.72)
+          .lineTo(x + w * 0.28, y + h * 0.28)
+          .fill({ color: active ? 0x00ffff : 0x4499aa, alpha: active ? 1 : 0.7 });
+      } else {
+        // "FIRE" — crosshair
+        const cx2 = x + w / 2, cy2 = y + h / 2, r = Math.min(w, h) * 0.28;
+        g.circle(cx2, cy2, r).stroke({ color: active ? 0xff4400 : 0x884422, width: active ? 3 : 2 });
+        g.moveTo(cx2 - r * 1.4, cy2).lineTo(cx2 + r * 1.4, cy2)
+          .stroke({ color: active ? 0xff4400 : 0x884422, width: active ? 2 : 1 });
+        g.moveTo(cx2, cy2 - r * 1.4).lineTo(cx2, cy2 + r * 1.4)
+          .stroke({ color: active ? 0xff4400 : 0x884422, width: active ? 2 : 1 });
+      }
+    };
+
+    // D-pad (bottom-left)
+    drawBtn(10,  590, 100, 100, "◄", vc?.leftActive ?? false);   // Turn left
+    drawBtn(120, 530, 100, 100, "▲", vc?.thrustActive ?? false); // Thrust
+    drawBtn(230, 590, 100, 100, "►", vc?.rightActive ?? false);  // Turn right
+
+    // Fire (bottom-right)
+    drawBtn(1150, 555, 120, 150, "●", vc?.fireActive ?? false);
   }
 
   private drawNebulaBackground(g: Graphics): void {
@@ -2996,15 +3066,15 @@ export class GameRenderer {
     }
   }
 
-  private drawPauseOverlay(): void {
+  private drawPauseOverlay(solarPauseSelection = 0): void {
     const g = this.solarSystemGfx;
 
     // Semi-transparent dark overlay
     g.rect(0, 0, this.width, this.height).fill({ color: 0x000000, alpha: 0.5 });
 
-    // Pause panel
-    const panelWidth = 320;
-    const panelHeight = 160;
+    // Pause panel — taller to fit two buttons
+    const panelWidth = 360;
+    const panelHeight = 230;
     const panelX = this.width / 2 - panelWidth / 2;
     const panelY = this.height / 2 - panelHeight / 2;
 
@@ -3012,12 +3082,38 @@ export class GameRenderer {
     g.rect(panelX, panelY, panelWidth, panelHeight).stroke({ color: 0x00ffff, width: 2, alpha: 1 });
 
     this.pauseTitle.text = "PAUSED";
-    this.pauseTitle.x = this.width / 2 - this.pauseTitle.width / 2;
-    this.pauseTitle.y = panelY + 30;
+    this.pauseTitle.x = this.width / 2;
+    this.pauseTitle.y = panelY + 22;
 
-    this.promptText.text = "Press [P] or [ESC] to Resume";
-    this.promptText.x = this.width / 2 - this.promptText.width / 2;
-    this.promptText.y = panelY + panelHeight - 40;
+    // Two touch-friendly buttons
+    const btnW = 280;
+    const btnH = 52;
+    const btnX = this.width / 2 - btnW / 2;
+    const btn0Y = panelY + 90;
+    const btn1Y = panelY + 158;
+    const sel0 = solarPauseSelection === 0;
+    const sel1 = solarPauseSelection === 1;
+
+    g.roundRect(btnX, btn0Y, btnW, btnH, 8)
+      .fill({ color: sel0 ? 0x003366 : 0x001a33, alpha: 0.9 })
+      .stroke({ color: sel0 ? COLOR.hudAmber : 0x334455, width: sel0 ? 2 : 1 });
+    g.roundRect(btnX, btn1Y, btnW, btnH, 8)
+      .fill({ color: sel1 ? 0x330011 : 0x1a0011, alpha: 0.9 })
+      .stroke({ color: sel1 ? COLOR.hudAmber : 0x334455, width: sel1 ? 2 : 1 });
+
+    this.promptText.text = sel0 ? "▶  RESUME  ◀" : "   RESUME";
+    this.promptText.style.fill = sel0 ? COLOR.hudAmber : COLOR.hudWhite;
+    this.promptText.x = this.width / 2;
+    this.promptText.y = btn0Y + btnH / 2;
+    this.promptText.anchor.set(0.5, 0.5);
+
+    // Reuse dockedHint text for the quit button
+    this.dockedHint.text = sel1 ? "▶  QUIT TO MENU  ◀" : "   QUIT TO MENU";
+    this.dockedHint.style.fill = sel1 ? COLOR.hudAmber : 0xddaaaa;
+    this.dockedHint.x = this.width / 2;
+    this.dockedHint.y = btn1Y + btnH / 2;
+    this.dockedHint.anchor.set(0.5, 0.5);
+    this.dockedHint.visible = true;
   }
 
   private drawDockedMenu(data: SolarSystemRenderData | null): void {
@@ -3052,16 +3148,21 @@ export class GameRenderer {
     this.dockedTitle.x = this.width / 2;
     this.dockedTitle.y = panelY + 8;
 
-    // Menu items
+    // Menu items with button backgrounds
     this.ensureTextPool(this.dockedMenuLabels, items.length, 22);
     const itemTopY = panelY + 80;
-    const itemSpacing = 38;
+    const itemSpacing = 44;
+    const btnW2 = panelWidth - 40;
     for (let i = 0; i < items.length; i++) {
       const t = this.dockedMenuLabels[i]!;
       const isSel = i === sel;
+      const btnY = itemTopY + i * itemSpacing;
+      g.roundRect(panelX + 20, btnY - 4, btnW2, 36, 6)
+        .fill({ color: isSel ? 0x003366 : 0x001122, alpha: 0.85 })
+        .stroke({ color: isSel ? 0xffcc33 : 0x334455, width: isSel ? 2 : 1 });
       t.text = isSel ? `▶  ${items[i]}` : `   ${items[i]}`;
       t.x = panelX + 50;
-      t.y = itemTopY + i * itemSpacing;
+      t.y = btnY;
       t.anchor.set(0, 0);
       t.style.fill = isSel ? 0xffcc33 : 0xddeeff;
       t.visible = true;
@@ -3071,7 +3172,7 @@ export class GameRenderer {
     }
 
     // Hint
-    this.dockedHint.text = "[↑/↓] navigate    [ENTER] select    [ESC] undock";
+    this.dockedHint.text = "Tap an option  •  [ESC] undock";
     this.dockedHint.x = this.width / 2;
     this.dockedHint.y = panelY + panelHeight - 20;
   }
@@ -3403,6 +3504,21 @@ export class GameRenderer {
     startY: number,
     rowSpacing: number,
   ): void {
+    // Draw button backgrounds for touch targeting before text (text is in menuLayer,
+    // so draw buttons on pauseOverlay graphics which sits behind menuItemTexts).
+    const g = this.pauseOverlay;
+    const btnW = 440;
+    const btnH = Math.max(36, rowSpacing - 6);
+    for (let i = 0; i < items.length; i++) {
+      const cy = startY + i * rowSpacing;
+      const bx = this.width / 2 - btnW / 2;
+      const by = cy - btnH / 2;
+      const selected = i === selectedIdx;
+      g.roundRect(bx, by, btnW, btnH, 8)
+        .fill({ color: selected ? 0x003366 : 0x001a33, alpha: 0.85 })
+        .stroke({ color: selected ? COLOR.hudAmber : 0x334455, width: selected ? 2 : 1, alpha: 0.9 });
+    }
+
     for (let i = 0; i < this.menuItemTexts.length; i++) {
       const t = this.menuItemTexts[i]!;
       if (i >= items.length) {
@@ -3413,7 +3529,7 @@ export class GameRenderer {
       t.visible = true;
       const label = items[i]!;
       const selected = i === selectedIdx;
-      t.text = selected ? `> ${label} <` : label;
+      t.text = selected ? `▶  ${label}  ◀` : label;
       t.style.fill = selected ? COLOR.hudAmber : COLOR.hudWhite;
       t.y = startY + i * rowSpacing;
     }

@@ -75,9 +75,37 @@ async function init(): Promise<void> {
   // Mouse pointer for menu screens (shipyard, starmap).
   game.enablePointerControls(app.canvas);
 
+  // ── Orientation management ───────────────────────────────────────────────
+  // Arcade gameplay requires landscape. Menus + solar system support portrait
+  // by CSS-rotating the game container +90° CW.
+  const gameContainer = document.getElementById("game-container");
+  const rotateHintEl = document.getElementById("rotate-hint");
+  const ARCADE_SCREENS = new Set(["gameplay", "pause"]);
+
+  function updateOrientationState(): void {
+    const isPortrait = window.innerWidth < window.innerHeight;
+    const screen = game.getCurrentScreen();
+    const isArcade = ARCADE_SCREENS.has(screen);
+
+    const showRotateHint = isPortrait && isArcade;
+    const usePortraitRotation = isPortrait && !isArcade;
+
+    document.body.classList.toggle("show-rotate-hint", showRotateHint);
+    gameContainer?.classList.toggle("portrait-rotated", usePortraitRotation);
+    game.setPortraitMode(usePortraitRotation);
+
+    // Keep the hint element itself accessible (don't compete with CSS class)
+    if (rotateHintEl) rotateHintEl.style.pointerEvents = showRotateHint ? "auto" : "none";
+  }
+
+  window.addEventListener("resize", updateOrientationState);
+  window.addEventListener("orientationchange", updateOrientationState);
+  updateOrientationState(); // run once on load
+
   // Drive the game from Pixi's ticker — deltaMS is the real frame duration in ms.
   app.ticker.add((ticker) => {
     game.tick(ticker.deltaMS);
+    updateOrientationState(); // keep in sync as game screen changes
   });
 
   // Dev-only URL-param cheats. The `import.meta.env.DEV` literal is replaced

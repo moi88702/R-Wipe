@@ -192,6 +192,13 @@ export interface InputState {
    * One-frame pulse; cleared by InputHandler.endFrame().
    */
   swipeDownPulse?: boolean;
+
+  /**
+   * True when the Space key is physically held down.
+   * Unlike `fire`, this is never set by touch — used by solar-system mode to
+   * distinguish keyboard fire from the virtual fire button.
+   */
+  spaceHeld?: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

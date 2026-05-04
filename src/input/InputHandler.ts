@@ -56,6 +56,9 @@ export class InputHandler {
   private pointerHeld = false;
   private pointerDisposers: Array<() => void> = [];
 
+  // ── Portrait mode (game container rotated 90° CW via CSS) ─────────────
+  private portraitMode = false;
+
   constructor() {
     this.boundKeyDown = (e: KeyboardEvent) => {
       // Prevent arrow-key / space page scroll during gameplay
@@ -113,10 +116,15 @@ export class InputHandler {
       const rect = element.getBoundingClientRect();
       const w = rect.width || gameWidth;
       const h = rect.height || gameHeight;
-      return {
-        x: ((t.clientX - rect.left) / w) * gameWidth,
-        y: ((t.clientY - rect.top) / h) * gameHeight,
-      };
+      const relX = (t.clientX - rect.left) / w;
+      const relY = (t.clientY - rect.top) / h;
+      if (this.portraitMode) {
+        // Canvas rotated +90° CW via CSS:
+        // screen-left → canvas-top (y=0), screen-right → canvas-bottom (y=720)
+        // screen-top  → canvas-right (x=1280), screen-bottom → canvas-left (x=0)
+        return { x: (1 - relY) * gameWidth, y: relX * gameHeight };
+      }
+      return { x: relX * gameWidth, y: relY * gameHeight };
     };
 
     const onStart = (e: TouchEvent): void => {
@@ -213,10 +221,12 @@ export class InputHandler {
       const rect = element.getBoundingClientRect();
       const w = rect.width || gameWidth;
       const h = rect.height || gameHeight;
-      return {
-        x: ((e.clientX - rect.left) / w) * gameWidth,
-        y: ((e.clientY - rect.top) / h) * gameHeight,
-      };
+      const relX = (e.clientX - rect.left) / w;
+      const relY = (e.clientY - rect.top) / h;
+      if (this.portraitMode) {
+        return { x: (1 - relY) * gameWidth, y: relX * gameHeight };
+      }
+      return { x: relX * gameWidth, y: relY * gameHeight };
     };
 
     const onDown = (e: MouseEvent): void => {
@@ -303,6 +313,9 @@ export class InputHandler {
       // ── Mobile touch gestures ──────────────────────────────────────────
       swipeUpPulse: this.swipeUpPulse,
       swipeDownPulse: this.swipeDownPulse,
+
+      // Space key only (no touch) — used by solar-system virtual fire
+      spaceHeld: this.keysPressed.has("Space"),
     };
   }
 
@@ -335,6 +348,15 @@ export class InputHandler {
   }
 
   // ── Test helpers ─────────────────────────────────────────────────────────
+
+  /**
+   * Notify the handler that the game canvas is rotated 90° CW via CSS
+   * (portrait mode on mobile). Touch / pointer coordinates will be remapped
+   * to compensate so they land in the correct game-space position.
+   */
+  setPortraitMode(rotated: boolean): void {
+    this.portraitMode = rotated;
+  }
 
   /** Simulate pressing a key (identified by KeyboardEvent.code). */
   simulateKeyDown(code: string): void {

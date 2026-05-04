@@ -7,7 +7,7 @@
  */
 
 import type { Application } from "pixi.js";
-import type { DevCheats, EnemyType, PowerUp, Projectile, ScreenType } from "../types/index";
+import type { DevCheats, EnemyType, InputState, PowerUp, Projectile, ScreenType } from "../types/index";
 import { InputHandler } from "../input/InputHandler";
 import { StateManager } from "../managers/StateManager";
 import { PlayerManager } from "../managers/PlayerManager";
@@ -176,6 +176,8 @@ export class GameManager {
   private laserFlashTarget: { x: number; y: number } | null = null;
   /** Where the shipyard should return when ESC is pressed. */
   private shipyardReturnScreen: "main-menu" | "docked" = "main-menu";
+  /** Selection in the solar-system pause overlay (0=Resume, 1=Quit). */
+  private solarPauseSelection = 0;
   // TODO: Wire up docking, factions, mission log in Phase 4-7
   // private docking: DockingManager | null = null;
   // private factions: FactionManager | null = null;
@@ -304,6 +306,20 @@ export class GameManager {
     this.input.attachPointer(element, this.width, this.height);
   }
 
+  /**
+   * Notify the game that the canvas is displayed in portrait-rotated mode
+   * (+90° CW CSS rotation). InputHandler remaps touch/mouse coordinates to
+   * compensate. Call whenever orientation or game screen changes.
+   */
+  setPortraitMode(rotated: boolean): void {
+    this.input.setPortraitMode(rotated);
+  }
+
+  /** Returns the current screen (used by main.ts for orientation management). */
+  getCurrentScreen(): string {
+    return this.state.getScreen();
+  }
+
   // ── Public loop entry ────────────────────────────────────────────────────
 
   tick(deltaMs: number): void {
@@ -391,60 +407,148 @@ export class GameManager {
     return this.menuSelection;
   }
 
+  /**
+   * Detect which menu item was tapped, given the tap position and list layout.
+   * Returns the item index, or null if no item was hit.
+   */
+  private tapMenuIdx(
+    tap: { x: number; y: number },
+    startY: number,
+    rowSpacing: number,
+    count: number,
+  ): number | null {
+    for (let i = 0; i < count; i++) {
+      const cy = startY + i * rowSpacing;
+      if (tap.y >= cy - rowSpacing / 2 && tap.y < cy + rowSpacing / 2) {
+        return i;
+      }
+    }
+    return null;
+  }
+
+  /** True when a point is inside a rectangle. */
+  private inRect(px: number, py: number, x: number, y: number, w: number, h: number): boolean {
+    return px >= x && px <= x + w && py >= y && py <= y + h;
+  }
+
+  /**
+   * Merge real InputState with virtual solar-system control button state.
+   * When the player holds the screen on a control zone, that action fires;
+   * generic touch-fire is suppressed so the D-pad doesn't accidentally shoot.
+   */
+  private mergeSolarInput(raw: InputState): InputState {
+    const pointer = raw.pointer;
+    const held = raw.pointerHeld;
+    if (!pointer || !held) return raw;
+    const { x: px, y: py } = pointer;
+    const inThrust = this.inRect(px, py, 120, 530, 100, 100);
+    const inLeft   = this.inRect(px, py,  10, 590, 100, 100);
+    const inRight  = this.inRect(px, py, 230, 590, 100, 100);
+    const inFire   = this.inRect(px, py, 1150, 555, 120, 150);
+    const inAny    = inThrust || inLeft || inRight || inFire;
+    return {
+      ...raw,
+      thrustForward: raw.thrustForward || inThrust,
+      turnLeft: raw.turnLeft || inLeft,
+      turnRight: raw.turnRight || inRight,
+      // Keyboard Space always fires; virtual zone fires when held; pure touch-fire suppressed
+      fire: (raw.spaceHeld ?? false) || inFire,
+      // Don't trigger dock/gate confirm when player taps a control zone
+      menuConfirm: inAny ? false : raw.menuConfirm,
+    };
+  }
+
   // ── Screen: main menu ────────────────────────────────────────────────────
 
   private updateMenu(): void {
+    const input = this.input.poll();
+
+    // Direct tap on a menu button
+    if (input.pointerDownPulse && this.menuDebounceMs === 0) {
+      // Main menu items centred at y = height/2 + 40 + i*40
+      const startY = this.height / 2 + 40;
+      const rowSpacing = 40;
+      const i = this.tapMenuIdx(input.pointerDownPulse, startY, rowSpacing, MAIN_MENU_ITEMS.length);
+      if (i !== null) {
+        this.menuSelection = i;
+        this.executeMainMenuAction(i);
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+        return;
+      }
+    }
+
     this.stepMenuSelection(MAIN_MENU_ITEMS.length);
     if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
-      const pick = MAIN_MENU_ITEMS[this.menuSelection]!;
-      if (pick === "play") {
-        this.startNewRun();
-      } else if (pick === "campaign") {
-        this.openStarmap();
-      } else if (pick === "solar-system") {
-        this.openSolarSystem();
-      } else if (pick === "shipyard") {
-        this.shipyardReturnScreen = "main-menu";
-        this.openShipyard();
-      } else {
-        this.openStats("main-menu");
-      }
+      this.executeMainMenuAction(this.menuSelection);
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+    }
+  }
+
+  private executeMainMenuAction(idx: number): void {
+    const pick = MAIN_MENU_ITEMS[idx]!;
+    if (pick === "play") {
+      this.startNewRun();
+    } else if (pick === "campaign") {
+      this.openStarmap();
+    } else if (pick === "solar-system") {
+      this.openSolarSystem();
+    } else if (pick === "shipyard") {
+      this.shipyardReturnScreen = "main-menu";
+      this.openShipyard();
+    } else {
+      this.openStats("main-menu");
     }
   }
 
   // ── Screen: pause ────────────────────────────────────────────────────────
 
   private updatePause(): void {
-    // ESC closes the pause menu (toggle off).
     if (this.wasPausePressed() || this.wasMenuBackPressed()) {
       this.menuSelection = 0;
       this.state.setScreen("gameplay");
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
+
+    const input = this.input.poll();
+    if (input.pointerDownPulse && this.menuDebounceMs === 0) {
+      // Pause menu items at y = height/2 + i*52
+      const i = this.tapMenuIdx(input.pointerDownPulse, this.height / 2, 52, PAUSE_MENU_ITEMS.length);
+      if (i !== null) {
+        this.menuSelection = i;
+        this.executePauseAction(i);
+        return;
+      }
+    }
+
     this.stepMenuSelection(PAUSE_MENU_ITEMS.length);
     if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
-      const pick = PAUSE_MENU_ITEMS[this.menuSelection]!;
-      if (pick === "continue") {
-        this.menuSelection = 0;
-        this.state.setScreen("gameplay");
-      } else if (pick === "stats") {
-        this.openStats("pause");
-      } else if (pick === "quit") {
-        // Finalize run so quit counts the session in all-time stats.
-        this.state.finalizeRun("no-lives");
-        this.menuSelection = 0;
-        this.state.setScreen("main-menu");
-      }
-      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      this.executePauseAction(this.menuSelection);
     }
+  }
+
+  private executePauseAction(idx: number): void {
+    const pick = PAUSE_MENU_ITEMS[idx]!;
+    if (pick === "continue") {
+      this.menuSelection = 0;
+      this.state.setScreen("gameplay");
+    } else if (pick === "stats") {
+      this.openStats("pause");
+    } else if (pick === "quit") {
+      this.state.finalizeRun("no-lives");
+      this.menuSelection = 0;
+      this.state.setScreen("main-menu");
+    }
+    this.menuDebounceMs = MENU_DEBOUNCE_MS;
   }
 
   // ── Screen: stats ────────────────────────────────────────────────────────
 
   private updateStats(): void {
+    const input = this.input.poll();
+    const tapped = input.pointerDownPulse !== null;
     if (
-      (this.wasMenuBackPressed() || this.wasMenuConfirmPressed()) &&
+      (this.wasMenuBackPressed() || this.wasMenuConfirmPressed() || tapped) &&
       this.menuDebounceMs === 0
     ) {
       this.menuSelection = 0;
@@ -462,7 +566,9 @@ export class GameManager {
   // ── Screen: game over ────────────────────────────────────────────────────
 
   private updateGameOver(): void {
-    if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
+    const input = this.input.poll();
+    const tapped = input.pointerDownPulse !== null;
+    if ((this.wasMenuConfirmPressed() || tapped) && this.menuDebounceMs === 0) {
       this.state.setScreen("main-menu");
       this.menuSelection = 0;
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
@@ -1194,7 +1300,9 @@ export class GameManager {
       return;
     }
 
-    const input = this.input.poll();
+    const rawInput = this.input.poll();
+    // Merge virtual touch control zones into input (suppresses accidental dock/fire from D-pad taps)
+    const input = this.mergeSolarInput(rawInput);
 
     // Map toggle (M)
     if (input.mapTogglePulse) {
@@ -1482,14 +1590,49 @@ export class GameManager {
 
   private updateSolarSystemPaused(): void {
     if (this.wasPausePressed() && this.menuDebounceMs === 0) {
+      this.solarPauseSelection = 0;
       this.state.setScreen("solar-system");
       this.menuDebounceMs = 350;
       return;
     }
-    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
-      this.state.setScreen("main-menu");
-      this.menuDebounceMs = 350;
+
+    const input = this.input.poll();
+    // Up/Down navigate between RESUME and QUIT TO MENU
+    const upEdge = input.moveUp && !this.prevUpPressed;
+    const downEdge = input.moveDown && !this.prevDownPressed;
+    if (upEdge || input.swipeUpPulse) this.solarPauseSelection = 0;
+    if (downEdge || input.swipeDownPulse) this.solarPauseSelection = 1;
+
+    // Tap on RESUME button (center y ≈ height/2 - 35) or QUIT button (center y ≈ height/2 + 35)
+    if (input.pointerDownPulse && this.menuDebounceMs === 0) {
+      const tap = input.pointerDownPulse;
+      const halfH = this.height / 2;
+      if (tap.y >= halfH - 75 && tap.y < halfH + 10) {
+        this.solarPauseSelection = 0;
+        this.executeSolarPauseAction(0);
+        return;
+      }
+      if (tap.y >= halfH + 10 && tap.y < halfH + 90) {
+        this.solarPauseSelection = 1;
+        this.executeSolarPauseAction(1);
+        return;
+      }
     }
+
+    if ((this.wasMenuConfirmPressed() || this.wasMenuBackPressed()) && this.menuDebounceMs === 0) {
+      this.executeSolarPauseAction(this.solarPauseSelection);
+    }
+  }
+
+  private executeSolarPauseAction(idx: number): void {
+    if (idx === 0) {
+      this.solarPauseSelection = 0;
+      this.state.setScreen("solar-system");
+    } else {
+      this.solarPauseSelection = 0;
+      this.state.setScreen("main-menu");
+    }
+    this.menuDebounceMs = 350;
   }
 
   private getDockedMenuItems(): readonly string[] {
@@ -1524,39 +1667,57 @@ export class GameManager {
     this.stepMenuSelection(menuItems.length);
     this.dockedMenuSelection = this.menuSelection;
 
+    // Tap on a menu item directly.
+    const input = this.input.poll();
+    if (input.pointerDownPulse && this.menuDebounceMs === 0) {
+      // Panel itemTopY = panelY + 80, panelY = height/2 - 180
+      const itemTopY = this.height / 2 - 100; // 360/2 - 180 + 80 = 260
+      const i = this.tapMenuIdx(input.pointerDownPulse, itemTopY, 44, menuItems.length);
+      if (i !== null) {
+        this.dockedMenuSelection = i;
+        this.menuSelection = i;
+        this.executeDockedMenuAction(menuItems[i]!);
+        return;
+      }
+    }
+
     // Enter selects.
     if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
-      const item = menuItems[this.dockedMenuSelection];
-      if (item === "Undock") {
-        this.solarSystem.undock();
-        this.state.setScreen("solar-system");
-        this.menuDebounceMs = 350;
-        return;
-      }
-      if (item === "Galaxy Map") {
-        this.mapOpen = true;
-        this.solarSystem.undock();
-        this.state.setScreen("solar-system");
-        this.menuDebounceMs = 350;
-        return;
-      }
-      if (item === "Shipyard") {
-        this.shipyardReturnScreen = "docked";
-        this.openShipyard();
-        return;
-      }
-      if (item === "Repair Bay") {
-        this.dockedStatusMsg = "Hull repaired — no charge today.";
-        this.dockedStatusMs = 1500;
-      } else if (item === "Shop") {
-        this.dockedStatusMsg = "Shop inventory empty (coming soon).";
-        this.dockedStatusMs = 1500;
-      } else if (item === "Missions") {
-        this.dockedStatusMsg = "No missions available.";
-        this.dockedStatusMs = 1500;
-      }
-      this.menuDebounceMs = 350;
+      this.executeDockedMenuAction(menuItems[this.dockedMenuSelection] ?? "Undock");
     }
+  }
+
+  private executeDockedMenuAction(item: string): void {
+    if (!this.solarSystem) return;
+    if (item === "Undock") {
+      this.solarSystem.undock();
+      this.state.setScreen("solar-system");
+      this.menuDebounceMs = 350;
+      return;
+    }
+    if (item === "Galaxy Map") {
+      this.mapOpen = true;
+      this.solarSystem.undock();
+      this.state.setScreen("solar-system");
+      this.menuDebounceMs = 350;
+      return;
+    }
+    if (item === "Shipyard") {
+      this.shipyardReturnScreen = "docked";
+      this.openShipyard();
+      return;
+    }
+    if (item === "Repair Bay") {
+      this.dockedStatusMsg = "Hull repaired — no charge today.";
+      this.dockedStatusMs = 1500;
+    } else if (item === "Shop") {
+      this.dockedStatusMsg = "Shop inventory empty (coming soon).";
+      this.dockedStatusMs = 1500;
+    } else if (item === "Missions") {
+      this.dockedStatusMsg = "No missions available.";
+      this.dockedStatusMs = 1500;
+    }
+    this.menuDebounceMs = 350;
   }
 
   // ── Run lifecycle ────────────────────────────────────────────────────────
@@ -2356,8 +2517,26 @@ export class GameManager {
       playerShield: this.solarPlayerShield,
       playerMaxShield: this.solarPlayerMaxShield,
       damageFlash: this.solarDamageFlashMs > 0 ? this.solarDamageFlashMs / 300 : 0,
+      pauseMenuSelection: this.solarPauseSelection,
       ...(laserFlash ? { laserFlash } : {}),
       ...(dockedSection ? { docked: dockedSection } : {}),
+      virtualControls: this.buildVirtualControlsState(),
+    };
+  }
+
+  private buildVirtualControlsState(): { thrustActive: boolean; leftActive: boolean; rightActive: boolean; fireActive: boolean } {
+    const raw = this.input.poll();
+    const pointer = raw.pointer;
+    const held = raw.pointerHeld;
+    if (!pointer || !held) {
+      return { thrustActive: false, leftActive: false, rightActive: false, fireActive: false };
+    }
+    const { x: px, y: py } = pointer;
+    return {
+      thrustActive: this.inRect(px, py, 120, 530, 100, 100),
+      leftActive:   this.inRect(px, py,  10, 590, 100, 100),
+      rightActive:  this.inRect(px, py, 230, 590, 100, 100),
+      fireActive:   this.inRect(px, py, 1150, 555, 120, 150),
     };
   }
 
