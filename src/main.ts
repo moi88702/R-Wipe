@@ -1,5 +1,6 @@
 import { Application, VERSION } from "pixi.js";
 import { GameManager } from "./game/GameManager";
+import { soundManager } from "./audio/SoundManager";
 
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 720;
@@ -69,6 +70,23 @@ async function init(): Promise<void> {
     width: CANVAS_WIDTH,
     height: CANVAS_HEIGHT,
   });
+
+  // Mute toggle button
+  const muteBtn = document.getElementById("mute-btn");
+  if (muteBtn) {
+    const syncMuteIcon = (): void => {
+      muteBtn.textContent = soundManager.isMuted() ? "🔇" : "🔊";
+      muteBtn.setAttribute("aria-label", soundManager.isMuted() ? "Unmute sound" : "Mute sound");
+    };
+    muteBtn.addEventListener("pointerup", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      soundManager.init();
+      soundManager.toggleMute();
+      syncMuteIcon();
+    });
+    muteBtn.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
+  }
 
   // Drag-to-move, hold-to-fire, double-tap-bomb, two-finger-pause.
   game.enableTouchControls(app.canvas);

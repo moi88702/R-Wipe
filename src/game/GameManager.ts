@@ -39,6 +39,7 @@ import {
 import { computeShipStats } from "./parts/stats";
 import { layoutBlueprint, type Placement } from "./parts/geometry";
 import { canSnap } from "./parts/assembly";
+import { soundManager } from "../audio/SoundManager";
 
 interface SolarEnemyBase {
   id: string;
@@ -296,6 +297,8 @@ export class GameManager {
    */
   enableTouchControls(element: HTMLElement): void {
     this.input.attachTouch(element, this.width, this.height);
+    // Init AudioContext on first touch (mobile requires a user gesture).
+    element.addEventListener("touchstart", () => soundManager.init(), { once: true, passive: true });
   }
 
   /**
@@ -304,6 +307,8 @@ export class GameManager {
    */
   enablePointerControls(element: HTMLElement): void {
     this.input.attachPointer(element, this.width, this.height);
+    // Init AudioContext on first click (desktop user gesture).
+    element.addEventListener("pointerdown", () => soundManager.init(), { once: true });
   }
 
   /**
@@ -378,9 +383,11 @@ export class GameManager {
 
     if (upEdge || swipeUp) {
       this.menuSelection = (this.menuSelection - 1 + itemCount) % itemCount;
+      soundManager.menuNav();
     }
     if (downEdge || swipeDown) {
       this.menuSelection = (this.menuSelection + 1) % itemCount;
+      soundManager.menuNav();
     }
   }
 
@@ -485,6 +492,7 @@ export class GameManager {
   }
 
   private executeMainMenuAction(idx: number): void {
+    soundManager.menuConfirm();
     const pick = MAIN_MENU_ITEMS[idx]!;
     if (pick === "play") {
       this.startNewRun();
@@ -528,6 +536,7 @@ export class GameManager {
   }
 
   private executePauseAction(idx: number): void {
+    soundManager.menuConfirm();
     const pick = PAUSE_MENU_ITEMS[idx]!;
     if (pick === "continue") {
       this.menuSelection = 0;
@@ -1295,6 +1304,7 @@ export class GameManager {
 
     // Pause toggle (ESC / P)
     if (this.wasPausePressed() && this.menuDebounceMs === 0) {
+      soundManager.setThrusterActive(false);
       this.state.setScreen("solar-system-paused");
       this.menuDebounceMs = 350;
       return;
@@ -1313,6 +1323,7 @@ export class GameManager {
     // the player to read and close it again.
     if (!this.mapOpen) {
       this.solarSystem.updateShipPhysics(input, deltaMs);
+      soundManager.setThrusterActive(this.solarSystem.getLastThrustActive());
     }
 
     // Proximity updates: stations + gates
@@ -1331,6 +1342,7 @@ export class GameManager {
       if (nearbyStations.length > 0) {
         const loc = nearbyStations[0];
         if (loc && this.solarSystem.dock(loc.id)) {
+          soundManager.docking();
           this.dockedMenuSelection = 0;
           this.menuSelection = 0;
           this.state.setScreen("docked");
@@ -1364,6 +1376,7 @@ export class GameManager {
   }
 
   private fireSolarWeapon(playerPos: { x: number; y: number }, headingDeg: number): void {
+    soundManager.solarShoot();
     const headingRad = (headingDeg * Math.PI) / 180;
     const fwdX = Math.sin(headingRad);
     const fwdY = -Math.cos(headingRad);
@@ -1523,6 +1536,7 @@ export class GameManager {
           dmg -= absorbed;
         }
         this.solarPlayerHealth = Math.max(0, this.solarPlayerHealth - dmg);
+        soundManager.solarHit();
         this.solarDamageFlashMs = 300;
         if (this.solarPlayerHealth <= 0) {
           // Respawn — reset health and position
@@ -1581,6 +1595,7 @@ export class GameManager {
       destSystem,
     );
     if (result.success) {
+      soundManager.gateJump();
       this.currentSystemId = destSystemId;
       this.visitedSystems.add(destSystemId);
       // Prevent immediate re-trigger inside sister gate's radius.
@@ -1625,6 +1640,8 @@ export class GameManager {
   }
 
   private executeSolarPauseAction(idx: number): void {
+    soundManager.menuConfirm();
+    soundManager.setThrusterActive(false);
     if (idx === 0) {
       this.solarPauseSelection = 0;
       this.state.setScreen("solar-system");
@@ -1688,8 +1705,10 @@ export class GameManager {
   }
 
   private executeDockedMenuAction(item: string): void {
+    soundManager.menuConfirm();
     if (!this.solarSystem) return;
     if (item === "Undock") {
+      soundManager.undocking();
       this.solarSystem.undock();
       this.state.setScreen("solar-system");
       this.menuDebounceMs = 350;
@@ -1886,7 +1905,10 @@ export class GameManager {
     }
 
     // Subsystem updates
+    const prevProjCount = this.player.getProjectiles().filter(p => p.isAlive).length;
     this.player.update(deltaMs, input);
+    const newProjCount = this.player.getProjectiles().filter(p => p.isAlive).length;
+    if (newProjCount > prevProjCount) soundManager.arcadeShoot();
     const playerState = this.player.getState();
     // Keep StateManager's playerState mirror in sync so the renderer reads live values.
     this.state.updatePlayerState(playerState);
@@ -1936,7 +1958,10 @@ export class GameManager {
           scoreDelta += result.bounty;
           if (result.enemyType !== "boss") {
             enemiesKilledDelta += 1;
+            soundManager.enemyDefeatedSmall();
             this.powerUps.onEnemyDefeated(result.position.x, result.position.y);
+          } else {
+            soundManager.enemyDefeatedBoss();
           }
           if (result.enemyType) {
             this.renderer.showEnemyDefeated(
@@ -1958,6 +1983,7 @@ export class GameManager {
           totalDamageReceived += ev.damage;
           consecutiveHits = 0;
           this.safeTimerMs = 0;
+          soundManager.playerHit();
           this.renderer.showHitFlash();
           if (hit?.kind === "cannon") {
             this.renderer.showCannonImpact(hit.position.x, hit.position.y);
@@ -1987,6 +2013,7 @@ export class GameManager {
       totalDamageReceived += missileDamage;
       consecutiveHits = 0;
       this.safeTimerMs = 0;
+      soundManager.playerHit();
       this.renderer.showHitFlash();
       if (!this.player.getState().isAlive) {
         didDie = true;
@@ -2028,6 +2055,7 @@ export class GameManager {
       runStatsMutable,
     );
     for (const c of shotCollections) {
+      soundManager.powerUp();
       this.renderer.showPowerUpCollected(c.feedback.x, c.feedback.y, c.type);
     }
 
@@ -2038,6 +2066,7 @@ export class GameManager {
       runStatsMutable,
     );
     for (const c of touchCollections) {
+      soundManager.powerUp();
       this.renderer.showPowerUpCollected(c.feedback.x, c.feedback.y, c.type);
     }
 
@@ -2077,6 +2106,7 @@ export class GameManager {
     if (this.level.isLevelComplete(this.enemies)) {
       const nextLevelNumber = this.state.getGameState().levelState.levelNumber + 1;
       this.levelTransitionMs = 2_000;
+      soundManager.levelClear();
       this.renderer.showLevelBanner(
         `LEVEL ${nextLevelNumber - 1} CLEAR`,
         `PREPARING LEVEL ${nextLevelNumber}`,
@@ -2092,6 +2122,7 @@ export class GameManager {
       const livesRemaining = this.player.getState().lives;
       this.finalDeath = livesRemaining <= 0;
       this.deathAnimationMs = this.finalDeath ? 1_400 : 1_000;
+      soundManager.playerDeath();
       this.triggerDeathExplosion(lastPos.x, lastPos.y, this.finalDeath);
       return;
     }
@@ -2198,6 +2229,7 @@ export class GameManager {
   private detonatePlayerPanicBombs(): void {
     const bombs = this.player.consumePendingPanicBombs();
     if (bombs.length === 0) return;
+    soundManager.panicBomb();
     const enemies = this.enemies.getEnemies();
     for (const b of bombs) {
       const r2 = b.blastRadius * b.blastRadius;
