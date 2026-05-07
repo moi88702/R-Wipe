@@ -3155,25 +3155,32 @@ export class GameRenderer {
     }
 
     // ── Engine glow (always on) + thrust exhaust ─────────────────────────
+    // playerTargetR: desired screen-space radius for the player ship hull.
+    // Scales with zoom so the ship grows/shrinks with the world, clamped so
+    // it's never invisible (<3 px) and never dominates the screen (>60 px).
+    const playerTargetR = Math.max(3, Math.min(60, 16 * kmToPx));
+    const gs = playerTargetR / 16; // glow + exhaust scale factor
     if (!data.solarPlayerDead) {
       const headRad = (data.playerHeading * Math.PI) / 180;
-      const backX = cx - Math.sin(headRad) * 18;
-      const backY = cy + Math.cos(headRad) * 18;
+      const engineOff = gs * 18;
+      const backX = cx - Math.sin(headRad) * engineOff;
+      const backY = cy + Math.cos(headRad) * engineOff;
       // Persistent idle glow
-      g.circle(backX, backY, 9).fill({ color: 0xff4400, alpha: 0.12 });
-      g.circle(backX, backY, 5).fill({ color: 0xff6600, alpha: 0.28 });
-      g.circle(backX, backY, 3).fill({ color: 0xffaa44, alpha: 0.55 });
-      g.circle(backX, backY, 1.5).fill({ color: 0xffffff, alpha: 0.8 });
+      g.circle(backX, backY, 9 * gs).fill({ color: 0xff4400, alpha: 0.12 });
+      g.circle(backX, backY, 5 * gs).fill({ color: 0xff6600, alpha: 0.28 });
+      g.circle(backX, backY, 3 * gs).fill({ color: 0xffaa44, alpha: 0.55 });
+      g.circle(backX, backY, 1.5 * gs).fill({ color: 0xffffff, alpha: 0.8 });
     }
     if (data.thrustActive && !data.solarPlayerDead) {
       const headRad = (data.playerHeading * Math.PI) / 180;
-      const backX = cx - Math.sin(headRad) * 18;
-      const backY = cy + Math.cos(headRad) * 18;
+      const engineOff = gs * 18;
+      const backX = cx - Math.sin(headRad) * engineOff;
+      const backY = cy + Math.cos(headRad) * engineOff;
       // Inner flame
-      g.circle(backX, backY, 5).fill({ color: 0x66aaff, alpha: 0.9 });
-      g.circle(backX - Math.sin(headRad) * 8, backY + Math.cos(headRad) * 8, 4)
+      g.circle(backX, backY, 5 * gs).fill({ color: 0x66aaff, alpha: 0.9 });
+      g.circle(backX - Math.sin(headRad) * 8 * gs, backY + Math.cos(headRad) * 8 * gs, 4 * gs)
         .fill({ color: 0x4488ff, alpha: 0.6 });
-      g.circle(backX - Math.sin(headRad) * 14, backY + Math.cos(headRad) * 14, 2)
+      g.circle(backX - Math.sin(headRad) * 14 * gs, backY + Math.cos(headRad) * 14 * gs, 2 * gs)
         .fill({ color: 0x2266ff, alpha: 0.3 });
     }
 
@@ -3285,12 +3292,21 @@ export class GameRenderer {
     }
 
     // ── Player ship at view centre ────────────────────────────────────────
+    // Use playerTargetR (computed above with the engine glow) to drive LOD:
+    //   targetR >= 12 + blueprint available → full detailed polygon ship
+    //   otherwise → delta-wing chevron silhouette (scales down to a tiny icon)
     if (!data.solarPlayerDead) {
-      if (data.playerBlueprintModules && data.playerBlueprintModules.length > 0 && data.playerBlueprintCoreRadius) {
-        const bpScale = 16 / data.playerBlueprintCoreRadius;
+      if (
+        playerTargetR >= 12 &&
+        data.playerBlueprintModules &&
+        data.playerBlueprintModules.length > 0 &&
+        data.playerBlueprintCoreRadius
+      ) {
+        const bpScale = playerTargetR / data.playerBlueprintCoreRadius;
         this.drawBlueprintShip(g, cx, cy, data.playerHeading, data.playerBlueprintModules, bpScale);
       } else {
-        this.drawDeltaWing(g, cx, cy, data.playerHeading);
+        // Chevron/arrow icon — scale = playerTargetR / 16 so it matches the glow
+        this.drawDeltaWing(g, cx, cy, data.playerHeading, 0x00ffff, playerTargetR / 16);
       }
     }
 
