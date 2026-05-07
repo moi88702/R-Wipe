@@ -3274,20 +3274,14 @@ export class GameRenderer {
     }
 
     // ── Player ship at view centre ────────────────────────────────────────
-    // Use playerTargetR (computed above with the engine glow) to drive LOD:
-    //   targetR >= 12 + blueprint available → full detailed polygon ship
-    //   otherwise → delta-wing chevron silhouette (scales down to a tiny icon)
+    // Same logic as enemies: always use blueprint when available; fall back to
+    // chevron only when there are no blueprint modules. LOD is handled purely
+    // by bpScale — the polygon gets tiny when zoomed out, just like enemies.
     if (!data.solarPlayerDead) {
-      if (
-        playerTargetR >= 12 &&
-        data.playerBlueprintModules &&
-        data.playerBlueprintModules.length > 0 &&
-        data.playerBlueprintCoreRadius
-      ) {
+      if (data.playerBlueprintModules && data.playerBlueprintModules.length > 0 && data.playerBlueprintCoreRadius) {
         const bpScale = playerTargetR / data.playerBlueprintCoreRadius;
         this.drawBlueprintShip(g, cx, cy, data.playerHeading, data.playerBlueprintModules, bpScale);
       } else {
-        // Chevron/arrow icon — scale = playerTargetR / 16 so it matches the glow
         this.drawDeltaWing(g, cx, cy, data.playerHeading, 0x00ffff, playerTargetR / 16);
       }
     }
