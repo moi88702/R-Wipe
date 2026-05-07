@@ -181,12 +181,12 @@ const ALL_MODULES: ReadonlyArray<SolarModuleDefinition> = [
   // ── External systems: class 1 ─────────────────────────────────────────────
   external("ext-shield-c1",  1, "Shield Module",   4, { shieldCapacity: 80 },         350),
   external("ext-sensor-c1",  1, "Sensor Array",    3, { sensorRangeKm: 500 },         250),
-  external("ext-armor-c1",   1, "Armor Plate",     4, { armor: 20, hp: 40 },          200),
+  internal("ext-armor-c1",   1, "Armor Plate",     4, { armor: 20, hp: 40 },          200),
 
   // ── External systems: class 2 ─────────────────────────────────────────────
   external("ext-shield-c2",  2, "Heavy Shield",    4, { shieldCapacity: 160 },       1_050),
   external("ext-sensor-c2",  2, "Long-Range Scan", 3, { sensorRangeKm: 1_200 },        750),
-  external("ext-armor-c2",   2, "Reinforced Hull", 4, { armor: 40, hp: 80 },           600),
+  internal("ext-armor-c2",   2, "Reinforced Hull", 4, { armor: 40, hp: 80 },           600),
 
   // ── Internal systems: class 1 ─────────────────────────────────────────────
   external("int-engine-c1",  1, "Thruster",          3, { thrustMs2: 2_000 },          300),
@@ -301,37 +301,37 @@ const ALL_MODULES: ReadonlyArray<SolarModuleDefinition> = [
   // ── External systems: class 3 ────────────────────────────────────────────
   external("ext-shield-c3",  3, "Battle Shield",     4, { shieldCapacity: 300 },          3_000),
   external("ext-sensor-c3",  3, "Combat Array",      3, { sensorRangeKm: 2_500 },         2_000),
-  external("ext-armor-c3",   3, "Battle Plate",      4, { armor: 70, hp: 150 },           2_500),
+  internal("ext-armor-c3",   3, "Battle Plate",      4, { armor: 70, hp: 150 },           2_500),
 
   // ── External systems: class 4 ────────────────────────────────────────────
   external("ext-shield-c4",  4, "Aegis Shield",      4, { shieldCapacity: 500 },          8_000),
   external("ext-sensor-c4",  4, "Deep Scanner",      3, { sensorRangeKm: 5_000 },         5_500),
-  external("ext-armor-c4",   4, "Laminate Plate",    4, { armor: 120, hp: 250 },          7_000),
+  internal("ext-armor-c4",   4, "Laminate Plate",    4, { armor: 120, hp: 250 },          7_000),
 
   // ── External systems: class 5 ────────────────────────────────────────────
   external("ext-shield-c5",  5, "Barrier Array",     4, { shieldCapacity: 800 },         18_000),
   external("ext-sensor-c5",  5, "Horizon Scanner",   3, { sensorRangeKm: 8_000 },        13_000),
-  external("ext-armor-c5",   5, "Composite Hull",    4, { armor: 200, hp: 400 },         16_000),
+  internal("ext-armor-c5",   5, "Composite Hull",    4, { armor: 200, hp: 400 },         16_000),
 
   // ── External systems: class 6 ────────────────────────────────────────────
   external("ext-shield-c6",  6, "Void Shield",       4, { shieldCapacity: 1_300 },       38_000),
   external("ext-sensor-c6",  6, "Stellar Scanner",   3, { sensorRangeKm: 12_000 },       27_000),
-  external("ext-armor-c6",   6, "Ablative Armor",    4, { armor: 330, hp: 650 },         34_000),
+  internal("ext-armor-c6",   6, "Ablative Armor",    4, { armor: 330, hp: 650 },         34_000),
 
   // ── External systems: class 7 ────────────────────────────────────────────
   external("ext-shield-c7",  7, "Fleet Shield",      4, { shieldCapacity: 2_000 },       75_000),
   external("ext-sensor-c7",  7, "Sector Scanner",    3, { sensorRangeKm: 18_000 },       55_000),
-  external("ext-armor-c7",   7, "Nano-Armor",        4, { armor: 500, hp: 1_000 },       68_000),
+  internal("ext-armor-c7",   7, "Nano-Armor",        4, { armor: 500, hp: 1_000 },       68_000),
 
   // ── External systems: class 8 ────────────────────────────────────────────
   external("ext-shield-c8",  8, "Grand Barrier",     4, { shieldCapacity: 3_200 },      150_000),
   external("ext-sensor-c8",  8, "Arc Scanner",       3, { sensorRangeKm: 25_000 },      110_000),
-  external("ext-armor-c8",   8, "Chromite Armor",    4, { armor: 750, hp: 1_500 },      135_000),
+  internal("ext-armor-c8",   8, "Chromite Armor",    4, { armor: 750, hp: 1_500 },      135_000),
 
   // ── External systems: class 9 ────────────────────────────────────────────
   external("ext-shield-c9",  9, "Titan Bulwark",     4, { shieldCapacity: 5_000 },      300_000),
   external("ext-sensor-c9",  9, "Galaxy Scanner",    3, { sensorRangeKm: 40_000 },      220_000),
-  external("ext-armor-c9",   9, "Impervium Plating", 4, { armor: 1_200, hp: 2_400 },    270_000),
+  internal("ext-armor-c9",   9, "Impervium Plating", 4, { armor: 1_200, hp: 2_400 },    270_000),
 
   // ── Internal systems: class 3 ────────────────────────────────────────────
   external("int-engine-c3",  3, "Ion Thruster",       3, { thrustMs2: 8_000 },            2_500),

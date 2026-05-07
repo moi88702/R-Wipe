@@ -1914,6 +1914,7 @@ export class GameManager {
           this.solarExplosions.push({ x: pPos.x + 6, y: pPos.y - 4, ageMs: 300, maxAgeMs: 4800, scale: 2.5 });
           this.solarLockedIds = new Set();
           this.solarFocusedId = null;
+          soundManager.setThrusterActive(false);
           soundManager.playerDeath();
         }
         return false;
@@ -3656,7 +3657,13 @@ export class GameManager {
       warpIntensity: this.antiGravActive ? 1 : this.warpDecayMs / GameManager.WARP_DECAY_DURATION_MS,
       pauseMenuSelection: this.solarPauseSelection,
       ...(playerBlueprintModules && playerBlueprintCoreRadius !== undefined
-        ? { playerBlueprintModules, playerBlueprintCoreRadius }
+        ? {
+            playerBlueprintModules,
+            playerBlueprintCoreRadius,
+            playerSizeClass: this.solarActiveBlueprintId
+              ? (this.solarSavedBlueprints.get(this.solarActiveBlueprintId)?.sizeClass ?? 1)
+              : 1,
+          }
         : {}),
       ...(laserFlash ? { laserFlash } : {}),
       ...(dockedSection ? { docked: dockedSection } : {}),

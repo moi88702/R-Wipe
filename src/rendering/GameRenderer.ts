@@ -6,7 +6,7 @@
  * avoids managing a sprite pool on top of the existing object pools.
  */
 
-import { Application, Container, Filter, Graphics, Rectangle, Text, TextStyle } from "pixi.js";
+import { Application, Container, Filter, Graphics, Rectangle, Text, TextStyle, defaultFilterVert } from "pixi.js";
 import type {
   BossState,
   Enemy,
@@ -262,6 +262,7 @@ export interface SolarSystemRenderData {
     readonly moduleType: string;
   }>;
   readonly playerBlueprintCoreRadius?: number;
+  readonly playerSizeClass?: number;
   readonly enemyProjectiles: ReadonlyArray<{
     readonly id: string;
     readonly position: { x: number; y: number };
@@ -2752,26 +2753,7 @@ export class GameRenderer {
     try {
       this.warpFilter = Filter.from({
         gl: {
-          vertex: `
-            in vec2 aPosition;
-            out vec2 vTextureCoord;
-            uniform vec4 uInputSize;
-            uniform vec4 uOutputFrame;
-            uniform vec4 uOutputTexture;
-            vec4 filterVertexPosition(void) {
-              vec2 pos = aPosition * uOutputFrame.zw + uOutputFrame.xy;
-              pos.x = pos.x * (2.0 / uOutputTexture.x) - 1.0;
-              pos.y = pos.y * (2.0 / uOutputTexture.y) - 1.0;
-              return vec4(pos, 0.0, 1.0);
-            }
-            vec2 filterTextureCoord(void) {
-              return aPosition * (uOutputFrame.zw * uInputSize.zw);
-            }
-            void main(void) {
-              gl_Position = filterVertexPosition();
-              vTextureCoord = filterTextureCoord();
-            }
-          `,
+          vertex: defaultFilterVert,
           fragment: `
             in vec2 vTextureCoord;
             out vec4 finalColor;
@@ -3155,10 +3137,10 @@ export class GameRenderer {
     }
 
     // ── Engine glow (always on) + thrust exhaust ─────────────────────────
-    // playerTargetR: desired screen-space radius for the player ship hull.
-    // Scales with zoom so the ship grows/shrinks with the world, clamped so
-    // it's never invisible (<3 px) and never dominates the screen (>60 px).
-    const playerTargetR = Math.max(3, Math.min(60, 16 * kmToPx));
+    // playerTargetR: same formula as enemies so player and enemies share a
+    // consistent visual scale. Uses the player's sizeClass (defaults to 2).
+    const playerTargetR = Math.max(3, Math.min(60,
+      (4 + (data.playerSizeClass ?? 2) * 2) * enemyScale));
     const gs = playerTargetR / 16; // glow + exhaust scale factor
     if (!data.solarPlayerDead) {
       const headRad = (data.playerHeading * Math.PI) / 180;
