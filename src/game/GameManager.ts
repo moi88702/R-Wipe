@@ -7,7 +7,7 @@
  */
 
 import type { Application } from "pixi.js";
-import type { DevCheats, EnemyType, InputState, PowerUp, Projectile, ScreenType } from "../types/index";
+import type { DevCheats, EnemyType, InputState, PowerUp, Projectile, ScreenType, ShopRenderData } from "../types/index";
 import { InputHandler } from "../input/InputHandler";
 import { StateManager } from "../managers/StateManager";
 import { PlayerManager } from "../managers/PlayerManager";
@@ -18,12 +18,15 @@ import { OverworldManager } from "../managers/OverworldManager";
 import { missionToLevelState } from "../managers/MissionManager";
 import { BlueprintStore } from "../managers/BlueprintStore";
 import { SolarSystemSessionManager } from "../managers/SolarSystemSessionManager";
+import { ShipBuilderManager } from "../managers/ShipBuilderManager";
+import { ShopManager } from "../managers/ShopManager";
+import { SolarModuleRegistry } from "./data/SolarModuleRegistry";
+import { NPCRegistry } from "./data/NPCRegistry";
 import { SystemGateRegistry } from "./data/SystemGateRegistry";
 import { GateTeleportSystem } from "./solarsystem/GateTeleportSystem";
-// TODO: Import DockingManager, FactionManager, MissionLogManager in Phase 4-7
-// import { DockingManager } from "../managers/DockingManager";
-// import { FactionManager } from "../managers/FactionManager";
-// import { MissionLogManager } from "../managers/MissionLogManager";
+import { MissionLogManager } from "../managers/MissionLogManager";
+import { MissionRegistry } from "./data/MissionRegistry";
+import type { MissionSpec } from "../types/missions";
 import { CollisionSystem } from "../systems/CollisionSystem";
 import { GameRenderer, type GalaxyMapData, type PlayerBlueprintVisual, type ShipyardRenderData, type ShipyardPaletteTile, type SolarSystemRenderData } from "../rendering/GameRenderer";
 import type { SolarSystemState, SystemGate } from "../types/solarsystem";
@@ -40,6 +43,9 @@ import { computeShipStats } from "./parts/stats";
 import { layoutBlueprint, type Placement } from "./parts/geometry";
 import { canSnap } from "./parts/assembly";
 import { soundManager } from "../audio/SoundManager";
+import { getPirateBlueprint } from "./data/PirateBlueprintRegistry";
+import type { SolarShipBlueprint, SavedBlueprintSummary } from "../types/solarShipBuilder";
+import { GeometryEngine } from "./shipbuilder/GeometryEngine";
 
 interface SolarEnemyBase {
   id: string;
@@ -58,6 +64,7 @@ interface SolarEnemyShip {
   id: string;
   baseId: string;
   typeIdx: number;
+  sizeClass: number;
   position: { x: number; y: number };
   velocity: { x: number; y: number };
   heading: number;
@@ -74,6 +81,34 @@ interface SolarEnemyProjectile {
   velocity: { x: number; y: number };
   lifeMs: number;
   damage: number;
+}
+
+interface SolarFriendlyShip {
+  id: string;
+  position: { x: number; y: number };
+  velocity: { x: number; y: number };
+  heading: number;
+  health: number;
+  maxHealth: number;
+  weaponCooldownMs: number;
+}
+
+interface SolarPlayerProjectile {
+  id: string;
+  position: { x: number; y: number };
+  velocity: { x: number; y: number };
+  damage: number;
+  weaponKind: "cannon" | "laser" | "torpedo";
+  lifetimeMs: number;
+  maxLifetimeMs: number;
+}
+
+interface SolarExplosion {
+  x: number;
+  y: number;
+  ageMs: number;
+  maxAgeMs: number;
+  scale: number;
 }
 
 const SOLAR_ENEMY_TYPES = [
@@ -144,6 +179,11 @@ export class GameManager {
   private readonly renderer: GameRenderer;
   private readonly overworld: OverworldManager;
   private readonly blueprints: BlueprintStore;
+  private readonly solarShipBuilderMgr = new ShipBuilderManager();
+  private readonly shopManager = new ShopManager();
+  private shopMenuSelection = 0;
+  private shopStatusMsg: string | null = null;
+  private shopStatusMs = 0;
   private solarSystem: SolarSystemSessionManager | null = null;
   private mapOpen = false;
   /** Cooldown after gate jump so the player doesn't immediately re-trigger the sister gate. */
@@ -163,26 +203,72 @@ export class GameManager {
   private solarEnemyShips: SolarEnemyShip[] = [];
   private solarEnemyProjectiles: SolarEnemyProjectile[] = [];
   private solarEnemyNextId = 0;
+  /** Click-to-lock targeting. */
+  private solarLockedIds = new Set<string>();
+  private solarFocusedId: string | null = null;
+  /** Friendly escort ships. */
+  private solarFriendlyShips: SolarFriendlyShip[] = [];
+  /** Player projectiles (cannon / torpedo kinds). */
+  private solarPlayerProjectiles: SolarPlayerProjectile[] = [];
+  /** Per-weapon cooldowns (moduleDefId → remaining ms). */
+  private solarWeaponCooldowns = new Map<string, number>();
+  /** Auto-incrementing id counter for player projectiles and friendly ships. */
+  private solarPlayerNextId = 0;
   /** Player health in solar system mode (separate from arcade health). */
   private solarPlayerHealth = 100;
-  private readonly solarPlayerMaxHealth = 100;
+  private solarPlayerMaxHealth = 100;
   private solarPlayerShield = 50;
-  private readonly solarPlayerMaxShield = 50;
+  private solarPlayerMaxShield = 50;
   /** Flash overlay when player takes damage (counts down ms). */
   private solarDamageFlashMs = 0;
+  /** Active explosions in solar-system space. */
+  private solarExplosions: SolarExplosion[] = [];
+  /** Death sequence timer (ms). >0 while dying; counts down to 0, then respawns. */
+  private solarDeathTimerMs = 0;
+  private solarPlayerDead = false;
+  private static readonly SOLAR_DEATH_DURATION_MS = 6000; // 5s watch + 1s fade
   /** Fire edge tracking for solar-system shooting. */
   private prevSolarFirePressed = false;
   /** Laser flash FX (counts down from 200ms to 0). */
   private laserFlashMs = 0;
+
+  // ── Anti-gravity state ───────────────────────────────────────────────────
+  /** Continuous hold time with pure-forward thrust (no turn/strafe), ms. */
+  private antiGravHoldMs = 0;
+  private antiGravActive = false;
+  /** Counts down 2000→0 after warp deactivates; gravity + speed cap restored gradually. */
+  private warpDecayMs = 0;
+  private static readonly WARP_DECAY_DURATION_MS = 2000;
+  /** Counts down 3000→0 after warp fully decays; blocks docking during cooldown. */
+  private warpDockCooldownMs = 0;
+  private static readonly WARP_DOCK_COOLDOWN_MS = 3000;
+  private static readonly ANTIGRAV_HOLD_THRESHOLD_MS = 2000;
   private laserFlashTarget: { x: number; y: number } | null = null;
+
+  // ── Solar ship blueprints ─────────────────────────────────────────────────
+  private readonly solarSavedBlueprints = new Map<string, SolarShipBlueprint>();
+  private solarActiveBlueprintId: string | null = null;
+  private solarBlueprintCounter = 0;
+
+  // Blueprint shape caches — computed once per blueprint/sizeClass, reused every frame.
+  private solarPlayerBlueprintCache: {
+    blueprintId: string;
+    modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
+    coreRadius: number;
+  } | null = null;
+  private readonly pirateBlueprintModulesCache = new Map<number, {
+    modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
+    coreRadius: number;
+  }>();
   /** Where the shipyard should return when ESC is pressed. */
   private shipyardReturnScreen: "main-menu" | "docked" = "main-menu";
   /** Selection in the solar-system pause overlay (0=Resume, 1=Quit). */
   private solarPauseSelection = 0;
-  // TODO: Wire up docking, factions, mission log in Phase 4-7
-  // private docking: DockingManager | null = null;
-  // private factions: FactionManager | null = null;
-  // private missionLog: MissionLogManager | null = null;
+  private readonly missionLog = new MissionLogManager();
+  /** NPC currently being talked to (persists across npc-talk → missions → mission-detail) */
+  private activeTalkNpcId: string | null = null;
+  /** Mission id selected in mission-detail screen */
+  private activeMissionDetailId: string | null = null;
 
   private safeTimerMs = 0;
   private menuDebounceMs = 0;
@@ -353,6 +439,18 @@ export class GameManager {
       this.updateSolarSystemPaused();
     } else if (screen === "docked") {
       this.updateDockedMenu(clamped);
+    } else if (screen === "solar-shipyard") {
+      this.updateSolarShipBuilder(clamped);
+    } else if (screen === "solar-shop") {
+      this.updateSolarShop(clamped);
+    } else if (screen === "solar-my-ships") {
+      this.updateSolarMyShips();
+    } else if (screen === "solar-npc-talk") {
+      this.updateNpcTalk(clamped);
+    } else if (screen === "solar-missions") {
+      this.updateMissionList(clamped);
+    } else if (screen === "solar-mission-detail") {
+      this.updateMissionDetail(clamped);
     }
 
     // Commit edge-trigger prev-state AFTER all update*() have consumed edges.
@@ -1076,7 +1174,9 @@ export class GameManager {
 
     this.menuSelection = 0;
     this.menuDebounceMs = 350;
-    this.state.setScreen("solar-system");
+    // If already docked (e.g. first launch or post-death respawn), go straight to dock screen.
+    const isDocked = this.solarSystem.getSessionState().dockedLocationId !== null;
+    this.state.setScreen(isDocked ? "docked" : "solar-system");
   }
 
   private initializeSolarSystemManagers(): void {
@@ -1097,14 +1197,23 @@ export class GameManager {
     };
 
     this.solarSystem = new SolarSystemSessionManager(sol, dummyBlueprint);
+    this.missionLog.load();
 
-    // Spawn the player just outside Earth Station's docking ring so the
-    // station is visible on screen but the player isn't auto-docked.
+    // Start the player docked at Earth Station.
     const sessionState = this.solarSystem.getSessionState();
-    sessionState.playerPosition = { x: 110, y: 0 }; // ~50 km left of Earth Station (160, 0)
+
+    // Give the player 3 of each module as starter inventory.
+    for (const mod of SolarModuleRegistry.getAllModules()) {
+      if (mod.type !== "core") {
+        sessionState.moduleInventory.set(mod.id, 3);
+      }
+    }
+    sessionState.playerPosition = { x: 312, y: 0 }; // Earth Station world position
     sessionState.playerVelocity = { x: 0, y: 0 };
-    sessionState.playerHeading = 90; // Face east, toward the station
+    sessionState.playerHeading = 0;
     sessionState.zoomLevel = 1.0;
+    sessionState.dockedLocationId = "station-earth-orbit";
+    sessionState.nearbyLocations = ["station-earth-orbit"];
 
     // Initialize the pirate base in Sol system.
     this.solarEnemyBases = [
@@ -1130,6 +1239,15 @@ export class GameManager {
     this.solarPlayerHealth = this.solarPlayerMaxHealth;
     this.solarPlayerShield = this.solarPlayerMaxShield;
     this.solarDamageFlashMs = 0;
+    this.solarExplosions = [];
+    this.solarDeathTimerMs = 0;
+    this.solarPlayerDead = false;
+    this.solarLockedIds = new Set();
+    this.solarFocusedId = null;
+    this.solarFriendlyShips = [];
+    this.solarPlayerProjectiles = [];
+    this.solarWeaponCooldowns = new Map();
+    this.solarPlayerNextId = 0;
   }
 
   /**
@@ -1157,36 +1275,38 @@ export class GameManager {
       celestialBodies: [
         {
           id: "star-sol", name: "Sol", type: "star",
-          position: { x: 0, y: 0 }, radius: 696, mass: 1.989e30, gravityStrength: 0,
+          position: { x: 0, y: 0 }, radius: 25, mass: 1.989e30, gravityStrength: 14400,
           color: { r: 255, g: 200, b: 0 },
           orbital: this.staticOrbit(),
           isPrimaryGravitySource: true,
         },
         {
           id: "planet-earth", name: "Earth", type: "planet",
-          position: { x: 150, y: 0 }, radius: 64, mass: 5.972e24, gravityStrength: 0,
+          position: { x: 300, y: 0 }, radius: 8, mass: 5.972e24, gravityStrength: 0,
           color: { r: 100, g: 150, b: 255 },
-          orbital: this.staticOrbit("star-sol", 150),
+          orbital: this.staticOrbit("star-sol", 300),
           isPrimaryGravitySource: false,
         },
         {
           id: "planet-mars", name: "Mars", type: "planet",
-          position: { x: 228, y: 50 }, radius: 34, mass: 6.417e23, gravityStrength: 0,
+          position: { x: 480, y: 80 }, radius: 6, mass: 6.417e23, gravityStrength: 0,
           color: { r: 200, g: 100, b: 80 },
-          orbital: this.staticOrbit("star-sol", 228),
+          orbital: this.staticOrbit("star-sol", 486),
           isPrimaryGravitySource: false,
         },
       ],
       locations: [
         {
           id: "station-earth-orbit", name: "Earth Station", type: "station",
-          bodyId: "planet-earth", position: { x: 10, y: 0 }, dockingRadius: 30,
-          controllingFaction: "neutral", npcs: [], shops: [],
+          bodyId: "planet-earth", position: { x: 12, y: 0 }, dockingRadius: 30,
+          controllingFaction: "terran-federation",
+          npcs: ["npc-commander-voss", "npc-trader-halley"], shops: [],
         },
         {
           id: "outpost-mars", name: "Curiosity Base", type: "outpost",
-          bodyId: "planet-mars", position: { x: 6, y: 2 }, dockingRadius: 25,
-          controllingFaction: "neutral", npcs: [], shops: [],
+          bodyId: "planet-mars", position: { x: 8, y: 2 }, dockingRadius: 25,
+          controllingFaction: "terran-federation",
+          npcs: ["npc-trader-halley"], shops: [],
         },
       ],
       initialFactionAssignments: {},
@@ -1202,16 +1322,16 @@ export class GameManager {
       celestialBodies: [
         {
           id: "star-kepler-442", name: "Kepler-442", type: "star",
-          position: { x: 0, y: 0 }, radius: 600, mass: 1.4e30, gravityStrength: 0,
+          position: { x: 0, y: 0 }, radius: 22, mass: 1.4e30, gravityStrength: 12000,
           color: { r: 255, g: 180, b: 90 },
           orbital: this.staticOrbit(),
           isPrimaryGravitySource: true,
         },
         {
           id: "planet-kepler-442b", name: "Kepler-442b", type: "planet",
-          position: { x: 200, y: -40 }, radius: 80, mass: 8.4e24, gravityStrength: 0,
+          position: { x: 340, y: -60 }, radius: 9, mass: 8.4e24, gravityStrength: 0,
           color: { r: 120, g: 200, b: 130 },
-          orbital: this.staticOrbit("star-kepler-442", 204),
+          orbital: this.staticOrbit("star-kepler-442", 346),
           isPrimaryGravitySource: false,
         },
       ],
@@ -1219,7 +1339,8 @@ export class GameManager {
         {
           id: "station-kepler-orbital", name: "Kepler Orbital", type: "station",
           bodyId: "planet-kepler-442b", position: { x: 14, y: 0 }, dockingRadius: 30,
-          controllingFaction: "neutral", npcs: [], shops: [],
+          controllingFaction: "xeno-collective",
+          npcs: ["npc-emissary-zyx", "npc-archivist-krell"], shops: [],
         },
       ],
       initialFactionAssignments: {},
@@ -1235,16 +1356,16 @@ export class GameManager {
       celestialBodies: [
         {
           id: "star-proxima", name: "Proxima Centauri", type: "star",
-          position: { x: 0, y: 0 }, radius: 200, mass: 2.4e29, gravityStrength: 0,
+          position: { x: 0, y: 0 }, radius: 15, mass: 2.4e29, gravityStrength: 8000,
           color: { r: 255, g: 100, b: 80 },
           orbital: this.staticOrbit(),
           isPrimaryGravitySource: true,
         },
         {
           id: "planet-proxima-b", name: "Proxima b", type: "planet",
-          position: { x: 90, y: 30 }, radius: 50, mass: 7.6e24, gravityStrength: 0,
+          position: { x: 200, y: 40 }, radius: 7, mass: 7.6e24, gravityStrength: 0,
           color: { r: 180, g: 90, b: 70 },
-          orbital: this.staticOrbit("star-proxima", 95),
+          orbital: this.staticOrbit("star-proxima", 204),
           isPrimaryGravitySource: false,
         },
       ],
@@ -1252,7 +1373,8 @@ export class GameManager {
         {
           id: "outpost-proxima-b", name: "Frontier Outpost", type: "outpost",
           bodyId: "planet-proxima-b", position: { x: 8, y: 0 }, dockingRadius: 25,
-          controllingFaction: "neutral", npcs: [], shops: [],
+          controllingFaction: "nova-rebels",
+          npcs: ["npc-insurgent-tyne", "npc-strategist-orion"], shops: [],
         },
       ],
       initialFactionAssignments: {},
@@ -1268,7 +1390,7 @@ export class GameManager {
       celestialBodies: [
         {
           id: `${systemId}-primary`, name: systemId, type: "star",
-          position: { x: 0, y: 0 }, radius: 400, mass: 1e30, gravityStrength: 0,
+          position: { x: 0, y: 0 }, radius: 20, mass: 1e30, gravityStrength: 10000,
           color: { r: 200, g: 200, b: 200 },
           orbital: this.staticOrbit(),
           isPrimaryGravitySource: true,
@@ -1302,6 +1424,40 @@ export class GameManager {
       return;
     }
 
+    // Tick explosions every frame regardless of game state
+    for (const e of this.solarExplosions) e.ageMs += deltaMs;
+    this.solarExplosions = this.solarExplosions.filter(e => e.ageMs < e.maxAgeMs);
+
+    // Death sequence: freeze input, wait for animation, then respawn
+    if (this.solarDeathTimerMs > 0) {
+      this.solarDeathTimerMs -= deltaMs;
+      if (this.solarDeathTimerMs <= 0) {
+        this.solarDeathTimerMs = 0;
+        this.solarPlayerDead = false;
+        this.solarPlayerHealth = this.solarPlayerMaxHealth;
+        this.solarPlayerShield = this.solarPlayerMaxShield;
+        const ss = this.solarSystem.getSessionState();
+        ss.playerPosition = { x: 312, y: 0 };
+        ss.playerVelocity = { x: 0, y: 0 };
+        ss.playerHeading = 0;
+        ss.dockedLocationId = "station-earth-orbit";
+        ss.nearbyLocations = ["station-earth-orbit"];
+        this.state.setScreen("docked");
+      }
+      return;
+    }
+
+    // Advance economy clock and refresh shops when cycle completes
+    const session = this.solarSystem.getSessionState();
+    session.gameTimeMs += deltaMs;
+    if (this.shopManager.tick(deltaMs)) {
+      // Cycle advanced — ensure shops exist for all current system locations
+      const system = this.solarSystem.getCurrentSystem();
+      for (const loc of system.locations) {
+        this.shopManager.ensureShop(loc.id, loc.controllingFaction ?? "terran-federation");
+      }
+    }
+
     // Pause toggle (ESC / P)
     if (this.wasPausePressed() && this.menuDebounceMs === 0) {
       soundManager.setThrusterActive(false);
@@ -1322,8 +1478,13 @@ export class GameManager {
     // While the galaxy map is open, don't drive ship physics — just allow
     // the player to read and close it again.
     if (!this.mapOpen) {
-      this.solarSystem.updateShipPhysics(input, deltaMs);
-      soundManager.setThrusterActive(this.solarSystem.getLastThrustActive());
+      this.updateAntiGravity(input, deltaMs);
+      const skipGrav = this.antiGravActive || this.warpDecayMs > 0;
+      const decayT = this.warpDecayMs / GameManager.WARP_DECAY_DURATION_MS; // 1→0
+      const speedMult = this.antiGravActive ? 10 : (1 + decayT * 9); // 10x→1x during decay
+      this.solarSystem.updateShipPhysics(input, deltaMs, skipGrav, speedMult);
+      soundManager.setThrusterActive(this.solarSystem.getLastThrustActive() || this.antiGravActive);
+      soundManager.tickThruster(deltaMs);
     }
 
     // Proximity updates: stations + gates
@@ -1336,13 +1497,15 @@ export class GameManager {
       ? null
       : GateTeleportSystem.checkGateProximity(playerPos, gates as SystemGate[]);
 
-    // Confirm action: dock if a station is in range, else jump if a gate is.
-    if (input.menuConfirm && this.menuDebounceMs === 0) {
+    // F key — dock at nearby station OR jump through a gate
+    const warpBlocked = this.antiGravActive || this.warpDecayMs > 0 || this.warpDockCooldownMs > 0;
+    if (input.dockPulse && this.menuDebounceMs === 0) {
       const nearbyStations = this.solarSystem.getNearbyLocations();
-      if (nearbyStations.length > 0) {
-        const loc = nearbyStations[0];
-        if (loc && this.solarSystem.dock(loc.id)) {
+      const loc = nearbyStations[0];
+      if (loc && !warpBlocked) {
+        if (this.solarSystem.dock(loc.id)) {
           soundManager.docking();
+          this.checkExploreMissions(loc.id);
           this.dockedMenuSelection = 0;
           this.menuSelection = 0;
           this.state.setScreen("docked");
@@ -1356,14 +1519,74 @@ export class GameManager {
       }
     }
 
+    // Click-to-lock: tap on an enemy to lock/unlock it.
+    if (input.pointerDownPulse && !this.mapOpen) {
+      const { x: sx, y: sy } = input.pointerDownPulse;
+      const zoom = this.solarSystem.getSessionState().zoomLevel;
+      const kmToPx = Math.max(0.05, zoom);
+      const pcx = this.width / 2;  // 640
+      const pcy = this.height / 2; // 360
+      const worldX = (sx - pcx) / kmToPx + playerPos.x;
+      const worldY = (sy - pcy) / kmToPx + playerPos.y;
+      const sensorRange = 200; // km
+      let bestDist = 50; // km click-radius
+      let clicked: string | null = null;
+      for (const ship of this.solarEnemyShips) {
+        const d = Math.hypot(ship.position.x - worldX, ship.position.y - worldY);
+        const playerDist = Math.hypot(ship.position.x - playerPos.x, ship.position.y - playerPos.y);
+        if (d < bestDist && playerDist < sensorRange) {
+          bestDist = d; clicked = ship.id;
+        }
+      }
+      if (clicked) {
+        if (this.solarLockedIds.has(clicked)) {
+          this.solarLockedIds.delete(clicked);
+          if (this.solarFocusedId === clicked) this.solarFocusedId = null;
+        } else {
+          this.solarLockedIds.add(clicked);
+          this.solarFocusedId = clicked;
+        }
+      }
+    }
+
+    // Validate existing locks: remove any that moved out of sensor range or were destroyed
+    const sensorRangeKm = 200;
+    for (const lockedId of [...this.solarLockedIds]) {
+      const ship = this.solarEnemyShips.find(s => s.id === lockedId);
+      if (!ship || Math.hypot(ship.position.x - playerPos.x, ship.position.y - playerPos.y) > sensorRangeKm) {
+        this.solarLockedIds.delete(lockedId);
+        if (this.solarFocusedId === lockedId) this.solarFocusedId = null;
+      }
+    }
+    if (!this.solarFocusedId && this.solarLockedIds.size > 0) {
+      for (const id of this.solarLockedIds) { this.solarFocusedId = id; break; }
+    }
+
     // Fire weapon (Space — edge triggered, only when map is closed and no dock action this frame).
     const fireEdge = input.fire && !this.prevSolarFirePressed;
     this.prevSolarFirePressed = input.fire ?? false;
-    if (fireEdge && !this.mapOpen && this.menuDebounceMs === 0) {
+
+    // Auto-attack focused target (or fallback to cone scan on space press).
+    if (this.solarFocusedId && !this.mapOpen) {
+      const focused = this.solarEnemyShips.find(s => s.id === this.solarFocusedId);
+      if (!focused) {
+        this.solarLockedIds.delete(this.solarFocusedId);
+        this.solarFocusedId = null;
+      } else {
+        this.fireWeaponsAtTarget(playerPos, focused.position);
+      }
+    } else if (fireEdge && !this.mapOpen && this.menuDebounceMs === 0) {
       this.fireSolarWeapon(playerPos, this.solarSystem.getSessionState().playerHeading);
     }
 
     this.laserFlashMs = Math.max(0, this.laserFlashMs - deltaMs);
+
+    // Tick weapon cooldowns.
+    for (const [defId, cd] of this.solarWeaponCooldowns) {
+      const next = Math.max(0, cd - deltaMs);
+      if (next === 0) this.solarWeaponCooldowns.delete(defId);
+      else this.solarWeaponCooldowns.set(defId, next);
+    }
 
     if (input.zoomDelta) {
       this.solarSystem.adjustZoom(input.zoomDelta);
@@ -1372,11 +1595,99 @@ export class GameManager {
     // Update enemy bases and ships only in Sol system for now.
     if (this.currentSystemId === "sol") {
       this.updateSolarEnemies(deltaMs, playerPos);
+      this.updatePlayerProjectiles(deltaMs);
+      this.updateFriendlyShips(deltaMs, playerPos);
+    }
+  }
+
+  private getActiveWeapons(): Array<{ defId: string; damage: number; rateHz: number; kind: "cannon" | "laser" | "torpedo" }> {
+    const bp = this.solarActiveBlueprintId ? this.solarSavedBlueprints.get(this.solarActiveBlueprintId) : null;
+    if (!bp) {
+      return [{ defId: "default-laser", damage: 34, rateHz: 1.5, kind: "laser" }];
+    }
+    return bp.modules
+      .map(m => SolarModuleRegistry.getModule(m.moduleDefId))
+      .filter((d): d is NonNullable<typeof d> => !!d && d.type === "weapon")
+      .map(d => ({
+        defId: d.id,
+        damage: d.stats.damagePerShot ?? 20,
+        rateHz: d.stats.fireRateHz ?? 1.0,
+        kind: (d.id.includes("cannon") ? "cannon" : d.id.includes("torpedo") ? "torpedo" : "laser") as "cannon" | "laser" | "torpedo",
+      }));
+  }
+
+  private fireWeaponsAtTarget(from: { x: number; y: number }, target: { x: number; y: number }): void {
+    const weapons = this.getActiveWeapons();
+    const dx = target.x - from.x;
+    const dy = target.y - from.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const speed = 600; // km/s
+
+    for (const w of weapons) {
+      const cooldown = this.solarWeaponCooldowns.get(w.defId) ?? 0;
+      if (cooldown > 0) continue;
+      const intervalMs = 1000 / w.rateHz;
+      this.solarWeaponCooldowns.set(w.defId, intervalMs);
+
+      if (w.kind === "laser") {
+        soundManager.solarShoot();
+        this.laserFlashTarget = { ...target };
+        this.laserFlashMs = 200;
+        // Instant hit
+        const ship = this.solarEnemyShips.find(s =>
+          Math.hypot(s.position.x - target.x, s.position.y - target.y) < 20
+        );
+        if (ship) {
+          this.damageEnemyShip(ship, w.damage);
+        }
+      } else {
+        // Cannon / torpedo — create projectile
+        const vx = (dx / dist) * speed;
+        const vy = (dy / dist) * speed;
+        const lifetime = w.kind === "torpedo" ? 8000 : 3000;
+        this.solarPlayerProjectiles.push({
+          id: `pp-${this.solarPlayerNextId++}`,
+          position: { ...from },
+          velocity: { x: vx, y: vy },
+          damage: w.damage,
+          weaponKind: w.kind,
+          lifetimeMs: lifetime,
+          maxLifetimeMs: lifetime,
+        });
+      }
+    }
+  }
+
+  /** Apply damage to an enemy ship, removing it and checking missions if destroyed. */
+  private damageEnemyShip(ship: SolarEnemyShip, damage: number): void {
+    ship.health -= damage;
+    if (ship.health <= 0) {
+      this.solarExplosions.push({
+        x: ship.position.x,
+        y: ship.position.y,
+        ageMs: 0,
+        maxAgeMs: 900,
+        scale: 1 + ship.sizeClass * 0.4,
+      });
+      this.solarLockedIds.delete(ship.id);
+      if (this.solarFocusedId === ship.id) {
+        this.solarFocusedId = null;
+        // Auto-focus next remaining lock
+        for (const id of this.solarLockedIds) { this.solarFocusedId = id; break; }
+      }
+      this.solarEnemyShips = this.solarEnemyShips.filter(s => s.id !== ship.id);
+      this.checkKillMissions();
+      const base = this.solarEnemyBases.find(b => b.id === ship.baseId);
+      if (base) {
+        const remaining = this.solarEnemyShips.filter(s => s.baseId === base.id);
+        if (remaining.length === 0) {
+          base.health = Math.max(0, base.health - 50);
+        }
+      }
     }
   }
 
   private fireSolarWeapon(playerPos: { x: number; y: number }, headingDeg: number): void {
-    soundManager.solarShoot();
     const headingRad = (headingDeg * Math.PI) / 180;
     const fwdX = Math.sin(headingRad);
     const fwdY = -Math.cos(headingRad);
@@ -1391,39 +1702,86 @@ export class GameManager {
       const dy = ship.position.y - playerPos.y;
       const dist = Math.hypot(dx, dy);
       if (dist > maxRangeKm) continue;
-      // Check angle within cone
       const dotNorm = (dx * fwdX + dy * fwdY) / dist;
       const angleDeg = (Math.acos(Math.max(-1, Math.min(1, dotNorm))) * 180) / Math.PI;
       if (angleDeg > halfConeDeg) continue;
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestShip = ship;
-      }
+      if (dist < bestDist) { bestDist = dist; bestShip = ship; }
     }
 
     if (bestShip) {
-      bestShip.health -= 34; // One-third of max health per shot
-      this.laserFlashTarget = { ...bestShip.position };
-      this.laserFlashMs = 200;
-      if (bestShip.health <= 0) {
-        this.solarEnemyShips = this.solarEnemyShips.filter((s) => s.id !== bestShip!.id);
-        // Register kill on the base's counter
-        const base = this.solarEnemyBases.find((b) => b.id === bestShip!.baseId);
-        if (base) {
-          // Damage base slightly when all its ships are killed
-          const remaining = this.solarEnemyShips.filter((s) => s.baseId === base.id);
-          if (remaining.length === 0) {
-            base.health = Math.max(0, base.health - 50);
-          }
-        }
-      }
+      this.fireWeaponsAtTarget(playerPos, bestShip.position);
     } else {
-      // Miss: draw line in facing direction to max range
+      soundManager.solarShoot(); // miss sound
       this.laserFlashTarget = {
         x: playerPos.x + fwdX * maxRangeKm,
         y: playerPos.y + fwdY * maxRangeKm,
       };
       this.laserFlashMs = 100;
+    }
+  }
+
+  private updatePlayerProjectiles(deltaMs: number): void {
+    const dtS = deltaMs / 1000;
+    const survived: SolarPlayerProjectile[] = [];
+    for (const proj of this.solarPlayerProjectiles) {
+      proj.position.x += proj.velocity.x * dtS;
+      proj.position.y += proj.velocity.y * dtS;
+      proj.lifetimeMs -= deltaMs;
+      if (proj.lifetimeMs <= 0) continue;
+      let hit = false;
+      for (const ship of this.solarEnemyShips) {
+        if (Math.hypot(ship.position.x - proj.position.x, ship.position.y - proj.position.y) < 10) {
+          this.damageEnemyShip(ship, proj.damage);
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) survived.push(proj);
+    }
+    this.solarPlayerProjectiles = survived;
+  }
+
+  private updateFriendlyShips(deltaMs: number, playerPos: { x: number; y: number }): void {
+    const FORMATION_OFFSETS = [
+      { x: -60, y: 40 }, { x: 60, y: 40 }, { x: 0, y: 70 },
+    ];
+    const dtS = deltaMs / 1000;
+    const MAX_SPEED = 5000; // m/s
+
+    for (let i = 0; i < this.solarFriendlyShips.length; i++) {
+      const ship = this.solarFriendlyShips[i]!;
+      const formOff = FORMATION_OFFSETS[i % 3]!;
+      const targetPos = { x: playerPos.x + formOff.x, y: playerPos.y + formOff.y };
+      const dx = targetPos.x - ship.position.x;
+      const dy = targetPos.y - ship.position.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 5) {
+        const speed = Math.min(MAX_SPEED, dist * 2000);
+        ship.velocity.x = (dx / dist) * speed;
+        ship.velocity.y = (dy / dist) * speed;
+        ship.heading = (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
+      } else {
+        ship.velocity = { x: 0, y: 0 };
+      }
+      ship.position.x += ship.velocity.x * dtS / 1000;
+      ship.position.y += ship.velocity.y * dtS / 1000;
+
+      // Auto-attack nearest enemy within 200km
+      ship.weaponCooldownMs = Math.max(0, ship.weaponCooldownMs - deltaMs);
+      if (ship.weaponCooldownMs <= 0 && this.solarEnemyShips.length > 0) {
+        let nearestDist = 200;
+        let nearest: SolarEnemyShip | null = null;
+        for (const enemy of this.solarEnemyShips) {
+          const d = Math.hypot(enemy.position.x - ship.position.x, enemy.position.y - ship.position.y);
+          if (d < nearestDist) { nearestDist = d; nearest = enemy; }
+        }
+        if (nearest) {
+          this.damageEnemyShip(nearest, 20);
+          ship.weaponCooldownMs = 2000;
+          this.laserFlashTarget = { ...nearest.position };
+          this.laserFlashMs = 150;
+        }
+      }
     }
   }
 
@@ -1448,18 +1806,26 @@ export class GameManager {
         const typeIdx = this.solarEnemyNextId % SOLAR_ENEMY_TYPES.length;
         const typeDef = SOLAR_ENEMY_TYPES[typeIdx]!;
         const loadout = ENEMY_WEAPON_LOADOUT[typeIdx]!;
+        // Scale ship using pirate blueprint stats when available
+        const sizeClass = (typeIdx % 9) + 1;
+        const pirateBp = getPirateBlueprint(sizeClass);
+        const coreDef = pirateBp
+          ? SolarModuleRegistry.getModule(pirateBp.modules[0]!.moduleDefId)
+          : null;
+        const health = coreDef?.stats.hp ?? typeDef.health;
         const newShip: SolarEnemyShip = {
           id: `enemy-${++this.solarEnemyNextId}`,
           baseId: base.id,
           typeIdx,
+          sizeClass,
           position: {
             x: base.position.x + Math.cos(angle) * 20,
             y: base.position.y + Math.sin(angle) * 20,
           },
           velocity: { x: 0, y: 0 },
           heading: 0,
-          health: typeDef.health,
-          maxHealth: typeDef.health,
+          health,
+          maxHealth: health,
           weapon0CooldownMs: Math.random() * SOLAR_WEAPONS[loadout[0]]!.cooldownMs,
           weapon1CooldownMs: Math.random() * SOLAR_WEAPONS[loadout[1]]!.cooldownMs,
         };
@@ -1538,15 +1904,17 @@ export class GameManager {
         this.solarPlayerHealth = Math.max(0, this.solarPlayerHealth - dmg);
         soundManager.solarHit();
         this.solarDamageFlashMs = 300;
-        if (this.solarPlayerHealth <= 0) {
-          // Respawn — reset health and position
-          this.solarPlayerHealth = this.solarPlayerMaxHealth;
-          this.solarPlayerShield = this.solarPlayerMaxShield;
-          if (this.solarSystem) {
-            const ss = this.solarSystem.getSessionState();
-            ss.playerPosition = { x: 110, y: 0 };
-            ss.playerVelocity = { x: 0, y: 0 };
-          }
+        if (this.solarPlayerHealth <= 0 && this.solarDeathTimerMs === 0) {
+          // Start death sequence: ship vanishes, 5 s explosion watch + 1 s fade
+          this.solarDeathTimerMs = GameManager.SOLAR_DEATH_DURATION_MS;
+          this.solarPlayerDead = true;
+          const pPos = this.solarSystem?.getSessionState().playerPosition ?? { x: 0, y: 0 };
+          this.solarExplosions.push({ x: pPos.x, y: pPos.y, ageMs: 0, maxAgeMs: 5000, scale: 6 });
+          this.solarExplosions.push({ x: pPos.x - 5, y: pPos.y + 3, ageMs: 150, maxAgeMs: 4500, scale: 3 });
+          this.solarExplosions.push({ x: pPos.x + 6, y: pPos.y - 4, ageMs: 300, maxAgeMs: 4800, scale: 2.5 });
+          this.solarLockedIds = new Set();
+          this.solarFocusedId = null;
+          soundManager.playerDeath();
         }
         return false;
       }
@@ -1603,6 +1971,43 @@ export class GameManager {
     }
   }
 
+  private updateAntiGravity(input: InputState, deltaMs: number): void {
+    const inp = input as any;
+    const thrustFwd = inp.thrustForward === true;
+    const turning = inp.turnLeft === true || inp.turnRight === true;
+    const strafing = inp.strafeLeft === true || inp.strafeRight === true;
+    const pureFwd = thrustFwd && !turning && !strafing;
+
+    // Count down decay timer
+    if (this.warpDecayMs > 0) {
+      const prev = this.warpDecayMs;
+      this.warpDecayMs = Math.max(0, this.warpDecayMs - deltaMs);
+      if (prev > 0 && this.warpDecayMs === 0) {
+        // Warp fully dissipated — start 3-second dock cooldown
+        this.warpDockCooldownMs = GameManager.WARP_DOCK_COOLDOWN_MS;
+      }
+    }
+    if (this.warpDockCooldownMs > 0) {
+      this.warpDockCooldownMs = Math.max(0, this.warpDockCooldownMs - deltaMs);
+    }
+
+    if (!this.antiGravActive) {
+      this.antiGravHoldMs = pureFwd ? this.antiGravHoldMs + deltaMs : 0;
+      if (this.antiGravHoldMs >= GameManager.ANTIGRAV_HOLD_THRESHOLD_MS) {
+        this.antiGravActive = true;
+        this.warpDecayMs = 0;
+      }
+      return;
+    }
+
+    // Deactivate when player releases forward or adds turn/strafe → start decay
+    if (!thrustFwd || turning || strafing) {
+      this.antiGravActive = false;
+      this.antiGravHoldMs = 0;
+      this.warpDecayMs = GameManager.WARP_DECAY_DURATION_MS;
+    }
+  }
+
   private updateSolarSystemPaused(): void {
     if (this.wasPausePressed() && this.menuDebounceMs === 0) {
       this.solarPauseSelection = 0;
@@ -1654,12 +2059,24 @@ export class GameManager {
 
   private getDockedMenuItems(): readonly string[] {
     const dockedLocId = this.solarSystem?.getSessionState().dockedLocationId ?? null;
+    const activeNpc = this.getDockedNpc();
     const hasShipyard =
       dockedLocId === "station-earth-orbit" || dockedLocId === "outpost-mars";
+    const npcItems = activeNpc ? ["Talk to NPC"] : [];
+    const escortItem = this.solarFriendlyShips.length < 3 ? ["Launch Escort"] : [];
     if (hasShipyard) {
-      return ["Repair Bay", "Shop", "Missions", "Shipyard", "Galaxy Map", "Undock"];
+      return [...npcItems, "Repair Bay", ...escortItem, "Shop", "Shipyard", "My Ships", "Galaxy Map", "Undock"];
     }
-    return ["Repair Bay", "Shop", "Missions", "Galaxy Map", "Undock"];
+    return [...npcItems, "Repair Bay", ...escortItem, "Shop", "My Ships", "Galaxy Map", "Undock"];
+  }
+
+  private getDockedNpc() {
+    const session = this.solarSystem?.getSessionState();
+    const locId = session?.dockedLocationId ?? null;
+    if (!locId) return undefined;
+    const system = this.solarSystem!.getCurrentSystem();
+    const loc = system.locations.find((l) => l.id === locId);
+    return loc?.npcs[0] ? NPCRegistry.getNPC(loc.npcs[0]) : undefined;
   }
 
   private updateDockedMenu(deltaMs: number): void {
@@ -1672,8 +2089,20 @@ export class GameManager {
 
     const menuItems = this.getDockedMenuItems();
 
-    // ESC undocks immediately.
+    // M key toggles galaxy map overlay while staying docked.
+    const input0 = this.input.poll();
+    if (input0.mapTogglePulse) {
+      this.mapOpen = !this.mapOpen;
+      this.menuDebounceMs = 150;
+    }
+
+    // ESC closes the map if open; otherwise undocks.
     if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      if (this.mapOpen) {
+        this.mapOpen = false;
+        this.menuDebounceMs = 350;
+        return;
+      }
       this.solarSystem.undock();
       this.state.setScreen("solar-system");
       this.menuDebounceMs = 350;
@@ -1709,6 +2138,7 @@ export class GameManager {
     if (!this.solarSystem) return;
     if (item === "Undock") {
       soundManager.undocking();
+      this.applyActiveSolarBlueprint();
       this.solarSystem.undock();
       this.state.setScreen("solar-system");
       this.menuDebounceMs = 350;
@@ -1716,27 +2146,629 @@ export class GameManager {
     }
     if (item === "Galaxy Map") {
       this.mapOpen = true;
-      this.solarSystem.undock();
-      this.state.setScreen("solar-system");
       this.menuDebounceMs = 350;
       return;
     }
     if (item === "Shipyard") {
-      this.shipyardReturnScreen = "docked";
-      this.openShipyard();
+      const active = this.solarActiveBlueprintId
+        ? this.solarSavedBlueprints.get(this.solarActiveBlueprintId)
+        : undefined;
+      if (active) {
+        this.solarShipBuilderMgr.open(active.modules[0]!.moduleDefId, active.coreSideCount, active);
+      } else {
+        this.solarShipBuilderMgr.open("core-c1-balanced", 6);
+      }
+      this.state.setScreen("solar-shipyard");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+    if (item === "My Ships") {
+      this.state.setScreen("solar-my-ships");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+    if (item === "Talk to NPC") {
+      const npc = this.getDockedNpc();
+      if (npc) {
+        this.activeTalkNpcId = npc.id;
+        this.menuSelection = 0;
+        this.state.setScreen("solar-npc-talk");
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      }
+      return;
+    }
+    if (item === "Launch Escort") {
+      if (this.solarFriendlyShips.length < 3) {
+        const id = `friendly-${this.solarPlayerNextId++}`;
+        const session = this.solarSystem!.getSessionState();
+        this.solarFriendlyShips.push({
+          id,
+          health: 80,
+          maxHealth: 80,
+          position: { ...session.playerPosition },
+          velocity: { x: 0, y: 0 },
+          heading: session.playerHeading,
+          weaponCooldownMs: 1000,
+        });
+        this.dockedStatusMsg = `Escort launched (${this.solarFriendlyShips.length}/3)`;
+        this.dockedStatusMs = 1500;
+      }
+      this.menuDebounceMs = 350;
       return;
     }
     if (item === "Repair Bay") {
-      this.dockedStatusMsg = "Hull repaired — no charge today.";
+      this.solarPlayerHealth = this.solarPlayerMaxHealth;
+      this.solarPlayerShield = this.solarPlayerMaxShield;
+      this.dockedStatusMsg = "Hull repaired — shields restored.";
       this.dockedStatusMs = 1500;
     } else if (item === "Shop") {
-      this.dockedStatusMsg = "Shop inventory empty (coming soon).";
-      this.dockedStatusMs = 1500;
-    } else if (item === "Missions") {
-      this.dockedStatusMsg = "No missions available.";
-      this.dockedStatusMs = 1500;
+      const session = this.solarSystem?.getSessionState();
+      const dockedLocId = session?.dockedLocationId ?? null;
+      if (dockedLocId) {
+        const system = this.solarSystem!.getCurrentSystem();
+        const loc = system.locations.find((l) => l.id === dockedLocId);
+        this.shopManager.ensureShop(dockedLocId, loc?.controllingFaction ?? "terran-federation");
+        this.shopMenuSelection = 0;
+        this.shopStatusMsg = null;
+        this.state.setScreen("solar-shop");
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+        return;
+      }
+      this.dockedStatusMsg = "No shop here.";
+      this.dockedStatusMs = 1200;
     }
     this.menuDebounceMs = 350;
+  }
+
+  // ── NPC talk / mission screens ───────────────────────────────────────────
+
+  /** Returns the missions offered by `npcId`, annotated with log status. */
+  private getNpcMissions(npcId: string): Array<{ spec: MissionSpec; status: "available" | "active" | "completed" }> {
+    const npc = NPCRegistry.getNPC(npcId);
+    if (!npc) return [];
+    const completed = this.missionLog.getCompletedMissionIds();
+    const active = new Set(this.missionLog.getMissionLog().filter(e => e.status === "active").map(e => e.missionId));
+    return npc.missionIds.flatMap((id) => {
+      const spec = this.getMissionSpec(id);
+      if (!spec) return [];
+      let status: "available" | "active" | "completed" = "available";
+      if (completed.has(id)) status = "completed";
+      else if (active.has(id)) status = "active";
+      return [{ spec, status }];
+    });
+  }
+
+  private getMissionSpec(id: string): MissionSpec | undefined {
+    return MissionRegistry.getMission(id);
+  }
+
+  /** Increment kill progress on active kill missions; complete if target reached. */
+  private checkKillMissions(): void {
+    for (const entry of this.missionLog.getMissionLog()) {
+      if (entry.status !== "active") continue;
+      const spec = this.getMissionSpec(entry.missionId);
+      if (!spec || spec.type !== "kill") continue;
+      const current = (entry.progressData?.killCount as number | undefined) ?? 0;
+      const next = current + 1;
+      entry.progressData = { ...entry.progressData, killCount: next };
+      if (next >= (spec.killCount ?? 1)) {
+        try {
+          const rewards = this.missionLog.completeMission(entry.missionId);
+          const session = this.solarSystem?.getSessionState();
+          if (session) session.solarCredits += rewards.credits;
+          this.dockedStatusMsg = `Kill mission complete! +${rewards.credits.toLocaleString()} credits`;
+          this.dockedStatusMs = 3000;
+        } catch { /* guard */ }
+      }
+    }
+  }
+
+  /** Auto-complete explore missions when the player docks at the destination. */
+  private checkExploreMissions(locationId: string): void {
+    for (const entry of this.missionLog.getMissionLog()) {
+      if (entry.status !== "active") continue;
+      const spec = this.getMissionSpec(entry.missionId);
+      if (!spec || spec.type !== "explore") continue;
+      if (spec.destinationLocationId === locationId) {
+        try {
+          const rewards = this.missionLog.completeMission(entry.missionId);
+          const session = this.solarSystem?.getSessionState();
+          if (session) session.solarCredits += rewards.credits;
+          this.dockedStatusMsg = `Mission complete! +${rewards.credits.toLocaleString()} credits`;
+          this.dockedStatusMs = 3000;
+        } catch { /* already completed */ }
+      }
+    }
+  }
+
+  private updateNpcTalk(_deltaMs: number): void {
+    const npc = this.activeTalkNpcId ? NPCRegistry.getNPC(this.activeTalkNpcId) : undefined;
+    if (!npc) { this.state.setScreen("docked"); return; }
+
+    const items = ["Missions", "Leave"];
+    this.stepMenuSelection(items.length);
+
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.activeTalkNpcId = null;
+      this.state.setScreen("docked");
+      this.menuSelection = 0;
+      this.menuDebounceMs = 350;
+      return;
+    }
+
+    if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
+      const item = items[this.menuSelection];
+      soundManager.menuConfirm();
+      if (item === "Missions") {
+        this.menuSelection = 0;
+        this.state.setScreen("solar-missions");
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      } else {
+        this.activeTalkNpcId = null;
+        this.state.setScreen("docked");
+        this.menuSelection = 0;
+        this.menuDebounceMs = 350;
+      }
+    }
+  }
+
+  private updateMissionList(_deltaMs: number): void {
+    const npcId = this.activeTalkNpcId;
+    if (!npcId) { this.state.setScreen("docked"); return; }
+
+    const missions = this.getNpcMissions(npcId);
+    const itemCount = missions.length + 1; // +1 for Back
+
+    this.stepMenuSelection(itemCount);
+
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.menuSelection = 0;
+      this.state.setScreen("solar-npc-talk");
+      this.menuDebounceMs = 350;
+      return;
+    }
+
+    if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
+      soundManager.menuConfirm();
+      if (this.menuSelection === missions.length) {
+        // Back
+        this.menuSelection = 0;
+        this.state.setScreen("solar-npc-talk");
+        this.menuDebounceMs = 350;
+        return;
+      }
+      const entry = missions[this.menuSelection];
+      if (entry && entry.status === "available") {
+        this.activeMissionDetailId = entry.spec.id;
+        this.menuSelection = 0;
+        this.state.setScreen("solar-mission-detail");
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      }
+    }
+  }
+
+  private updateMissionDetail(_deltaMs: number): void {
+    const missionId = this.activeMissionDetailId;
+    const npcId = this.activeTalkNpcId;
+    if (!missionId || !npcId) { this.state.setScreen("solar-missions"); return; }
+    const spec = this.getMissionSpec(missionId);
+    if (!spec) { this.state.setScreen("solar-missions"); return; }
+
+    const items = ["Accept Mission", "Back"];
+    this.stepMenuSelection(items.length);
+
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.activeMissionDetailId = null;
+      this.menuSelection = 0;
+      this.state.setScreen("solar-missions");
+      this.menuDebounceMs = 350;
+      return;
+    }
+
+    if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0) {
+      soundManager.menuConfirm();
+      if (this.menuSelection === 0) {
+        // Accept
+        try {
+          this.missionLog.acceptMission(spec, npcId);
+          this.activeMissionDetailId = null;
+          this.menuSelection = 0;
+          this.state.setScreen("solar-missions");
+          this.menuDebounceMs = MENU_DEBOUNCE_MS;
+        } catch {
+          // Already accepted or unknown — just go back
+          this.activeMissionDetailId = null;
+          this.menuSelection = 0;
+          this.state.setScreen("solar-missions");
+          this.menuDebounceMs = 350;
+        }
+      } else {
+        this.activeMissionDetailId = null;
+        this.menuSelection = 0;
+        this.state.setScreen("solar-missions");
+        this.menuDebounceMs = 350;
+      }
+    }
+  }
+
+  // ── Solar ship builder ───────────────────────────────────────────────────
+
+  // Ship-builder right-panel geometry constants (must match GameRenderer)
+  private static readonly SB_SPLIT = 800;
+  private static readonly SB_TILE_H = 36;
+  private static readonly SB_TILE_START_Y = 120;
+  private static readonly SB_BTN_W = 38;
+  private static readonly SB_BTN_H = 22;
+  private static readonly SB_BTN_GAP = 3;
+  // Core-sides toggle strip above the palette (matches renderer header)
+  private static readonly SB_CORE_SIDES_Y = 98;
+  private static readonly SB_CORE_SIDES_H = 20;
+
+  private updateSolarShipBuilder(deltaMs: number): void {
+    this.solarShipBuilderMgr.tick(deltaMs);
+    const input = this.input.poll();
+    if (input.pointer) {
+      this.solarShipBuilderMgr.onPointerMove(input.pointer.x, input.pointer.y);
+    }
+    // ESC → back to docked
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.solarShipBuilderMgr.close();
+      this.state.setScreen("docked");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+
+    const click = input.pointerDownPulse ?? null;
+    const session = this.solarSystem?.getSessionState();
+    const locId = session?.dockedLocationId ?? null;
+
+    // ── SAVE button (right panel header, y:4–40, right 80px) ─────────────
+    if (click && click.x >= 1280 - 84 && click.x <= 1276 && click.y >= 4 && click.y <= 40) {
+      const bp = this.solarShipBuilderMgr.getBlueprint();
+      if (bp) this.saveSolarBlueprint(bp);
+      return;
+    }
+
+    // Right-click on left panel → deselect or remove
+    const rClick = input.pointerRightClickPulse ?? null;
+    if (rClick && rClick.x < GameManager.SB_SPLIT) {
+      const delta = this.solarShipBuilderMgr.onRightClick(rClick.x, rClick.y);
+      if (delta) this.adjustModuleInventory(delta.moduleDefId, delta.delta);
+    }
+
+    if (click && this.menuDebounceMs === 0) {
+      // ── Core-sides UI strip (right panel, above palette) ─────────────────
+      if (
+        click.x >= GameManager.SB_SPLIT &&
+        click.y >= GameManager.SB_CORE_SIDES_Y &&
+        click.y < GameManager.SB_CORE_SIDES_Y + GameManager.SB_CORE_SIDES_H
+      ) {
+        const midX = GameManager.SB_SPLIT + (1280 - GameManager.SB_SPLIT) / 2;
+        const currentSides = this.solarShipBuilderMgr.getCoreSideCount();
+        if (click.x < midX) {
+          this.solarShipBuilderMgr.changeCoreSides(currentSides - 1);
+        } else {
+          this.solarShipBuilderMgr.changeCoreSides(currentSides + 1);
+        }
+        return;
+      }
+
+      // ── Inline palette buttons (right panel) ────────────────────────────
+      if (click.x >= GameManager.SB_SPLIT) {
+        const tileIdx = Math.floor(
+          (click.y - GameManager.SB_TILE_START_Y) / GameManager.SB_TILE_H,
+        );
+        if (tileIdx >= 0) {
+          const rd = this.solarShipBuilderMgr.getRenderData(
+            session?.moduleInventory ?? new Map(),
+            session?.solarCredits ?? 0,
+          );
+          const item = rd?.palette[tileIdx];
+          if (item) {
+            // Button layout (right-aligned): [TRASH] [SELL] [BUY]
+            const tileRight = 1280 - 4;
+            const btnAreaRight = tileRight;
+            const trashX = btnAreaRight - GameManager.SB_BTN_W;
+            const sellX = trashX - GameManager.SB_BTN_GAP - GameManager.SB_BTN_W;
+            const buyX = sellX - GameManager.SB_BTN_GAP - GameManager.SB_BTN_W;
+            const btnTop = GameManager.SB_TILE_START_Y + tileIdx * GameManager.SB_TILE_H + (GameManager.SB_TILE_H - GameManager.SB_BTN_H) / 2;
+            const inBtn = (bx: number) =>
+              click.x >= bx && click.x < bx + GameManager.SB_BTN_W &&
+              click.y >= btnTop && click.y < btnTop + GameManager.SB_BTN_H;
+
+            if (inBtn(trashX) && item.quantity > 0) {
+              this.adjustModuleInventory(item.defId, -1);
+              return;
+            }
+            if (inBtn(sellX) && item.quantity > 0 && locId && session) {
+              const sellResult = this.shopManager.sellModule(locId, item.defId, session.solarCredits);
+              if (sellResult.ok) {
+                session.solarCredits = sellResult.newCredits;
+                this.adjustModuleInventory(item.defId, -1);
+              }
+              return;
+            }
+            if (inBtn(buyX) && item.shopStock > 0 && locId && session) {
+              const buyResult = this.shopManager.buyModule(locId, item.defId, session.solarCredits);
+              if (buyResult.ok) {
+                session.solarCredits = buyResult.newCredits;
+                this.adjustModuleInventory(item.defId, +1);
+              }
+              return;
+            }
+          }
+        }
+        // Fallthrough: normal palette click (select item)
+        const inv = session?.moduleInventory ?? new Map<string, number>();
+        this.solarShipBuilderMgr.onPointerDown(click.x, click.y, inv);
+        return;
+      }
+
+      // ── Left panel: place selected module at snap ──────────────────────
+      const inv = session?.moduleInventory ?? new Map<string, number>();
+      const delta = this.solarShipBuilderMgr.onPointerDown(click.x, click.y, inv);
+      if (delta) this.adjustModuleInventory(delta.moduleDefId, delta.delta);
+    }
+  }
+
+  // ── Solar ship blueprints ─────────────────────────────────────────────────
+
+  private computeBlueprintModules(bp: SolarShipBlueprint): {
+    modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
+    coreRadius: number;
+  } {
+    const defs = SolarModuleRegistry.getModuleMap();
+    const geometries = GeometryEngine.deriveAllGeometries(bp.modules, defs, bp.coreSideCount);
+    const coreDef = defs.get(bp.modules[0]?.moduleDefId ?? "");
+    const coreRadius = coreDef
+      ? GeometryEngine.circumradius(bp.coreSideCount, coreDef.shape.sideLengthPx)
+      : 20;
+    const modules = bp.modules.flatMap((m) => {
+      const geom = geometries.get(m.placedId);
+      const def = defs.get(m.moduleDefId);
+      if (!geom || !def) return [];
+      return [{ vertices: geom.vertices.map(v => ({ x: v.x, y: v.y })), moduleType: def.type as string }];
+    });
+    return { modules, coreRadius };
+  }
+
+  private getPirateBlueprintModules(sizeClass: number) {
+    if (!this.pirateBlueprintModulesCache.has(sizeClass)) {
+      const bp = getPirateBlueprint(sizeClass);
+      if (bp) this.pirateBlueprintModulesCache.set(sizeClass, this.computeBlueprintModules(bp));
+    }
+    return this.pirateBlueprintModulesCache.get(sizeClass);
+  }
+
+  private saveSolarBlueprint(bp: SolarShipBlueprint): void {
+    const id = bp.id || `ship-${++this.solarBlueprintCounter}`;
+    const saved: SolarShipBlueprint = { ...bp, id };
+    this.solarSavedBlueprints.set(id, saved);
+    if (!this.solarActiveBlueprintId) this.solarActiveBlueprintId = id;
+    // Invalidate player blueprint cache so updated geometry is picked up next frame.
+    this.solarPlayerBlueprintCache = null;
+    this.solarShipBuilderMgr.setStatus(`SAVED: ${bp.name.toUpperCase()}`);
+  }
+
+  private setActiveSolarBlueprint(id: string): void {
+    if (this.solarSavedBlueprints.has(id)) this.solarActiveBlueprintId = id;
+  }
+
+  private applyActiveSolarBlueprint(): void {
+    if (!this.solarActiveBlueprintId) return;
+    const bp = this.solarSavedBlueprints.get(this.solarActiveBlueprintId);
+    if (!bp) return;
+    // Apply stats from the core module
+    const core = bp.modules[0];
+    if (!core) return;
+    const coreDef = SolarModuleRegistry.getModule(core.moduleDefId);
+    if (!coreDef || coreDef.type !== "core") return;
+    const hp = coreDef.stats.hp ?? 100;
+    const shield = coreDef.stats.shieldCapacity ?? 50;
+    this.solarPlayerMaxHealth = hp;
+    this.solarPlayerHealth = Math.min(this.solarPlayerHealth, hp);
+    this.solarPlayerMaxShield = shield;
+    this.solarPlayerShield = Math.min(this.solarPlayerShield, shield);
+  }
+
+  private getSavedBlueprintSummaries(): SavedBlueprintSummary[] {
+    return Array.from(this.solarSavedBlueprints.values()).map((bp) => ({
+      id: bp.id,
+      name: bp.name,
+      sizeClass: bp.sizeClass,
+      coreSideCount: bp.coreSideCount,
+      partCount: bp.modules.length,
+      isActive: bp.id === this.solarActiveBlueprintId,
+    }));
+  }
+
+  // ── My Ships screen ───────────────────────────────────────────────────────
+
+  private myShipsSelection = 0;
+
+  private updateSolarMyShips(): void {
+    const ships = this.getSavedBlueprintSummaries();
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.state.setScreen("docked");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+    const input = this.input.poll();
+    const upEdge = (input as any).moveUp && !this.prevUpPressed;
+    const downEdge = (input as any).moveDown && !this.prevDownPressed;
+    if (upEdge && this.menuDebounceMs === 0) {
+      this.myShipsSelection = (this.myShipsSelection - 1 + Math.max(1, ships.length)) % Math.max(1, ships.length);
+      this.menuDebounceMs = 150;
+    }
+    if (downEdge && this.menuDebounceMs === 0) {
+      this.myShipsSelection = (this.myShipsSelection + 1) % Math.max(1, ships.length);
+      this.menuDebounceMs = 150;
+    }
+    this.myShipsSelection = Math.min(this.myShipsSelection, Math.max(0, ships.length - 1));
+
+    // Click detection: 3 buttons per row — SET ACTIVE / LOAD TO BUILDER / DELETE
+    const click = input.pointerDownPulse ?? null;
+    if (click && this.menuDebounceMs === 0) {
+      const ROW_H = 52;
+      const LIST_Y = 80;
+      const rowIdx = Math.floor((click.y - LIST_Y) / ROW_H);
+      const ship = ships[rowIdx];
+      if (ship) {
+        this.myShipsSelection = rowIdx;
+        const BTN_W = 110;
+        const BTN_GAP = 8;
+        const rightEdge = 1280 - 16;
+        const deleteX = rightEdge - BTN_W;
+        const loadX = deleteX - BTN_GAP - BTN_W;
+        const activeX = loadX - BTN_GAP - BTN_W;
+        const btnY = LIST_Y + rowIdx * ROW_H + (ROW_H - 26) / 2;
+        if (click.x >= deleteX && click.y >= btnY && click.y <= btnY + 26) {
+          this.solarSavedBlueprints.delete(ship.id);
+          if (this.solarActiveBlueprintId === ship.id) {
+            this.solarActiveBlueprintId = this.solarSavedBlueprints.keys().next().value ?? null;
+          }
+          this.menuDebounceMs = 200;
+        } else if (click.x >= loadX && click.x < deleteX - BTN_GAP && click.y >= btnY && click.y <= btnY + 26) {
+          const bp = this.solarSavedBlueprints.get(ship.id);
+          if (bp) {
+            this.solarShipBuilderMgr.open(bp.modules[0]!.moduleDefId, bp.coreSideCount, bp);
+            this.state.setScreen("solar-shipyard");
+          }
+          this.menuDebounceMs = MENU_DEBOUNCE_MS;
+        } else if (click.x >= activeX && click.x < loadX - BTN_GAP && click.y >= btnY && click.y <= btnY + 26) {
+          this.setActiveSolarBlueprint(ship.id);
+          this.menuDebounceMs = 200;
+        }
+      }
+    }
+  }
+
+  // ── Solar shop ───────────────────────────────────────────────────────────
+
+  private updateSolarShop(deltaMs: number): void {
+    if (this.shopStatusMs > 0) {
+      this.shopStatusMs = Math.max(0, this.shopStatusMs - deltaMs);
+      if (this.shopStatusMs === 0) this.shopStatusMsg = null;
+    }
+    const input = this.input.poll();
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.state.setScreen("docked");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+    const session = this.solarSystem?.getSessionState();
+    const locId = session?.dockedLocationId ?? null;
+    if (!locId) { this.state.setScreen("docked"); return; }
+    const shop = this.shopManager.getShop(locId);
+    if (!shop) return;
+    const entries = shop.entries;
+    if (entries.length === 0) return;
+
+    // Navigation
+    const upEdge = input.moveUp && !this.prevUpPressed;
+    const downEdge = input.moveDown && !this.prevDownPressed;
+    if (upEdge && this.menuDebounceMs === 0) {
+      this.shopMenuSelection = (this.shopMenuSelection - 1 + entries.length) % entries.length;
+      this.menuDebounceMs = 150;
+    }
+    if (downEdge && this.menuDebounceMs === 0) {
+      this.shopMenuSelection = (this.shopMenuSelection + 1) % entries.length;
+      this.menuDebounceMs = 150;
+    }
+
+    // Left-click: select row by pointer y
+    const click = input.pointerDownPulse ?? null;
+    if (click && this.menuDebounceMs === 0) {
+      const SHOP_ROW_H = 52;
+      const SHOP_ROWS_START_Y = 108; // matches renderer: COL_H_Y(80) + 28
+      const idx = Math.floor((click.y - SHOP_ROWS_START_Y) / SHOP_ROW_H);
+      if (idx >= 0 && idx < entries.length) {
+        this.shopMenuSelection = idx;
+        this.menuDebounceMs = 100;
+      }
+    }
+
+    // Buy (Enter key)
+    const confirm = this.wasMenuConfirmPressed() && this.menuDebounceMs === 0;
+    if (confirm) {
+      const entry = entries[this.shopMenuSelection];
+      if (entry && session) {
+        const result = this.shopManager.buyModule(locId, entry.moduleDefId, session.solarCredits);
+        if (result.ok) {
+          session.solarCredits = result.newCredits;
+          this.adjustModuleInventory(entry.moduleDefId, +1);
+          this.shopStatusMsg = `BOUGHT — ${result.price}¢`;
+          this.shopStatusMs = 1200;
+          soundManager.menuConfirm();
+        } else {
+          this.shopStatusMsg = result.reason.toUpperCase().replace(/-/g, " ");
+          this.shopStatusMs = 1200;
+        }
+        this.menuDebounceMs = 200;
+      }
+    }
+
+    // Sell: right-click or S key — sells the currently selected item
+    const rClick = input.pointerRightClickPulse ?? null;
+    if ((rClick) && this.menuDebounceMs === 0 && session) {
+      const entry = entries[this.shopMenuSelection];
+      if (entry) {
+        const owned = session.moduleInventory.get(entry.moduleDefId) ?? 0;
+        if (owned > 0) {
+          const result = this.shopManager.sellModule(locId, entry.moduleDefId, session.solarCredits);
+          if (result.ok) {
+            session.solarCredits = result.newCredits;
+            this.adjustModuleInventory(entry.moduleDefId, -1);
+            this.shopStatusMsg = `SOLD — +${result.sellPrice}¢`;
+            this.shopStatusMs = 1200;
+          }
+        } else {
+          this.shopStatusMsg = "NOTHING TO SELL";
+          this.shopStatusMs = 1000;
+        }
+        this.menuDebounceMs = 200;
+      }
+    }
+  }
+
+  private buildShopRenderData(): ShopRenderData | null {
+    const session = this.solarSystem?.getSessionState();
+    const locId = session?.dockedLocationId ?? null;
+    if (!locId || !session) return null;
+    const shop = this.shopManager.getShop(locId);
+    if (!shop) return null;
+    const system = this.solarSystem!.getCurrentSystem();
+    const loc = system.locations.find((l) => l.id === locId);
+    const defs = SolarModuleRegistry.getModuleMap();
+    return {
+      locationName: loc?.name ?? locId,
+      economyType: shop.economyType,
+      entries: shop.entries.map((e, i) => ({
+        moduleDefId: e.moduleDefId,
+        name: defs.get(e.moduleDefId)?.name ?? e.moduleDefId,
+        moduleType: defs.get(e.moduleDefId)?.type ?? "structure",
+        demand: e.demand,
+        price: e.price,
+        stock: e.stock,
+        owned: session.moduleInventory.get(e.moduleDefId) ?? 0,
+        isSelected: i === this.shopMenuSelection,
+      })),
+      selectedIndex: this.shopMenuSelection,
+      playerCredits: session.solarCredits,
+      statusMsg: this.shopStatusMsg,
+    };
+  }
+
+  private adjustModuleInventory(moduleDefId: string, delta: number): void {
+    const session = this.solarSystem?.getSessionState();
+    if (!session) return;
+    const current = session.moduleInventory.get(moduleDefId) ?? 0;
+    const next = current + delta;
+    if (next <= 0) {
+      session.moduleInventory.delete(moduleDefId);
+    } else {
+      session.moduleInventory.set(moduleDefId, next);
+    }
   }
 
   // ── Run lifecycle ────────────────────────────────────────────────────────
@@ -2391,11 +3423,31 @@ export class GameManager {
       starmap: state.screen === "starmap" ? this.buildStarmapExtras() : null,
       shipyard: state.screen === "shipyard" ? this.buildShipyardExtras() : null,
       solarSystem:
-        state.screen === "solar-system" || state.screen === "solar-system-paused" || state.screen === "docked"
+        (state.screen === "solar-system" || state.screen === "solar-system-paused" ||
+         state.screen === "docked" || state.screen === "solar-npc-talk" ||
+         state.screen === "solar-missions" || state.screen === "solar-mission-detail")
           ? this.buildSolarSystemExtras()
           : null,
+      solarShipBuilder: state.screen === "solar-shipyard"
+        ? this.solarShipBuilderMgr.getRenderData(
+            this.solarSystem?.getSessionState().moduleInventory ?? new Map(),
+            this.solarSystem?.getSessionState().solarCredits ?? 0,
+            this.getShipyardShopEntries(),
+            this.getSavedBlueprintSummaries(),
+          )
+        : null,
+      solarShop: state.screen === "solar-shop" ? this.buildShopRenderData() : null,
+      solarMyShips: state.screen === "solar-my-ships" ? this.getSavedBlueprintSummaries() : null,
       playerBlueprint: this.buildPlayerBlueprintVisual(),
     });
+  }
+
+  private getShipyardShopEntries(): Array<{ moduleDefId: string; stock: number; price: number }> {
+    const locId = this.solarSystem?.getSessionState().dockedLocationId ?? null;
+    if (!locId) return [];
+    const shop = this.shopManager.getShop(locId);
+    if (!shop) return [];
+    return shop.entries.map((e) => ({ moduleDefId: e.moduleDefId, stock: e.stock, price: e.price }));
   }
 
   /**
@@ -2473,34 +3525,86 @@ export class GameManager {
       ? system.locations.find((l) => l.id === dockedLocId)
       : null;
     const menuItems = this.getDockedMenuItems();
+    // Get the first NPC at this location using the location's own npcs array.
+    // Avoids a LocationRegistry lookup since game locations use different IDs.
+    const firstNpcId = dockedLoc?.npcs[0];
+    const activeNpc = firstNpcId ? NPCRegistry.getNPC(firstNpcId) : undefined;
     const dockedSection = dockedLoc
       ? {
           locationName: this.dockedStatusMsg ?? dockedLoc.name,
           menuItems,
           menuSelection: this.dockedMenuSelection,
+          activeNpc,
         }
       : undefined;
 
-    // Laser flash FX
+    // Laser flash FX — include weapon-tip screen offset for the origin
+    let laserOriginDx = 0;
+    let laserOriginDy = 0;
+    if (this.solarPlayerBlueprintCache && this.laserFlashMs > 0) {
+      const { modules, coreRadius } = this.solarPlayerBlueprintCache;
+      const bpScale = 16 / coreRadius;
+      const heading = sessionState.playerHeading;
+      const h = (heading * Math.PI) / 180;
+      const cosH = Math.cos(h);
+      const sinH = Math.sin(h);
+      for (const mod of modules) {
+        if (mod.moduleType !== "weapon") continue;
+        const vcx = mod.vertices.reduce((s, v) => s + v.x, 0) / (mod.vertices.length || 1);
+        const vcy = mod.vertices.reduce((s, v) => s + v.y, 0) / (mod.vertices.length || 1);
+        let tipX = vcx, tipY = vcy, maxD2 = 0;
+        for (const v of mod.vertices) {
+          const d2 = Math.hypot(v.x - vcx, v.y - vcy);
+          if (d2 > maxD2) { maxD2 = d2; tipX = v.x; tipY = v.y; }
+        }
+        laserOriginDx = (tipX * cosH - tipY * sinH) * bpScale;
+        laserOriginDy = (tipX * sinH + tipY * cosH) * bpScale;
+        break;
+      }
+    }
     const laserFlash = this.laserFlashMs > 0 && this.laserFlashTarget
       ? {
           targetX: this.laserFlashTarget.x,
           targetY: this.laserFlashTarget.y,
           alpha: this.laserFlashMs / 200,
+          originDx: laserOriginDx,
+          originDy: laserOriginDy,
         }
       : undefined;
 
+    // Player blueprint visual (cached by blueprintId)
+    let playerBlueprintModules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }> | undefined;
+    let playerBlueprintCoreRadius: number | undefined;
+    if (this.solarActiveBlueprintId) {
+      const activeBp = this.solarSavedBlueprints.get(this.solarActiveBlueprintId);
+      if (activeBp) {
+        if (this.solarPlayerBlueprintCache?.blueprintId !== this.solarActiveBlueprintId) {
+          this.solarPlayerBlueprintCache = {
+            blueprintId: this.solarActiveBlueprintId,
+            ...this.computeBlueprintModules(activeBp),
+          };
+        }
+        playerBlueprintModules = this.solarPlayerBlueprintCache.modules;
+        playerBlueprintCoreRadius = this.solarPlayerBlueprintCache.coreRadius;
+      }
+    }
+
     // Enemy ships and stations for this system
     const enemyShips = this.currentSystemId === "sol"
-      ? this.solarEnemyShips.map((s) => ({
-          id: s.id,
-          typeIdx: s.typeIdx,
-          color: SOLAR_ENEMY_TYPES[s.typeIdx]?.color ?? 0xff3333,
-          position: s.position,
-          heading: s.heading,
-          health: s.health,
-          maxHealth: s.maxHealth,
-        }))
+      ? this.solarEnemyShips.map((s) => {
+          const pirate = this.getPirateBlueprintModules(s.sizeClass);
+          return {
+            id: s.id,
+            typeIdx: s.typeIdx,
+            color: SOLAR_ENEMY_TYPES[s.typeIdx]?.color ?? 0xff3333,
+            position: s.position,
+            heading: s.heading,
+            health: s.health,
+            maxHealth: s.maxHealth,
+            sizeClass: s.sizeClass,
+            ...(pirate ? { blueprintModules: pirate.modules, blueprintCoreRadius: pirate.coreRadius } : {}),
+          };
+        })
       : [];
     const enemyProjectiles = this.currentSystemId === "sol"
       ? this.solarEnemyProjectiles.map((p) => ({
@@ -2549,11 +3653,76 @@ export class GameManager {
       playerShield: this.solarPlayerShield,
       playerMaxShield: this.solarPlayerMaxShield,
       damageFlash: this.solarDamageFlashMs > 0 ? this.solarDamageFlashMs / 300 : 0,
+      warpIntensity: this.antiGravActive ? 1 : this.warpDecayMs / GameManager.WARP_DECAY_DURATION_MS,
       pauseMenuSelection: this.solarPauseSelection,
+      ...(playerBlueprintModules && playerBlueprintCoreRadius !== undefined
+        ? { playerBlueprintModules, playerBlueprintCoreRadius }
+        : {}),
       ...(laserFlash ? { laserFlash } : {}),
       ...(dockedSection ? { docked: dockedSection } : {}),
+      ...(this.buildNpcTalkSection()),
+      ...(this.buildMissionListSection()),
+      ...(this.buildMissionDetailSection()),
       virtualControls: this.buildVirtualControlsState(),
+      lockedTargets: Array.from(this.solarLockedIds)
+        .map(id => this.solarEnemyShips.find(s => s.id === id))
+        .filter((s): s is SolarEnemyShip => !!s)
+        .map(s => ({ id: s.id, position: s.position })),
+      ...(this.solarFocusedId ? { focusedTargetId: this.solarFocusedId } : {}),
+      friendlyShips: this.solarFriendlyShips.map(s => ({
+        id: s.id,
+        position: s.position,
+        heading: s.heading,
+        health: s.health,
+        maxHealth: s.maxHealth,
+      })),
+      playerProjectiles: this.solarPlayerProjectiles.map(p => {
+        const spd = Math.hypot(p.velocity.x, p.velocity.y) || 1;
+        return {
+          id: p.id,
+          position: p.position,
+          weaponKind: p.weaponKind,
+          lifetimeFrac: p.lifetimeMs / p.maxLifetimeMs,
+          dirX: p.velocity.x / spd,
+          dirY: p.velocity.y / spd,
+        };
+      }),
+      solarExplosions: this.solarExplosions.map(e => ({
+        x: e.x,
+        y: e.y,
+        ageFrac: e.ageMs / e.maxAgeMs,
+        scale: e.scale,
+      })),
+      deathFade: this.solarDeathTimerMs > 0 && this.solarDeathTimerMs < 1000
+        ? 1 - this.solarDeathTimerMs / 1000
+        : 0,
+      solarPlayerDead: this.solarPlayerDead,
     };
+  }
+
+  private buildNpcTalkSection(): { npcTalk?: { npc: import("./data/NPCRegistry").NPCDefinition; menuItems: readonly string[]; menuSelection: number } } {
+    const npcId = this.activeTalkNpcId;
+    if (!npcId) return {};
+    const npc = NPCRegistry.getNPC(npcId);
+    if (!npc) return {};
+    return { npcTalk: { npc, menuItems: ["Missions", "Leave"], menuSelection: this.menuSelection } };
+  }
+
+  private buildMissionListSection(): { missionList?: { npc: import("./data/NPCRegistry").NPCDefinition; missions: Array<{ spec: import("../types/missions").MissionSpec; status: "available" | "active" | "completed" }>; menuSelection: number } } {
+    const npcId = this.activeTalkNpcId;
+    if (!npcId) return {};
+    const npc = NPCRegistry.getNPC(npcId);
+    if (!npc) return {};
+    const missions = this.getNpcMissions(npcId);
+    return { missionList: { npc, missions, menuSelection: this.menuSelection } };
+  }
+
+  private buildMissionDetailSection(): { missionDetail?: { spec: import("../types/missions").MissionSpec; menuSelection: number } } {
+    const missionId = this.activeMissionDetailId;
+    if (!missionId) return {};
+    const spec = this.getMissionSpec(missionId);
+    if (!spec) return {};
+    return { missionDetail: { spec, menuSelection: this.menuSelection } };
   }
 
   private buildVirtualControlsState(): { thrustActive: boolean; leftActive: boolean; rightActive: boolean; fireActive: boolean } {

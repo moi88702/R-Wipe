@@ -40,6 +40,9 @@ export class InputHandler {
   private quickLockPulse = false;
   private mapTogglePulse = false;
 
+  // ── Solar-system dock / gate key (F) ────────────────────────────────────
+  private dockPulse = false;
+
   // ── Solar-system zoom ──────────────────────────────────────────────────
   private zoomDelta = 0;
   private readonly boundWheel: (e: WheelEvent) => void;
@@ -53,6 +56,7 @@ export class InputHandler {
   // ── Pointer state (mouse + primary touch, used by menu screens) ────────
   private pointerPos: { x: number; y: number } | null = null;
   private pointerDownPulse: { x: number; y: number } | null = null;
+  private pointerRightClickPulse: { x: number; y: number } | null = null;
   private pointerHeld = false;
   private pointerDisposers: Array<() => void> = [];
 
@@ -87,6 +91,7 @@ export class InputHandler {
         this.quickLockPulse = true;
       }
       if (e.code === "KeyM") this.mapTogglePulse = true;
+      if (e.code === "KeyF") this.dockPulse = true;
     };
 
     this.boundKeyUp = (e: KeyboardEvent) => {
@@ -236,6 +241,10 @@ export class InputHandler {
       this.pointerDownPulse = p;
       this.pointerHeld = true;
     };
+    const onContextMenu = (e: MouseEvent): void => {
+      e.preventDefault();
+      this.pointerRightClickPulse = mapMouse(e);
+    };
     const onMove = (e: MouseEvent): void => {
       this.pointerPos = mapMouse(e);
     };
@@ -251,12 +260,14 @@ export class InputHandler {
     element.addEventListener("mousemove", onMove);
     element.addEventListener("mouseup", onUp);
     element.addEventListener("mouseleave", onLeave);
+    element.addEventListener("contextmenu", onContextMenu);
 
     this.pointerDisposers.push(() => {
       element.removeEventListener("mousedown", onDown);
       element.removeEventListener("mousemove", onMove);
       element.removeEventListener("mouseup", onUp);
       element.removeEventListener("mouseleave", onLeave);
+      element.removeEventListener("contextmenu", onContextMenu);
     });
   }
 
@@ -286,6 +297,7 @@ export class InputHandler {
       touchTarget: this.touchTarget,
       pointer: this.pointerPos,
       pointerDownPulse: this.pointerDownPulse,
+      pointerRightClickPulse: this.pointerRightClickPulse,
       pointerHeld: this.pointerHeld,
       // ── Solar-system free-flight keys ─────────────────────────────────────
       thrustForward: this.keysPressed.has("KeyW"),
@@ -316,6 +328,9 @@ export class InputHandler {
 
       // Space key only (no touch) — used by solar-system virtual fire
       spaceHeld: this.keysPressed.has("Space"),
+
+      // D key one-frame pulse for docking (separate from held turnRight)
+      dockPulse: this.dockPulse,
     };
   }
 
@@ -331,6 +346,7 @@ export class InputHandler {
     this.menuConfirmPulse = false;
     this.pausePulse = false;
     this.pointerDownPulse = null;
+    this.pointerRightClickPulse = null;
     // Solar-system ability key pulses
     this.abilityVPulse = false;
     this.abilityCPulse = false;
@@ -345,6 +361,8 @@ export class InputHandler {
     // Mobile touch swipe pulses
     this.swipeUpPulse = false;
     this.swipeDownPulse = false;
+    // Solar-system dock key pulse
+    this.dockPulse = false;
   }
 
   // ── Test helpers ─────────────────────────────────────────────────────────

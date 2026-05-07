@@ -6,7 +6,7 @@
  * avoids managing a sprite pool on top of the existing object pools.
  */
 
-import { Application, Container, Graphics, Text, TextStyle } from "pixi.js";
+import { Application, Container, Filter, Graphics, Rectangle, Text, TextStyle } from "pixi.js";
 import type {
   BossState,
   Enemy,
@@ -16,7 +16,13 @@ import type {
   PowerUpType,
   Projectile,
   RunStats,
+  SolarShipBuilderRenderData,
+  ShopRenderData,
 } from "../types/index";
+import type { SavedBlueprintSummary } from "../types/solarShipBuilder";
+import { DEMAND_LABEL } from "../types/economy";
+import type { NPCDefinition } from "../managers/LocationManager";
+import type { MissionSpec } from "../types/missions";
 import {
   drawCircle,
   drawHexagon,
@@ -27,6 +33,8 @@ import {
   drawTriangle,
 } from "./ShapePrimitives";
 import { drawBossBody } from "./BossArt";
+import { createNPCRobot } from "./NPCRobotRenderer";
+import { NPCRobotAnimator } from "./NPCRobotAnimator";
 
 interface Star {
   x: number;
@@ -237,12 +245,23 @@ export interface SolarSystemRenderData {
   readonly enemyShips: ReadonlyArray<{
     readonly id: string;
     readonly typeIdx: number;
+    readonly sizeClass: number;
     readonly color: number;
     readonly position: { x: number; y: number };
     readonly heading: number;
     readonly health: number;
     readonly maxHealth: number;
+    readonly blueprintModules?: ReadonlyArray<{
+      readonly vertices: ReadonlyArray<{ readonly x: number; readonly y: number }>;
+      readonly moduleType: string;
+    }>;
+    readonly blueprintCoreRadius?: number;
   }>;
+  readonly playerBlueprintModules?: ReadonlyArray<{
+    readonly vertices: ReadonlyArray<{ readonly x: number; readonly y: number }>;
+    readonly moduleType: string;
+  }>;
+  readonly playerBlueprintCoreRadius?: number;
   readonly enemyProjectiles: ReadonlyArray<{
     readonly id: string;
     readonly position: { x: number; y: number };
@@ -265,13 +284,39 @@ export interface SolarSystemRenderData {
     readonly targetX: number;
     readonly targetY: number;
     readonly alpha: number;
+    /** Screen-pixel offset from the view centre to the weapon-tip origin. */
+    readonly originDx?: number;
+    readonly originDy?: number;
   };
+  /** 0 = no warp, 1 = full warp, 0–1 during deceleration. */
+  readonly warpIntensity?: number;
   /** Solar-system pause menu selection (0=Resume, 1=Quit). */
   readonly pauseMenuSelection?: number;
   /** Populated when screen === "docked"; drives drawDockedMenu. */
   readonly docked?: {
     readonly locationName: string;
     readonly menuItems: ReadonlyArray<string>;
+    readonly menuSelection: number;
+    readonly activeNpc: NPCDefinition | undefined;
+  };
+  /** Populated when screen === "solar-npc-talk". */
+  readonly npcTalk?: {
+    readonly npc: NPCDefinition;
+    readonly menuItems: ReadonlyArray<string>;
+    readonly menuSelection: number;
+  };
+  /** Populated when screen === "solar-missions". */
+  readonly missionList?: {
+    readonly npc: NPCDefinition;
+    readonly missions: ReadonlyArray<{
+      readonly spec: MissionSpec;
+      readonly status: "available" | "active" | "completed";
+    }>;
+    readonly menuSelection: number;
+  };
+  /** Populated when screen === "solar-mission-detail". */
+  readonly missionDetail?: {
+    readonly spec: MissionSpec;
     readonly menuSelection: number;
   };
   /** Virtual on-screen controls for touch play in solar system. */
@@ -281,6 +326,38 @@ export interface SolarSystemRenderData {
     readonly rightActive: boolean;
     readonly fireActive: boolean;
   };
+  /** Click-to-lock target ids and positions. */
+  readonly lockedTargets?: ReadonlyArray<{ readonly id: string; readonly position: { x: number; y: number } }>;
+  /** Focused (primary attack) target id. */
+  readonly focusedTargetId?: string;
+  /** Friendly escort ships. */
+  readonly friendlyShips?: ReadonlyArray<{
+    readonly id: string;
+    readonly position: { x: number; y: number };
+    readonly heading: number;
+    readonly health: number;
+    readonly maxHealth: number;
+  }>;
+  /** Player projectiles (cannon / torpedo). */
+  readonly playerProjectiles?: ReadonlyArray<{
+    readonly id: string;
+    readonly position: { x: number; y: number };
+    readonly weaponKind: "cannon" | "laser" | "torpedo";
+    readonly lifetimeFrac: number; // 0-1 used for alpha
+    readonly dirX: number;  // normalised velocity direction
+    readonly dirY: number;
+  }>;
+  /** Active explosions in world space. */
+  readonly solarExplosions?: ReadonlyArray<{
+    readonly x: number;
+    readonly y: number;
+    readonly ageFrac: number; // 0–1
+    readonly scale: number;   // relative size multiplier
+  }>;
+  /** 0–1 death-fade overlay alpha (0 = alive, >0 = fading to black after death). */
+  readonly deathFade?: number;
+  /** True when the player ship is dead (hide the ship sprite). */
+  readonly solarPlayerDead?: boolean;
 }
 
 export interface GalaxyMapData {
@@ -457,6 +534,8 @@ export class GameRenderer {
   private readonly starmapNodeLabels: Text[] = [];
 
   // Solar system overlay elements.
+  private warpBubbleTimeMs = 0;
+  private warpFilter: Filter | null = null;
   private readonly solarSystemGfx: Graphics;
   // Solar-system label pools — bodies, stations, gates, enemy ships/bases.
   private readonly solarBodyLabels: Text[] = [];
@@ -473,6 +552,32 @@ export class GameRenderer {
   private readonly dockedTitle: Text;
   private readonly dockedHint: Text;
   private readonly dockedMenuLabels: Text[] = [];
+  private currentDockRobot: Container | null = null;
+  private currentDockNpcId: string | null = null;
+  private readonly robotAnimator = new NPCRobotAnimator();
+  private readonly dockCounterGfx = new Graphics();
+
+  // Solar ship-builder overlay elements.
+  private readonly solarBuilderGfx: Graphics;
+  private readonly solarBuilderTitleText: Text;
+  private readonly solarBuilderHintText: Text;
+  private readonly solarBuilderStatusText: Text;
+  private readonly solarBuilderBudgetLabels: Text[] = [];
+  private readonly solarBuilderPaletteLabels: Text[] = [];
+
+  // Solar shop overlay elements.
+  private readonly solarShopGfx: Graphics;
+  private readonly solarShopTitleText: Text;
+  private readonly solarShopHintText: Text;
+  private readonly solarShopCreditsText: Text;
+  private readonly solarShopStatusText: Text;
+  private readonly solarShopRowLabels: Text[] = []; // column header row
+  private readonly solarShopNameLabels: Text[] = [];
+  private readonly solarShopTypeLabels: Text[] = [];
+  private readonly solarShopDemandLabels: Text[] = [];
+  private readonly solarShopPriceLabels: Text[] = [];
+  private readonly solarShopStockLabels: Text[] = [];
+  private readonly solarShopOwnedLabels: Text[] = [];
 
   // Shipyard overlay elements.
   private readonly shipyardGfx: Graphics;
@@ -799,6 +904,76 @@ export class GameRenderer {
     this.solarSystemGfx = new Graphics();
     this.menuLayer.addChild(this.solarSystemGfx);
 
+    this.solarSystemGfx.filterArea = new Rectangle(0, 0, width, height);
+
+    // Solar ship-builder overlay
+    this.solarBuilderGfx = new Graphics();
+    this.menuLayer.addChild(this.solarBuilderGfx);
+
+    this.solarBuilderTitleText = new Text({
+      text: "",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 18, fill: 0xaaccff, fontWeight: "bold" }),
+    });
+    this.solarBuilderTitleText.anchor.set(0.5, 0.5);
+    this.solarBuilderTitleText.visible = false;
+    this.menuLayer.addChild(this.solarBuilderTitleText);
+
+    this.solarBuilderHintText = new Text({
+      text: "[Click] Place  •  [RClick] Remove  •  [ESC] Exit",
+      style: hudStyle(COLOR.hudWhite, 13),
+    });
+    this.solarBuilderHintText.anchor.set(0.5, 1);
+    this.solarBuilderHintText.x = 400;
+    this.solarBuilderHintText.y = height - 8;
+    this.solarBuilderHintText.visible = false;
+    this.menuLayer.addChild(this.solarBuilderHintText);
+
+    this.solarBuilderStatusText = new Text({
+      text: "",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 16, fill: 0x00ffaa }),
+    });
+    this.solarBuilderStatusText.anchor.set(0.5, 0.5);
+    this.solarBuilderStatusText.visible = false;
+    this.menuLayer.addChild(this.solarBuilderStatusText);
+
+    // Solar shop overlay
+    this.solarShopGfx = new Graphics();
+    this.menuLayer.addChild(this.solarShopGfx);
+
+    this.solarShopTitleText = new Text({
+      text: "",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 22, fill: COLOR.hudCyan, fontWeight: "bold" }),
+    });
+    this.solarShopTitleText.anchor.set(0.5, 0.5);
+    this.solarShopTitleText.visible = false;
+    this.menuLayer.addChild(this.solarShopTitleText);
+
+    this.solarShopCreditsText = new Text({
+      text: "",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 16, fill: COLOR.hudAmber }),
+    });
+    this.solarShopCreditsText.anchor.set(1, 0.5);
+    this.solarShopCreditsText.visible = false;
+    this.menuLayer.addChild(this.solarShopCreditsText);
+
+    this.solarShopHintText = new Text({
+      text: "[↑↓] Select  •  [Enter] Buy  •  [R-Click] Sell  •  [ESC] Exit",
+      style: hudStyle(COLOR.hudWhite, 13),
+    });
+    this.solarShopHintText.anchor.set(0.5, 1);
+    this.solarShopHintText.x = width / 2;
+    this.solarShopHintText.y = height - 8;
+    this.solarShopHintText.visible = false;
+    this.menuLayer.addChild(this.solarShopHintText);
+
+    this.solarShopStatusText = new Text({
+      text: "",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 16, fill: 0x00ffaa }),
+    });
+    this.solarShopStatusText.anchor.set(0.5, 0.5);
+    this.solarShopStatusText.visible = false;
+    this.menuLayer.addChild(this.solarShopStatusText);
+
     // System-name banner (top-centre while flying in solar mode)
     this.solarSystemNameText = new Text({
       text: "",
@@ -844,6 +1019,8 @@ export class GameRenderer {
     this.dockedHint.x = width / 2;
     this.dockedHint.visible = false;
     this.menuLayer.addChild(this.dockedHint);
+    this.dockCounterGfx.visible = false;
+    this.menuLayer.addChild(this.dockCounterGfx);
 
     this.starmapTitle = new Text({
       text: "",
@@ -1024,9 +1201,13 @@ export class GameRenderer {
       starmap: StarmapRenderData | null;
       shipyard: ShipyardRenderData | null;
       solarSystem: SolarSystemRenderData | null;
+      solarShipBuilder: SolarShipBuilderRenderData | null;
+      solarShop: ShopRenderData | null;
+      solarMyShips: ReadonlyArray<SavedBlueprintSummary> | null;
       playerBlueprint: PlayerBlueprintVisual | null;
     },
   ): void {
+    this.warpBubbleTimeMs += deltaMs;
     this.drawStarfield(deltaMs);
     this.fxGfx.clear();
     this.entityGfx.clear();
@@ -1043,11 +1224,18 @@ export class GameRenderer {
     const isShipyard = screen === "shipyard";
     const isSolarSystem = screen === "solar-system" || screen === "solar-system-paused";
     const isDocked = screen === "docked";
+    const isSolarShipBuilder = screen === "solar-shipyard";
+    const isSolarShop = screen === "solar-shop";
+    const isSolarMyShips = screen === "solar-my-ships";
+    const isNpcTalk = screen === "solar-npc-talk";
+    const isMissionList = screen === "solar-missions";
+    const isMissionDetail = screen === "solar-mission-detail";
+    const isAnyDockedScreen = isDocked || isNpcTalk || isMissionList || isMissionDetail;
     // Gameplay entities stay visible behind the pause overlay.
     const drawsEntities = isGameplay || isPause;
 
     const isSolarPaused = screen === "solar-system-paused";
-    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isDocked;
+    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isAnyDockedScreen || isSolarShipBuilder || isSolarShop || isSolarMyShips;
     this.titleText.visible = isMenu;
     this.subtitleText.visible = isMenu;
     this.promptText.visible = isMenu || isPause || isSolarPaused;
@@ -1067,9 +1255,18 @@ export class GameRenderer {
     // Galaxy-map labels visible only when galaxy map drawn (set in drawGalaxyMap).
     if (!isSolarSystem) for (const t of this.galaxySystemLabels) t.visible = false;
     // Docked screen labels
-    this.dockedTitle.visible = isDocked;
-    this.dockedHint.visible = isDocked;
-    for (const t of this.dockedMenuLabels) t.visible = isDocked;
+    this.dockedTitle.visible = isAnyDockedScreen;
+    this.dockedHint.visible = isAnyDockedScreen;
+    for (const t of this.dockedMenuLabels) t.visible = isAnyDockedScreen;
+    // Robot + counter: remove from menuLayer the moment we leave docked state
+    // so they never bleed through any other overlay (shipyard, starmap, etc.)
+    if (!isAnyDockedScreen && this.currentDockRobot) {
+      this.menuLayer.removeChild(this.currentDockRobot);
+      this.currentDockRobot = null;
+      this.currentDockNpcId = null;
+      this.dockCounterGfx.clear();
+      this.dockCounterGfx.visible = false;
+    }
     // Stats overlay elements
     this.statsTitle.visible = isStats;
     this.statsColCurrentHeader.visible = isStats;
@@ -1088,7 +1285,7 @@ export class GameRenderer {
     for (const t of this.starmapNodeLabels) t.visible = isStarmap;
     if (!isStarmap) this.starmapGfx.clear();
     // Solar system overlay toggles
-    if (!isSolarSystem && !isDocked) this.solarSystemGfx.clear();
+    if (!isSolarSystem && !isAnyDockedScreen) this.solarSystemGfx.clear();
     // Shipyard overlay toggles
     this.shipyardTitle.visible = isShipyard;
     this.shipyardStatsText.visible = isShipyard;
@@ -1101,6 +1298,30 @@ export class GameRenderer {
     for (const t of this.shipyardButtonLabels) t.visible = isShipyard;
     for (const t of this.shipyardSavedLabels) t.visible = isShipyard;
     if (!isShipyard) this.shipyardGfx.clear();
+    if (!isSolarShipBuilder) this.solarBuilderGfx.clear();
+    // Solar ship-builder overlay toggles
+    this.solarBuilderTitleText.visible = isSolarShipBuilder;
+    this.solarBuilderHintText.visible = isSolarShipBuilder;
+    if (!isSolarShipBuilder) {
+      this.solarBuilderStatusText.visible = false;
+      for (const t of this.solarBuilderBudgetLabels) t.visible = false;
+      for (const t of this.solarBuilderPaletteLabels) t.visible = false;
+    }
+    // Solar shop overlay toggles
+    if (!isSolarShop) this.solarShopGfx.clear();
+    this.solarShopTitleText.visible = isSolarShop;
+    this.solarShopHintText.visible = isSolarShop;
+    this.solarShopCreditsText.visible = isSolarShop;
+    if (!isSolarShop) {
+      this.solarShopStatusText.visible = false;
+      for (const t of this.solarShopRowLabels) t.visible = false;
+      for (const t of this.solarShopNameLabels) t.visible = false;
+      for (const t of this.solarShopTypeLabels) t.visible = false;
+      for (const t of this.solarShopDemandLabels) t.visible = false;
+      for (const t of this.solarShopPriceLabels) t.visible = false;
+      for (const t of this.solarShopStockLabels) t.visible = false;
+      for (const t of this.solarShopOwnedLabels) t.visible = false;
+    }
     // Menu list items: used by main-menu (3) and pause (3); hidden on stats / starmap.
     const showList = isMenu || isPause;
     for (const t of this.menuItemTexts) t.visible = showList;
@@ -1142,6 +1363,40 @@ export class GameRenderer {
 
     if (isDocked) {
       this.drawDockedMenu(extras.solarSystem);
+      if (this.currentDockRobot) this.robotAnimator.update(this.currentDockRobot, deltaMs, performance.now());
+      return;
+    }
+
+    if (isNpcTalk && extras.solarSystem?.npcTalk) {
+      this.drawNpcTalkScreen(extras.solarSystem.npcTalk, extras.solarSystem.docked?.locationName);
+      if (this.currentDockRobot) this.robotAnimator.update(this.currentDockRobot, deltaMs, performance.now());
+      return;
+    }
+
+    if (isMissionList && extras.solarSystem?.missionList) {
+      this.drawMissionListScreen(extras.solarSystem.missionList, extras.solarSystem.docked?.locationName);
+      if (this.currentDockRobot) this.robotAnimator.update(this.currentDockRobot, deltaMs, performance.now());
+      return;
+    }
+
+    if (isMissionDetail && extras.solarSystem?.missionDetail) {
+      this.drawMissionDetailScreen(extras.solarSystem.missionDetail, extras.solarSystem.npcTalk?.npc ?? extras.solarSystem.missionList?.npc);
+      if (this.currentDockRobot) this.robotAnimator.update(this.currentDockRobot, deltaMs, performance.now());
+      return;
+    }
+
+    if (isSolarShipBuilder && extras.solarShipBuilder) {
+      this.drawSolarShipBuilder(extras.solarShipBuilder);
+      return;
+    }
+
+    if (isSolarShop && extras.solarShop) {
+      this.drawSolarShop(extras.solarShop);
+      return;
+    }
+
+    if (isSolarMyShips) {
+      this.drawSolarMyShips(extras.solarMyShips ?? []);
       return;
     }
 
@@ -2492,6 +2747,72 @@ export class GameRenderer {
    * a stats sheet on the right, and action buttons along the bottom.
    */
 
+  private ensureWarpFilter(): Filter | null {
+    if (this.warpFilter) return this.warpFilter;
+    try {
+      this.warpFilter = Filter.from({
+        gl: {
+          vertex: `
+            in vec2 aPosition;
+            out vec2 vTextureCoord;
+            uniform vec4 uInputSize;
+            uniform vec4 uOutputFrame;
+            uniform vec4 uOutputTexture;
+            vec4 filterVertexPosition(void) {
+              vec2 pos = aPosition * uOutputFrame.zw + uOutputFrame.xy;
+              pos.x = pos.x * (2.0 / uOutputTexture.x) - 1.0;
+              pos.y = pos.y * (2.0 / uOutputTexture.y) - 1.0;
+              return vec4(pos, 0.0, 1.0);
+            }
+            vec2 filterTextureCoord(void) {
+              return aPosition * (uOutputFrame.zw * uInputSize.zw);
+            }
+            void main(void) {
+              gl_Position = filterVertexPosition();
+              vTextureCoord = filterTextureCoord();
+            }
+          `,
+          fragment: `
+            in vec2 vTextureCoord;
+            out vec4 finalColor;
+            uniform sampler2D uTexture;
+            uniform float uTime;
+            uniform float uIntensity;
+            void main() {
+              vec2 uv = vTextureCoord;
+              vec2 delta = uv - vec2(0.5, 0.5);
+              float dist = length(delta);
+              float maxR = 0.28;
+              if (uIntensity > 0.0 && dist < maxR) {
+                float t2 = dist / maxR;
+                float falloff = (1.0 - t2) * (1.0 - t2);
+                float twistAngle = falloff * uIntensity * 1.1 * sin(uTime * 3.5);
+                float cosT = cos(twistAngle);
+                float sinT = sin(twistAngle);
+                vec2 twisted = vec2(cosT * delta.x - sinT * delta.y, sinT * delta.x + cosT * delta.y);
+                float ripple = falloff * uIntensity * 0.018 * sin(dist * 38.0 - uTime * 7.0);
+                vec2 norm = dist > 0.0001 ? delta / dist : vec2(0.0);
+                uv = vec2(0.5) + twisted + norm * ripple;
+              }
+              finalColor = texture(uTexture, uv);
+            }
+          `,
+        },
+        resources: {
+          warpUniforms: {
+            uTime:      { value: 0, type: "f32" },
+            uIntensity: { value: 0, type: "f32" },
+          },
+        },
+      });
+      this.warpFilter.enabled = false;
+      this.solarSystemGfx.filters = [this.warpFilter];
+    } catch {
+      this.warpFilter = null;
+    }
+    return this.warpFilter;
+  }
+
   private drawSolarSystem(data: SolarSystemRenderData): void {
     const g = this.solarSystemGfx;
     g.clear();
@@ -2725,7 +3046,13 @@ export class GameRenderer {
         continue;
       }
 
-      this.drawDeltaWing(g, p.x, p.y, ship.heading, ship.color, enemyScale);
+      if (ship.blueprintModules && ship.blueprintModules.length > 0 && ship.blueprintCoreRadius) {
+        const targetR = (4 + ship.sizeClass * 2) * enemyScale;
+        const bpScale = targetR / ship.blueprintCoreRadius;
+        this.drawBlueprintShip(g, p.x, p.y, ship.heading, ship.blueprintModules, bpScale);
+      } else {
+        this.drawDeltaWing(g, p.x, p.y, ship.heading, ship.color, enemyScale);
+      }
       // Health bar (scales slightly with enemy size)
       const barW = Math.max(16, 24 * enemyScale);
       const ratio = ship.health / ship.maxHealth;
@@ -2741,13 +3068,104 @@ export class GameRenderer {
     // ── Enemy projectiles ─────────────────────────────────────────────────
     for (const proj of data.enemyProjectiles) {
       const p = w2s(proj.position.x, proj.position.y);
-      if (offscreen(p.x, p.y, 10)) continue;
-      g.circle(p.x, p.y, 3).fill({ color: proj.color, alpha: 0.9 });
-      g.circle(p.x, p.y, 5).fill({ color: proj.color, alpha: 0.3 });
+      if (offscreen(p.x, p.y, 14)) continue;
+      // Glow halo
+      g.circle(p.x, p.y, 7).fill({ color: proj.color, alpha: 0.18 });
+      // Mid ring
+      g.circle(p.x, p.y, 4.5).fill({ color: proj.color, alpha: 0.45 });
+      // Bright core
+      g.circle(p.x, p.y, 2.5).fill({ color: 0xffffff, alpha: 0.85 });
     }
 
-    // ── Thrust exhaust ────────────────────────────────────────────────────
-    if (data.thrustActive) {
+    // ── Lock lines + crosshairs ───────────────────────────────────────────
+    if (data.lockedTargets && data.lockedTargets.length > 0) {
+      for (const lock of data.lockedTargets) {
+        const tp = w2s(lock.position.x, lock.position.y);
+        const isFocused = lock.id === data.focusedTargetId;
+        const lineColor = isFocused ? 0xff4444 : 0x888888;
+        const crossColor = isFocused ? 0xff2222 : 0x666666;
+        // Grey/red line from player to target
+        g.moveTo(cx, cy).lineTo(tp.x, tp.y).stroke({ color: lineColor, width: 1, alpha: 0.5 });
+        // Crosshair at target
+        const cr = 12;
+        g.moveTo(tp.x - cr, tp.y).lineTo(tp.x + cr, tp.y).stroke({ color: crossColor, width: 1.5, alpha: 0.9 });
+        g.moveTo(tp.x, tp.y - cr).lineTo(tp.x, tp.y + cr).stroke({ color: crossColor, width: 1.5, alpha: 0.9 });
+        g.circle(tp.x, tp.y, cr).stroke({ color: crossColor, width: 1.5, alpha: 0.6 });
+        if (isFocused) {
+          g.circle(tp.x, tp.y, cr * 1.6).stroke({ color: 0xff6666, width: 1, alpha: 0.4 });
+        }
+      }
+    }
+
+    // ── Friendly ships ────────────────────────────────────────────────────
+    if (data.friendlyShips) {
+      for (const ship of data.friendlyShips) {
+        const fp = w2s(ship.position.x, ship.position.y);
+        if (offscreen(fp.x, fp.y)) continue;
+        this.drawDeltaWing(g, fp.x, fp.y, ship.heading, 0x44ff88, enemyScale * 0.85);
+        // Green health bar
+        const ratio = ship.health / ship.maxHealth;
+        const barW = 20 * enemyScale;
+        g.rect(fp.x - barW / 2, fp.y + 12 * enemyScale, barW, 3).fill({ color: 0x333333, alpha: 0.7 });
+        g.rect(fp.x - barW / 2, fp.y + 12 * enemyScale, barW * ratio, 3).fill({ color: 0x44ff88, alpha: 0.9 });
+      }
+    }
+
+    // ── Player projectiles ────────────────────────────────────────────────
+    if (data.playerProjectiles) {
+      for (const proj of data.playerProjectiles) {
+        const p = w2s(proj.position.x, proj.position.y);
+        if (offscreen(p.x, p.y, 20)) continue;
+        const alpha = Math.min(1, proj.lifetimeFrac * 2);
+        const dx = proj.dirX;
+        const dy = proj.dirY;
+        if (proj.weaponKind === "cannon") {
+          // Pulsing plasma orb with trailing glow
+          g.circle(p.x, p.y, 7).fill({ color: 0xff4400, alpha: alpha * 0.3 });
+          g.circle(p.x, p.y, 5).fill({ color: 0xff8800, alpha: alpha * 0.6 });
+          g.circle(p.x, p.y, 3).fill({ color: 0xffdd00, alpha });
+          // Trailing tail
+          g.moveTo(p.x - dx * 10, p.y - dy * 10)
+           .lineTo(p.x, p.y)
+           .stroke({ color: 0xff6600, width: 2.5, alpha: alpha * 0.5 });
+        } else if (proj.weaponKind === "torpedo") {
+          // Elongated missile body
+          const bodyLen = 14;
+          const tailX = p.x - dx * bodyLen;
+          const tailY = p.y - dy * bodyLen;
+          const perpX = -dy;
+          const perpY = dx;
+          // Engine exhaust trail
+          g.moveTo(tailX - dx * 8, tailY - dy * 8).lineTo(tailX, tailY)
+           .stroke({ color: 0x44ff88, width: 2, alpha: alpha * 0.35 });
+          // Missile body
+          g.moveTo(tailX, tailY).lineTo(p.x, p.y)
+           .stroke({ color: 0x88ff44, width: 3, alpha });
+          // Fins at tail
+          const midX = p.x - dx * (bodyLen * 0.55);
+          const midY = p.y - dy * (bodyLen * 0.55);
+          g.moveTo(midX + perpX * 4, midY + perpY * 4)
+           .lineTo(midX - perpX * 4, midY - perpY * 4)
+           .stroke({ color: 0x44cc44, width: 1.5, alpha: alpha * 0.8 });
+          // Warhead glow
+          g.circle(p.x, p.y, 3.5).fill({ color: 0xffffff, alpha });
+          g.circle(p.x, p.y, 6).fill({ color: 0x44ff88, alpha: alpha * 0.4 });
+        }
+      }
+    }
+
+    // ── Engine glow (always on) + thrust exhaust ─────────────────────────
+    if (!data.solarPlayerDead) {
+      const headRad = (data.playerHeading * Math.PI) / 180;
+      const backX = cx - Math.sin(headRad) * 18;
+      const backY = cy + Math.cos(headRad) * 18;
+      // Persistent idle glow
+      g.circle(backX, backY, 9).fill({ color: 0xff4400, alpha: 0.12 });
+      g.circle(backX, backY, 5).fill({ color: 0xff6600, alpha: 0.28 });
+      g.circle(backX, backY, 3).fill({ color: 0xffaa44, alpha: 0.55 });
+      g.circle(backX, backY, 1.5).fill({ color: 0xffffff, alpha: 0.8 });
+    }
+    if (data.thrustActive && !data.solarPlayerDead) {
       const headRad = (data.playerHeading * Math.PI) / 180;
       const backX = cx - Math.sin(headRad) * 18;
       const backY = cy + Math.cos(headRad) * 18;
@@ -2782,17 +3200,147 @@ export class GameRenderer {
     if (data.laserFlash) {
       const tp = w2s(data.laserFlash.targetX, data.laserFlash.targetY);
       const alpha = data.laserFlash.alpha;
-      g.moveTo(cx, cy).lineTo(tp.x, tp.y).stroke({ color: 0x00ffff, width: 2, alpha });
-      g.circle(tp.x, tp.y, 6).fill({ color: 0xffffff, alpha: alpha * 0.8 });
+      // Origin at weapon tip (screen-space offset from centre)
+      const ox = cx + (data.laserFlash.originDx ?? 0);
+      const oy = cy + (data.laserFlash.originDy ?? 0);
+      // Outer glow
+      g.moveTo(ox, oy).lineTo(tp.x, tp.y).stroke({ color: 0x44ffff, width: 6, alpha: alpha * 0.18 });
+      // Mid halo
+      g.moveTo(ox, oy).lineTo(tp.x, tp.y).stroke({ color: 0x88ffff, width: 3, alpha: alpha * 0.45 });
+      // Core beam
+      g.moveTo(ox, oy).lineTo(tp.x, tp.y).stroke({ color: 0xffffff, width: 1.2, alpha });
+      // Impact flash at target
+      g.circle(tp.x, tp.y, 9 * alpha).fill({ color: 0xffffff, alpha: alpha * 0.9 });
+      g.circle(tp.x, tp.y, 16 * alpha).fill({ color: 0x44ffff, alpha: alpha * 0.5 });
+      g.circle(tp.x, tp.y, 24 * alpha).fill({ color: 0x0088cc, alpha: alpha * 0.25 });
+      // Muzzle flash at origin
+      g.circle(ox, oy, 5 * alpha).fill({ color: 0x88ffff, alpha: alpha * 0.7 });
+    }
+
+    // ── Warp bubble + distortion shader ──────────────────────────────────
+    const warpIntensity = data.warpIntensity ?? 0;
+    if (warpIntensity > 0) {
+      const intensity = warpIntensity;
+      const t = this.warpBubbleTimeMs / 1000;
+
+      // Update the GLSL distortion filter (lazy-created — no-ops if WebGL unavailable)
+      const wf = this.ensureWarpFilter();
+      if (wf) {
+        wf.enabled = true;
+        const wu = (wf.resources as Record<string, { uniforms: Record<string, number> }>)["warpUniforms"]!.uniforms;
+        wu["uTime"] = t;
+        wu["uIntensity"] = intensity;
+      }
+
+      // Speed-streak lines radiating backward from the ship
+      const headRad = (data.playerHeading * Math.PI) / 180;
+      const fwdX = Math.sin(headRad);
+      const fwdY = -Math.cos(headRad);
+      const STREAK_COUNT = 18;
+      for (let i = 0; i < STREAK_COUNT; i++) {
+        const angle = (i / STREAK_COUNT) * Math.PI * 2 + t * 0.4;
+        const spread = 14 + Math.sin(t * 2.3 + i) * 5;
+        const sx = cx + Math.cos(angle) * spread;
+        const sy = cy + Math.sin(angle) * spread;
+        const streakLen = (55 + Math.sin(t * 3.1 + i * 0.8) * 28) * intensity;
+        g.moveTo(sx, sy)
+         .lineTo(sx - fwdX * streakLen, sy - fwdY * streakLen)
+         .stroke({ color: 0x66ddff, width: 0.9, alpha: 0.38 * intensity });
+      }
+
+      // Concentric wobbling rings
+      const BASE_R = 30;
+      const RINGS = 3;
+      for (let r = 0; r < RINGS; r++) {
+        const phase = t * 3.5 + r * (Math.PI * 2 / RINGS);
+        const wobbleR = BASE_R + r * 8 + Math.sin(phase) * 4;
+        const SEGS = 48;
+        const alpha = (0.55 - r * 0.14) * intensity;
+        const color = r === 0 ? 0x44ddff : r === 1 ? 0x2299cc : 0x116688;
+        for (let i = 0; i < SEGS; i++) {
+          const a0 = (i / SEGS) * Math.PI * 2;
+          const a1 = ((i + 1) / SEGS) * Math.PI * 2;
+          const seg0R = wobbleR + Math.sin(a0 * 4 + t * 5 + r) * 3;
+          const seg1R = wobbleR + Math.sin(a1 * 4 + t * 5 + r) * 3;
+          g.moveTo(cx + Math.cos(a0) * seg0R, cy + Math.sin(a0) * seg0R)
+           .lineTo(cx + Math.cos(a1) * seg1R, cy + Math.sin(a1) * seg1R)
+           .stroke({ color, width: 1.5, alpha });
+        }
+      }
+      g.circle(cx, cy, BASE_R + Math.sin(t * 4) * 3)
+        .fill({ color: 0x0088cc, alpha: 0.08 * intensity });
+
+      // Radial lens lines converging at centre
+      const LENS_COUNT = 20;
+      for (let i = 0; i < LENS_COUNT; i++) {
+        const angle = (i / LENS_COUNT) * Math.PI * 2;
+        const innerR = BASE_R + 6 + Math.sin(t * 4.5 + i) * 4;
+        const outerR = innerR + (12 + Math.sin(t * 3.2 + i * 1.4) * 6) * intensity;
+        g.moveTo(cx + Math.cos(angle) * innerR, cy + Math.sin(angle) * innerR)
+         .lineTo(cx + Math.cos(angle) * outerR, cy + Math.sin(angle) * outerR)
+         .stroke({ color: 0x99eeff, width: 1, alpha: 0.22 * intensity });
+      }
+    } else if (this.warpFilter) {
+      this.warpFilter.enabled = false;
     }
 
     // ── Player ship at view centre ────────────────────────────────────────
-    this.drawDeltaWing(g, cx, cy, data.playerHeading);
+    if (!data.solarPlayerDead) {
+      if (data.playerBlueprintModules && data.playerBlueprintModules.length > 0 && data.playerBlueprintCoreRadius) {
+        const bpScale = 16 / data.playerBlueprintCoreRadius;
+        this.drawBlueprintShip(g, cx, cy, data.playerHeading, data.playerBlueprintModules, bpScale);
+      } else {
+        this.drawDeltaWing(g, cx, cy, data.playerHeading);
+      }
+    }
+
+    // ── Solar explosions ──────────────────────────────────────────────────
+    if (data.solarExplosions) {
+      for (const exp of data.solarExplosions) {
+        const ep = w2s(exp.x, exp.y);
+        const t = exp.ageFrac;
+        const baseR = 22 * exp.scale;
+        // Flash core (very fast, first 20%)
+        if (t < 0.2) {
+          const flashAlpha = (0.2 - t) * 5;
+          g.circle(ep.x, ep.y, baseR * 0.6).fill({ color: 0xffffff, alpha: flashAlpha * 0.9 });
+        }
+        // Fast inner ring (bright)
+        const r1 = baseR * (0.15 + t * 0.9);
+        g.circle(ep.x, ep.y, r1).stroke({ color: 0xffffff, width: 2.5, alpha: Math.max(0, 1 - t * 2.2) });
+        // Mid orange ring
+        const r2 = baseR * (0.08 + t * 1.05);
+        g.circle(ep.x, ep.y, r2).stroke({ color: 0xff7700, width: 3, alpha: Math.max(0, 1 - t * 1.4) });
+        // Outer slow ring
+        const r3 = baseR * t;
+        g.circle(ep.x, ep.y, r3).stroke({ color: 0xff2200, width: 2, alpha: Math.max(0, 1 - t * 1.7) });
+        // Inner fill glow fading out
+        if (t < 0.4) {
+          g.circle(ep.x, ep.y, r1 * 0.45).fill({ color: 0xffaa22, alpha: Math.max(0, (0.4 - t) * 2.5 * 0.6) });
+        }
+        // Debris sparks (8 radial points)
+        const NUM_SPARKS = 8;
+        for (let si = 0; si < NUM_SPARKS; si++) {
+          const angle = (si / NUM_SPARKS) * Math.PI * 2 + t * 0.5;
+          const sparkR = baseR * t * 0.75;
+          const sx = ep.x + Math.cos(angle) * sparkR;
+          const sy = ep.y + Math.sin(angle) * sparkR;
+          const sparkAlpha = Math.max(0, 1 - t * 1.8);
+          g.circle(sx, sy, Math.max(0.5, 2.5 * (1 - t))).fill({ color: 0xffcc44, alpha: sparkAlpha });
+        }
+      }
+    }
 
     // ── Damage flash overlay ──────────────────────────────────────────────
     if (data.damageFlash > 0) {
       g.rect(0, 0, this.width, this.height)
         .fill({ color: 0xff0000, alpha: data.damageFlash * 0.25 });
+    }
+
+    // ── Death fade to black ───────────────────────────────────────────────
+    if ((data.deathFade ?? 0) > 0) {
+      g.rect(0, 0, this.width, this.height)
+        .fill({ color: 0x000000, alpha: data.deathFade! });
     }
 
     // ── HUD: player health + shield bars (bottom-left) ────────────────────
@@ -2992,6 +3540,211 @@ export class GameRenderer {
     g.circle(engineX, engineY, 2).fill({ color: 0xff6600, alpha: 0.8 });
   }
 
+  /** Colors used in the ship-builder RIGHT-PANEL palette list only (not in-game ships). */
+  static readonly MODULE_TYPE_COLORS: Record<string, number> = {
+    core: 0x00ccff,
+    weapon: 0xff3300,
+    external: 0x4499ff,
+    internal: 0x44ff88,
+    structure: 0x888888,
+    converter: 0xaa44ff,
+  };
+
+  /**
+   * Render a blueprint-based polygon ship with detailed functional visuals per module type.
+   * `modules` are in blueprint-pixel space centered at (0,0); heading is applied as a 2-D
+   * rotation, then scaled by `bpScale` and translated to (cx,cy).
+   */
+  private drawBlueprintShip(
+    g: Graphics,
+    cx: number,
+    cy: number,
+    headingDeg: number,
+    modules: ReadonlyArray<{
+      vertices: ReadonlyArray<{ x: number; y: number }>;
+      moduleType: string;
+    }>,
+    bpScale: number,
+  ): void {
+    const h = (headingDeg * Math.PI) / 180;
+    const cosH = Math.cos(h);
+    const sinH = Math.sin(h);
+    const rot = (v: { x: number; y: number }) => ({
+      x: cx + (v.x * cosH - v.y * sinH) * bpScale,
+      y: cy + (v.x * sinH + v.y * cosH) * bpScale,
+    });
+
+    // Hull colors — dark materials, not gaudy type-colors
+    const hull: Record<string, number> = {
+      core: 0x0b1825, weapon: 0x170e08, external: 0x060f1a,
+      internal: 0x0c1005, structure: 0x0d1218, converter: 0x0d0818,
+    };
+
+    for (const mod of modules) {
+      if (mod.vertices.length < 3) continue;
+      const pts = mod.vertices.map(rot);
+      const N = pts.length;
+
+      // Module centroid in screen space
+      const mx = pts.reduce((s, p) => s + p.x, 0) / N;
+      const my = pts.reduce((s, p) => s + p.y, 0) / N;
+
+      // Average circumradius
+      const R = pts.reduce((s, p) => s + Math.hypot(p.x - mx, p.y - my), 0) / N;
+
+      // Outward direction: from ship center (cx,cy) to module centroid
+      const ddx = mx - cx, ddy = my - cy, ddist = Math.hypot(ddx, ddy);
+      // For core (near center), fall back to ship heading as "forward"
+      const outX = ddist > 0.5 ? ddx / ddist : sinH;
+      const outY = ddist > 0.5 ? ddy / ddist : -cosH;
+
+      // ── Base hull polygon ──────────────────────────────────────────────
+      const hullColor = hull[mod.moduleType] ?? 0x0d1218;
+      g.moveTo(pts[0]!.x, pts[0]!.y);
+      for (let i = 1; i < N; i++) g.lineTo(pts[i]!.x, pts[i]!.y);
+      g.closePath().fill({ color: hullColor, alpha: 0.95 });
+
+      // Hull outline — brighter where the module faces outward (bevel effect)
+      g.moveTo(pts[0]!.x, pts[0]!.y);
+      for (let i = 1; i < N; i++) g.lineTo(pts[i]!.x, pts[i]!.y);
+      g.closePath().stroke({ color: 0x3a5570, width: 0.7, alpha: 0.85 });
+
+      // ── Type-specific details ──────────────────────────────────────────
+      const perpX = -outY, perpY = outX;
+
+      if (mod.moduleType === "core") {
+        // Concentric reactor rings with spokes
+        g.circle(mx, my, R * 0.62).stroke({ color: 0x1155cc, width: 0.8, alpha: 0.7 });
+        g.circle(mx, my, R * 0.40).fill({ color: 0x071840, alpha: 0.8 });
+        g.circle(mx, my, R * 0.40).stroke({ color: 0x2266ee, width: 0.6, alpha: 0.6 });
+        g.circle(mx, my, R * 0.20).fill({ color: 0x1144bb, alpha: 0.9 });
+        g.circle(mx, my, R * 0.08).fill({ color: 0x66aaff, alpha: 0.95 });
+        g.circle(mx, my, R * 0.03).fill({ color: 0xffffff, alpha: 1 });
+        for (const p of pts) {
+          const smx = (mx + p.x) * 0.5, smy = (my + p.y) * 0.5;
+          g.moveTo(mx, my).lineTo(smx, smy).stroke({ color: 0x224488, width: 0.5, alpha: 0.55 });
+          g.circle(smx, smy, R * 0.04).fill({ color: 0x3377cc, alpha: 0.6 });
+        }
+
+      } else if (mod.moduleType === "weapon") {
+        // Gun barrel from centroid toward tip, then extending past the polygon
+        const barrelBase = R * 0.15;
+        const barrelTip = R * 1.15;    // barrel extends past polygon edge
+        const halfW = R * 0.20;
+        const bx0 = mx + outX * barrelBase, by0 = my + outY * barrelBase;
+        const bxtip = mx + outX * barrelTip, bytip = my + outY * barrelTip;
+
+        // Barrel housing (trapezoidal)
+        g.moveTo(bx0 + perpX * halfW,      by0 + perpY * halfW)
+         .lineTo(bxtip + perpX * halfW * 0.5, bytip + perpY * halfW * 0.5)
+         .lineTo(bxtip - perpX * halfW * 0.5, bytip - perpY * halfW * 0.5)
+         .lineTo(bx0 - perpX * halfW,      by0 - perpY * halfW)
+         .closePath().fill({ color: 0x223344, alpha: 0.95 });
+        // Top edge highlight
+        g.moveTo(bx0 + perpX * halfW, by0 + perpY * halfW)
+         .lineTo(bxtip + perpX * halfW * 0.5, bytip + perpY * halfW * 0.5)
+         .stroke({ color: 0x778899, width: 0.7, alpha: 0.8 });
+        // Barrel rings
+        for (let ri = 0; ri < 3; ri++) {
+          const t = 0.3 + ri * 0.28;
+          const rx = mx + outX * R * (0.15 + t * 1.0);
+          const ry = my + outY * R * (0.15 + t * 1.0);
+          const rw = halfW * (1.1 - ri * 0.1);
+          g.moveTo(rx + perpX * rw, ry + perpY * rw)
+           .lineTo(rx - perpX * rw, ry - perpY * rw)
+           .stroke({ color: ri === 0 ? 0x556677 : 0x445566, width: 0.8, alpha: 0.85 });
+        }
+        // Muzzle glow (orange-red heat)
+        g.circle(bxtip, bytip, R * 0.22).fill({ color: 0xff3300, alpha: 0.18 });
+        g.circle(bxtip, bytip, R * 0.12).fill({ color: 0xff6600, alpha: 0.55 });
+        g.circle(bxtip, bytip, R * 0.055).fill({ color: 0xffcc44, alpha: 0.9 });
+        g.circle(bxtip, bytip, R * 0.022).fill({ color: 0xffffff, alpha: 1 });
+        // Breech block at base
+        g.circle(mx - outX * R * 0.18, my - outY * R * 0.18, R * 0.25)
+         .fill({ color: 0x1a2a3a, alpha: 0.9 })
+         .stroke({ color: 0x445566, width: 0.5, alpha: 0.7 });
+
+      } else if (mod.moduleType === "external") {
+        // Sensor/emitter pod: projector dish at tip direction
+        const emitX = mx + outX * R * 0.55, emitY = my + outY * R * 0.55;
+        // Housing strut
+        g.moveTo(mx - outX * R * 0.1, my - outY * R * 0.1)
+         .lineTo(emitX, emitY)
+         .stroke({ color: 0x335566, width: 0.8, alpha: 0.7 });
+        // Emitter dish housing
+        g.circle(emitX, emitY, R * 0.35).fill({ color: 0x0a1e30, alpha: 0.92 });
+        g.circle(emitX, emitY, R * 0.35).stroke({ color: 0x0099cc, width: 0.8, alpha: 0.85 });
+        // Inner emitter lens
+        g.circle(emitX, emitY, R * 0.18).fill({ color: 0x004466, alpha: 0.9 });
+        g.circle(emitX, emitY, R * 0.09).fill({ color: 0x00bbff, alpha: 0.95 });
+        g.circle(emitX, emitY, R * 0.035).fill({ color: 0xffffff, alpha: 1 });
+        // Radiating energy arcs (3 beams outward)
+        for (let ai = -1; ai <= 1; ai++) {
+          const ang = Math.atan2(outY, outX) + ai * 0.45;
+          g.moveTo(emitX, emitY)
+           .lineTo(emitX + Math.cos(ang) * R * 0.55, emitY + Math.sin(ang) * R * 0.55)
+           .stroke({ color: 0x0099ff, width: 0.5, alpha: ai === 0 ? 0.55 : 0.3 });
+        }
+        // Side mounting flanges
+        g.moveTo(mx + perpX * R * 0.4, my + perpY * R * 0.4)
+         .lineTo(mx - perpX * R * 0.4, my - perpY * R * 0.4)
+         .stroke({ color: 0x224455, width: 0.6, alpha: 0.6 });
+
+      } else if (mod.moduleType === "internal") {
+        // Power reactor / thruster core — amber glow
+        g.circle(mx, my, R * 0.50).fill({ color: 0x1a1000, alpha: 0.85 });
+        g.circle(mx, my, R * 0.50).stroke({ color: 0x996600, width: 0.7, alpha: 0.7 });
+        g.circle(mx, my, R * 0.28).fill({ color: 0x5a3000, alpha: 0.9 });
+        g.circle(mx, my, R * 0.14).fill({ color: 0xffaa00, alpha: 0.9 });
+        g.circle(mx, my, R * 0.055).fill({ color: 0xffffff, alpha: 0.9 });
+        // Power conduit lines to each side midpoint
+        for (let i = 0; i < N; i++) {
+          const s = pts[i]!, e = pts[(i + 1) % N]!;
+          const smx = (s.x + e.x) / 2, smy = (s.y + e.y) / 2;
+          g.moveTo(mx, my).lineTo(smx, smy).stroke({ color: 0x886600, width: 0.5, alpha: 0.5 });
+          g.circle(smx, smy, R * 0.05).fill({ color: 0xcc8800, alpha: 0.6 });
+        }
+
+      } else if (mod.moduleType === "structure") {
+        // Girder cross-bracing pattern
+        for (let i = 0; i < N; i++) {
+          for (let j = i + 2; j < N - (i === 0 ? 1 : 0); j++) {
+            g.moveTo(pts[i]!.x, pts[i]!.y)
+             .lineTo(pts[j]!.x, pts[j]!.y)
+             .stroke({ color: 0x445566, width: 0.55, alpha: 0.6 });
+          }
+        }
+        // Corner bolt nodes
+        for (const p of pts) {
+          const bx = mx + (p.x - mx) * 0.75, by = my + (p.y - my) * 0.75;
+          g.circle(bx, by, R * 0.07).fill({ color: 0x667788, alpha: 0.75 });
+        }
+        // Center junction node
+        g.circle(mx, my, R * 0.12).fill({ color: 0x334455, alpha: 0.8 })
+         .stroke({ color: 0x556677, width: 0.5, alpha: 0.7 });
+
+      } else if (mod.moduleType === "converter") {
+        // Energy flow channel with directional arrow
+        const flowLen = R * 0.6;
+        g.moveTo(mx - outX * flowLen, my - outY * flowLen)
+         .lineTo(mx + outX * flowLen, my + outY * flowLen)
+         .stroke({ color: 0x882299, width: 1.1, alpha: 0.75 });
+        // Arrowhead
+        const aX = mx + outX * flowLen * 0.85, aY = my + outY * flowLen * 0.85;
+        g.moveTo(aX, aY)
+         .lineTo(aX - outX * R * 0.22 + perpX * R * 0.14, aY - outY * R * 0.22 + perpY * R * 0.14)
+         .lineTo(aX - outX * R * 0.22 - perpX * R * 0.14, aY - outY * R * 0.22 - perpY * R * 0.14)
+         .closePath().fill({ color: 0xcc44ff, alpha: 0.85 });
+        // Input glow (source)
+        g.circle(mx - outX * flowLen, my - outY * flowLen, R * 0.14)
+         .fill({ color: 0x6600cc, alpha: 0.7 });
+        // Output glow (destination)
+        g.circle(mx + outX * flowLen, my + outY * flowLen, R * 0.14)
+         .fill({ color: 0xee00aa, alpha: 0.7 });
+      }
+    }
+  }
+
   private drawGalaxyMap(g: Graphics, map: GalaxyMapData): void {
     // Semi-transparent backdrop
     g.rect(0, 0, this.width, this.height).fill({ color: 0x000018, alpha: 0.85 });
@@ -3116,65 +3869,1226 @@ export class GameRenderer {
     this.dockedHint.visible = true;
   }
 
+  private drawDockRoomInterior(
+    g: Graphics,
+    robotX: number,
+    accentColor: number,
+  ): void {
+    const W = this.width / 2;
+    const H = this.height;
+
+    // One-point perspective box — back wall bounds define the room depth.
+    const BL = 140, BR = 500, BT = 90, BB = 470;
+
+    // ── Back wall ─────────────────────────────────────────────────────────
+    g.rect(BL, BT, BR - BL, BB - BT).fill({ color: 0x192434 });
+    // Horizontal panel seams
+    for (let wy = BT + 65; wy < BB; wy += 65) {
+      g.moveTo(BL, wy).lineTo(BR, wy).stroke({ color: 0x223244, width: 1, alpha: 0.5 });
+    }
+    // Vertical panel seams
+    for (let wx = BL + 90; wx < BR; wx += 90) {
+      g.moveTo(wx, BT).lineTo(wx, BB).stroke({ color: 0x223244, width: 1, alpha: 0.35 });
+    }
+    // Accent strip across top of back wall
+    g.rect(BL, BT, BR - BL, 3).fill({ color: accentColor, alpha: 0.55 });
+    // Small tech panel (right side of back wall)
+    g.rect(BR - 78, BT + 38, 56, 76)
+      .fill({ color: 0x0e1928 })
+      .stroke({ color: accentColor, width: 1, alpha: 0.5 });
+    for (let pi = 0; pi < 3; pi++) {
+      g.circle(BR - 50, BT + 58 + pi * 22, 4).fill({ color: accentColor, alpha: 0.75 });
+    }
+
+    // ── Left wall ─────────────────────────────────────────────────────────
+    g.poly([0, 0, 0, H, BL, BB, BL, BT]).fill({ color: 0x0f1b29 });
+    g.moveTo(BL, BT).lineTo(0, 0).stroke({ color: accentColor, width: 1, alpha: 0.2 });
+    g.moveTo(BL, BB).lineTo(0, H).stroke({ color: accentColor, width: 1, alpha: 0.2 });
+
+    // ── Right wall ────────────────────────────────────────────────────────
+    g.poly([W, 0, W, H, BR, BB, BR, BT]).fill({ color: 0x0c1722 });
+    g.moveTo(BR, BT).lineTo(W, 0).stroke({ color: accentColor, width: 1, alpha: 0.15 });
+    g.moveTo(BR, BB).lineTo(W, H).stroke({ color: accentColor, width: 1, alpha: 0.15 });
+
+    // ── Ceiling ───────────────────────────────────────────────────────────
+    g.poly([0, 0, W, 0, BR, BT, BL, BT]).fill({ color: 0x101d2e });
+    // Overhead light strip
+    const ls = W * 0.35;
+    g.rect((W - ls) / 2, 0, ls, 6).fill({ color: accentColor, alpha: 0.22 });
+    g.rect((W - ls * 0.4) / 2, 0, ls * 0.4, 2).fill({ color: 0xffffff, alpha: 0.08 });
+
+    // ── Floor ─────────────────────────────────────────────────────────────
+    g.poly([0, H, W, H, BR, BB, BL, BB]).fill({ color: 0x06090f });
+    // Perspective grid on floor
+    for (let fy = BB + 48; fy < H; fy += 48) {
+      const t  = (fy - BB) / (H - BB);
+      const lx = BL  + (0 - BL) * t;
+      const rx = BR  + (W - BR) * t;
+      g.moveTo(lx, fy).lineTo(rx, fy).stroke({ color: 0x18273c, width: 1, alpha: 0.55 });
+    }
+    // Converging lines toward back-wall base
+    g.moveTo(W * 0.25, H).lineTo(BL, BB).stroke({ color: 0x18273c, width: 1, alpha: 0.4 });
+    g.moveTo(W * 0.50, H).lineTo(W * 0.50, BB).stroke({ color: 0x18273c, width: 1, alpha: 0.4 });
+    g.moveTo(W * 0.75, H).lineTo(BR, BB).stroke({ color: 0x18273c, width: 1, alpha: 0.4 });
+
+    // ── Shadow ellipse (behind robot, in front of floor) ──────────────────
+    g.ellipse(robotX, BB + 6, 54, 14).fill({ color: 0x000000, alpha: 0.5 });
+  }
+
+  private drawDockCounter(
+    g: Graphics,
+    accentColor: number,
+    isShop: boolean,
+  ): void {
+    g.clear();
+    if (!isShop) { g.visible = false; return; }
+    g.visible = true;
+
+    // Counter appears in front of the robot.  Its "back" edge (CT) is above
+    // the robot's feet in screen space, so the counter top surface occludes
+    // the lower legs.  Front edge (CF) and front face drop toward the viewer.
+    const CL = 150, CR = 490;   // back-edge left/right
+    const CT = 448;             // back edge y (higher on screen = farther)
+    const CF = 516;             // front-top edge y (closer to viewer)
+    const CFL = 62, CFR = 578;  // front edge left/right (wider, perspective)
+    const CBOT = 694;           // front face bottom y
+
+    // Counter top surface (perspective trapezoid)
+    g.poly([CL, CT, CR, CT, CFR, CF, CFL, CF]).fill({ color: 0x1c2e48 });
+    // Top surface highlight strip along front edge
+    g.moveTo(CFL, CF).lineTo(CFR, CF).stroke({ color: accentColor, width: 2, alpha: 0.55 });
+    // Top surface back edge (subtle)
+    g.moveTo(CL, CT).lineTo(CR, CT).stroke({ color: accentColor, width: 1, alpha: 0.25 });
+    // Top surface sheen (lighter near-edge strip)
+    g.poly([CL, CT, CR, CT, CR - 18, CT + 18, CL + 18, CT + 18])
+      .fill({ color: 0x263d58, alpha: 0.35 });
+
+    // Counter front face
+    g.poly([CFL, CF, CFR, CF, CFR + 18, CBOT, CFL - 18, CBOT])
+      .fill({ color: 0x0c1a2e });
+    // Vertical panel dividers on front face
+    const fc = CFL + (CFR - CFL) / 3;
+    const fc2 = CFL + (CFR - CFL) * 2 / 3;
+    g.moveTo(fc, CF).lineTo(fc - 4, CBOT).stroke({ color: 0x162438, width: 1, alpha: 0.5 });
+    g.moveTo(fc2, CF).lineTo(fc2 + 4, CBOT).stroke({ color: 0x162438, width: 1, alpha: 0.5 });
+
+    // Items on counter top: small screen (left) + cargo canisters (center/right)
+    // Mini display screen
+    g.roundRect(CL + 14, CT - 22, 52, 32, 3)
+      .fill({ color: 0x08121e })
+      .stroke({ color: accentColor, width: 1, alpha: 0.65 });
+    g.roundRect(CL + 16, CT - 20, 48, 28, 2).fill({ color: accentColor, alpha: 0.1 });
+    // Cargo canister 1
+    const mx = (CL + CR) / 2 - 20;
+    g.rect(mx, CT - 16, 18, 16).fill({ color: 0x243a52 }).stroke({ color: 0x3a5572, width: 1 });
+    g.rect(mx, CT - 18, 18, 4).fill({ color: 0x3a5572 });
+    // Cargo canister 2
+    g.rect(mx + 26, CT - 12, 16, 12).fill({ color: 0x1e4a38 }).stroke({ color: 0x2e6a50, width: 1 });
+    g.rect(mx + 26, CT - 14, 16, 4).fill({ color: 0x2e6a50 });
+  }
+
   private drawDockedMenu(data: SolarSystemRenderData | null): void {
     const g = this.solarSystemGfx;
     g.clear();
 
-    // Dim space backdrop
     this.drawNebulaBackground(g);
-    g.rect(0, 0, this.width, this.height).fill({ color: 0x000010, alpha: 0.7 });
 
-    const docked = data?.docked;
-    const title = docked?.locationName ?? "DOCKED";
-    const items = docked?.menuItems ?? ["Undock"];
-    const sel = docked?.menuSelection ?? 0;
+    const docked    = data?.docked;
+    const activeNpc = data?.docked?.activeNpc;
+    const title     = docked?.locationName ?? "DOCKED";
+    const items     = docked?.menuItems ?? ["Undock"];
+    const sel       = docked?.menuSelection ?? 0;
 
-    // Panel
-    const panelWidth = 480;
-    const panelHeight = 360;
-    const panelX = this.width / 2 - panelWidth / 2;
-    const panelY = this.height / 2 - panelHeight / 2;
+    // Derive accent colour from NPC faction (fallback cyan)
+    const accentColor = activeNpc
+      ? ({ "terran-federation": 0x4499ff, "xeno-collective": 0x44ee88,
+           "void-merchants": 0xcc77ff, "scavenger-clans": 0xff9933,
+           "nova-rebels": 0xff4455 } as Record<string, number>)[activeNpc.factionId] ?? 0x00ccff
+      : 0x00ccff;
 
-    g.rect(panelX, panelY, panelWidth, panelHeight).fill({ color: 0x001a4d, alpha: 0.95 });
-    g.rect(panelX, panelY, panelWidth, panelHeight).stroke({ color: 0x00ffff, width: 2, alpha: 1 });
+    const isShop =
+      activeNpc?.role === "trader" || activeNpc?.role === "broker";
 
-    // Title bar
-    g.rect(panelX, panelY, panelWidth, 50).fill({ color: 0x00334d, alpha: 0.9 });
-    g.moveTo(panelX, panelY + 50)
-      .lineTo(panelX + panelWidth, panelY + 50)
-      .stroke({ color: 0x00ffff, width: 1, alpha: 0.7 });
+    // ── Left panel: room interior ────────────────────────────────────────
+    const robotX = this.width / 4;      // 320
+    const robotY = this.height * 0.46;  // 331 — centered in room
+
+    this.drawDockRoomInterior(g, robotX, accentColor);
+
+    // ── Right panel ───────────────────────────────────────────────────────
+    g.rect(this.width / 2, 0, this.width / 2, this.height)
+      .fill({ color: 0x000010, alpha: 0.92 });
+    g.moveTo(this.width / 2, 0)
+      .lineTo(this.width / 2, this.height)
+      .stroke({ color: accentColor, width: 2, alpha: 0.5 });
+
+    // ── Robot ─────────────────────────────────────────────────────────────
+    if (activeNpc) {
+      if (this.currentDockNpcId !== activeNpc.id) {
+        if (this.currentDockRobot) this.menuLayer.removeChild(this.currentDockRobot);
+        this.currentDockRobot = createNPCRobot(activeNpc, 300);
+        this.currentDockNpcId = activeNpc.id;
+        this.menuLayer.addChild(this.currentDockRobot);
+        // Ensure counter renders above robot
+        this.menuLayer.addChild(this.dockCounterGfx);
+      }
+      this.currentDockRobot!.position.set(robotX, robotY);
+      this.currentDockRobot!.visible = true;
+    } else if (this.currentDockRobot) {
+      this.currentDockRobot.visible = false;
+    }
+
+    // ── Counter overlay (drawn on top of robot) ───────────────────────────
+    this.drawDockCounter(this.dockCounterGfx, accentColor, isShop);
+
+    // ── Right side menu ───────────────────────────────────────────────────
+    const menuStartX = this.width / 2 + 80;
+    const menuWidth  = this.width / 2 - 100;
 
     this.dockedTitle.text = `◈  ${title.toUpperCase()}  ◈`;
-    this.dockedTitle.x = this.width / 2;
-    this.dockedTitle.y = panelY + 8;
+    this.dockedTitle.x = this.width * 0.75;
+    this.dockedTitle.y = 30;
+    this.dockedTitle.style.fontSize = 28;
+    this.dockedTitle.anchor.set(0.5, 0);
+    this.dockedTitle.visible = true;
 
-    // Menu items with button backgrounds
-    this.ensureTextPool(this.dockedMenuLabels, items.length, 22);
-    const itemTopY = panelY + 80;
-    const itemSpacing = 44;
-    const btnW2 = panelWidth - 40;
+    this.ensureTextPool(this.dockedMenuLabels, items.length, 24);
+    const itemStartY  = 200;
+    const itemSpacing = 80;
     for (let i = 0; i < items.length; i++) {
-      const t = this.dockedMenuLabels[i]!;
+      const t     = this.dockedMenuLabels[i]!;
       const isSel = i === sel;
-      const btnY = itemTopY + i * itemSpacing;
-      g.roundRect(panelX + 20, btnY - 4, btnW2, 36, 6)
+      const btnY  = itemStartY + i * itemSpacing;
+      const btnW  = menuWidth - 40;
+      const btnH  = 56;
+      g.roundRect(menuStartX - 10, btnY - 10, btnW + 20, btnH + 20, 8)
         .fill({ color: isSel ? 0x003366 : 0x001122, alpha: 0.85 })
-        .stroke({ color: isSel ? 0xffcc33 : 0x334455, width: isSel ? 2 : 1 });
+        .stroke({ color: isSel ? 0xffcc33 : 0x334455, width: isSel ? 3 : 1 });
       t.text = isSel ? `▶  ${items[i]}` : `   ${items[i]}`;
-      t.x = panelX + 50;
+      t.x = menuStartX + 10;
       t.y = btnY;
       t.anchor.set(0, 0);
       t.style.fill = isSel ? 0xffcc33 : 0xddeeff;
+      t.style.fontSize = 24;
       t.visible = true;
     }
     for (let i = items.length; i < this.dockedMenuLabels.length; i++) {
       this.dockedMenuLabels[i]!.visible = false;
     }
 
-    // Hint
-    this.dockedHint.text = "Tap an option  •  [ESC] undock";
-    this.dockedHint.x = this.width / 2;
-    this.dockedHint.y = panelY + panelHeight - 20;
+    this.dockedHint.text = "[↑↓] Navigate  •  [Enter] Select  •  [ESC] Undock";
+    this.dockedHint.x = this.width * 0.75;
+    this.dockedHint.y = this.height - 40;
+    this.dockedHint.anchor.set(0.5, 0);
+    this.dockedHint.style.fontSize = 16;
+    this.dockedHint.visible = true;
+
+    // Galaxy map overlay — drawn on top of the docked UI without undocking.
+    if (data?.mapOpen && data.galaxyMap) {
+      this.drawGalaxyMap(g, data.galaxyMap);
+    }
+  }
+
+  private drawNpcTalkScreen(
+    data: NonNullable<SolarSystemRenderData["npcTalk"]>,
+    locationName?: string,
+  ): void {
+    const g = this.solarSystemGfx;
+    g.clear();
+    this.drawNebulaBackground(g);
+
+    const npc = data.npc;
+    const accentColor = ({ "terran-federation": 0x4499ff, "xeno-collective": 0x44ee88,
+      "void-merchants": 0xcc77ff, "scavenger-clans": 0xff9933,
+      "nova-rebels": 0xff4455 } as Record<string, number>)[npc.factionId] ?? 0x00ccff;
+
+    const robotX = this.width / 4;
+    const robotY = this.height * 0.46;
+    this.drawDockRoomInterior(g, robotX, accentColor);
+
+    // Right panel
+    g.rect(this.width / 2, 0, this.width / 2, this.height)
+      .fill({ color: 0x000010, alpha: 0.92 });
+    g.moveTo(this.width / 2, 0).lineTo(this.width / 2, this.height)
+      .stroke({ color: accentColor, width: 2, alpha: 0.5 });
+
+    // Robot
+    if (this.currentDockNpcId !== npc.id) {
+      if (this.currentDockRobot) this.menuLayer.removeChild(this.currentDockRobot);
+      this.currentDockRobot = createNPCRobot(npc, 300);
+      this.currentDockNpcId = npc.id;
+      this.menuLayer.addChild(this.currentDockRobot);
+      this.menuLayer.addChild(this.dockCounterGfx);
+    }
+    this.currentDockRobot!.position.set(robotX, robotY);
+    this.currentDockRobot!.visible = true;
+    this.drawDockCounter(this.dockCounterGfx, accentColor, false);
+
+    // Title
+    this.dockedTitle.text = `◈  ${(locationName ?? "STATION").toUpperCase()}  ◈`;
+    this.dockedTitle.x = this.width * 0.75;
+    this.dockedTitle.y = 30;
+    this.dockedTitle.style.fontSize = 28;
+    this.dockedTitle.anchor.set(0.5, 0);
+    this.dockedTitle.visible = true;
+
+    // NPC name + greeting
+    const menuStartX = this.width / 2 + 80;
+    const menuWidth  = this.width / 2 - 100;
+    g.roundRect(menuStartX - 10, 80, menuWidth, 90, 6)
+      .fill({ color: 0x001122, alpha: 0.8 }).stroke({ color: accentColor, width: 1, alpha: 0.4 });
+    this.ensureTextPool(this.dockedMenuLabels, 4 + data.menuItems.length, 20);
+    const nameLabel = this.dockedMenuLabels[0]!;
+    nameLabel.text = npc.name.toUpperCase();
+    nameLabel.x = menuStartX + 10; nameLabel.y = 88;
+    nameLabel.style.fontSize = 22; nameLabel.style.fill = accentColor;
+    nameLabel.anchor.set(0, 0); nameLabel.visible = true;
+
+    // Greeting text (word-wrapped roughly)
+    const greetLabel = this.dockedMenuLabels[1]!;
+    greetLabel.text = npc.dialogueGreeting;
+    greetLabel.x = menuStartX + 10; greetLabel.y = 116;
+    greetLabel.style.fontSize = 15; greetLabel.style.fill = 0xaaccdd;
+    greetLabel.anchor.set(0, 0); greetLabel.visible = true;
+    (greetLabel.style as import("pixi.js").TextStyle).wordWrap = true;
+    (greetLabel.style as import("pixi.js").TextStyle).wordWrapWidth = menuWidth - 20;
+
+    // Menu items
+    const itemStartY = 220;
+    const itemSpacing = 80;
+    for (let i = 0; i < data.menuItems.length; i++) {
+      const t = this.dockedMenuLabels[2 + i]!;
+      const isSel = i === data.menuSelection;
+      const btnY = itemStartY + i * itemSpacing;
+      g.roundRect(menuStartX - 10, btnY - 10, menuWidth, 56, 8)
+        .fill({ color: isSel ? 0x003366 : 0x001122, alpha: 0.85 })
+        .stroke({ color: isSel ? 0xffcc33 : 0x334455, width: isSel ? 3 : 1 });
+      t.text = isSel ? `▶  ${data.menuItems[i]}` : `   ${data.menuItems[i]}`;
+      t.x = menuStartX + 10; t.y = btnY;
+      t.anchor.set(0, 0); t.style.fontSize = 24;
+      t.style.fill = isSel ? 0xffcc33 : 0xddeeff;
+      t.visible = true;
+    }
+    for (let i = data.menuItems.length; i < this.dockedMenuLabels.length - 2; i++) {
+      this.dockedMenuLabels[2 + i]!.visible = false;
+    }
+
+    this.dockedHint.text = "[↑↓] Navigate  •  [Enter] Select  •  [ESC] Back";
+    this.dockedHint.x = this.width * 0.75; this.dockedHint.y = this.height - 40;
+    this.dockedHint.anchor.set(0.5, 0); this.dockedHint.style.fontSize = 16;
+    this.dockedHint.visible = true;
+  }
+
+  private drawMissionListScreen(
+    data: NonNullable<SolarSystemRenderData["missionList"]>,
+    _locationName?: string,
+  ): void {
+    const g = this.solarSystemGfx;
+    g.clear();
+    this.drawNebulaBackground(g);
+
+    const npc = data.npc;
+    const accentColor = ({ "terran-federation": 0x4499ff, "xeno-collective": 0x44ee88,
+      "void-merchants": 0xcc77ff, "scavenger-clans": 0xff9933,
+      "nova-rebels": 0xff4455 } as Record<string, number>)[npc.factionId] ?? 0x00ccff;
+
+    const robotX = this.width / 4;
+    const robotY = this.height * 0.46;
+    this.drawDockRoomInterior(g, robotX, accentColor);
+
+    g.rect(this.width / 2, 0, this.width / 2, this.height)
+      .fill({ color: 0x000010, alpha: 0.92 });
+    g.moveTo(this.width / 2, 0).lineTo(this.width / 2, this.height)
+      .stroke({ color: accentColor, width: 2, alpha: 0.5 });
+
+    if (this.currentDockNpcId !== npc.id) {
+      if (this.currentDockRobot) this.menuLayer.removeChild(this.currentDockRobot);
+      this.currentDockRobot = createNPCRobot(npc, 300);
+      this.currentDockNpcId = npc.id;
+      this.menuLayer.addChild(this.currentDockRobot);
+      this.menuLayer.addChild(this.dockCounterGfx);
+    }
+    this.currentDockRobot!.position.set(robotX, robotY);
+    this.currentDockRobot!.visible = true;
+    this.drawDockCounter(this.dockCounterGfx, accentColor, false);
+
+    this.dockedTitle.text = `◈  MISSIONS  ◈`;
+    this.dockedTitle.x = this.width * 0.75; this.dockedTitle.y = 30;
+    this.dockedTitle.style.fontSize = 28; this.dockedTitle.anchor.set(0.5, 0);
+    this.dockedTitle.visible = true;
+
+    const menuStartX = this.width / 2 + 40;
+    const menuWidth  = this.width / 2 - 60;
+    const allItems = [...data.missions.map((m) => m.spec.title), "Back"];
+    const itemCount = allItems.length;
+    const ROW_H = 54;
+    const itemStartY = 80;
+
+    this.ensureTextPool(this.dockedMenuLabels, itemCount, 20);
+    for (let i = 0; i < itemCount; i++) {
+      const t = this.dockedMenuLabels[i]!;
+      const isSel = i === data.menuSelection;
+      const btnY = itemStartY + i * ROW_H;
+      let rowColor = isSel ? 0x003366 : 0x001122;
+      let textColor = isSel ? 0xffcc33 : 0xddeeff;
+      let statusTag = "";
+      if (i < data.missions.length) {
+        const m = data.missions[i]!;
+        if (m.status === "active") { statusTag = "  [IN PROGRESS]"; textColor = 0xffaa44; }
+        if (m.status === "completed") { statusTag = "  [DONE]"; textColor = 0x44ff88; rowColor = 0x001100; }
+      }
+      g.roundRect(menuStartX - 10, btnY - 6, menuWidth, ROW_H - 4, 6)
+        .fill({ color: rowColor, alpha: 0.85 })
+        .stroke({ color: isSel ? 0xffcc33 : 0x334455, width: isSel ? 2 : 1 });
+      t.text = isSel ? `▶  ${allItems[i]}${statusTag}` : `   ${allItems[i]}${statusTag}`;
+      t.x = menuStartX + 10; t.y = btnY;
+      t.anchor.set(0, 0); t.style.fontSize = 20; t.style.fill = textColor;
+      t.visible = true;
+    }
+    for (let i = itemCount; i < this.dockedMenuLabels.length; i++) {
+      this.dockedMenuLabels[i]!.visible = false;
+    }
+
+    this.dockedHint.text = "[↑↓] Navigate  •  [Enter] View Mission  •  [ESC] Back";
+    this.dockedHint.x = this.width * 0.75; this.dockedHint.y = this.height - 40;
+    this.dockedHint.anchor.set(0.5, 0); this.dockedHint.style.fontSize = 16;
+    this.dockedHint.visible = true;
+  }
+
+  private drawMissionDetailScreen(
+    data: NonNullable<SolarSystemRenderData["missionDetail"]>,
+    npc?: NPCDefinition | undefined,
+  ): void {
+    const g = this.solarSystemGfx;
+    g.clear();
+    this.drawNebulaBackground(g);
+
+    const accentColor = npc
+      ? (({ "terran-federation": 0x4499ff, "xeno-collective": 0x44ee88,
+          "void-merchants": 0xcc77ff, "scavenger-clans": 0xff9933,
+          "nova-rebels": 0xff4455 } as Record<string, number>)[npc.factionId] ?? 0x00ccff)
+      : 0x00ccff;
+
+    const robotX = this.width / 4;
+    const robotY = this.height * 0.46;
+    this.drawDockRoomInterior(g, robotX, accentColor);
+
+    g.rect(this.width / 2, 0, this.width / 2, this.height)
+      .fill({ color: 0x000010, alpha: 0.92 });
+    g.moveTo(this.width / 2, 0).lineTo(this.width / 2, this.height)
+      .stroke({ color: accentColor, width: 2, alpha: 0.5 });
+
+    if (npc && this.currentDockNpcId !== npc.id) {
+      if (this.currentDockRobot) this.menuLayer.removeChild(this.currentDockRobot);
+      this.currentDockRobot = createNPCRobot(npc, 300);
+      this.currentDockNpcId = npc.id;
+      this.menuLayer.addChild(this.currentDockRobot);
+      this.menuLayer.addChild(this.dockCounterGfx);
+    }
+    if (this.currentDockRobot) {
+      this.currentDockRobot.position.set(robotX, robotY);
+      this.currentDockRobot.visible = true;
+      this.drawDockCounter(this.dockCounterGfx, accentColor, false);
+    }
+
+    const spec = data.spec;
+    const menuStartX = this.width / 2 + 40;
+    const menuWidth  = this.width / 2 - 60;
+
+    this.dockedTitle.text = `◈  MISSION BRIEF  ◈`;
+    this.dockedTitle.x = this.width * 0.75; this.dockedTitle.y = 30;
+    this.dockedTitle.style.fontSize = 26; this.dockedTitle.anchor.set(0.5, 0);
+    this.dockedTitle.visible = true;
+
+    // Mission info block
+    g.roundRect(menuStartX - 10, 70, menuWidth, 320, 8)
+      .fill({ color: 0x001122, alpha: 0.85 }).stroke({ color: accentColor, width: 1, alpha: 0.4 });
+
+    const numLabels = 8;
+    this.ensureTextPool(this.dockedMenuLabels, numLabels, 18);
+    const labels = this.dockedMenuLabels;
+
+    const setLabel = (idx: number, txt: string, y: number, sz: number, color: number) => {
+      const t = labels[idx]!;
+      t.text = txt; t.x = menuStartX + 10; t.y = y;
+      t.anchor.set(0, 0); t.style.fontSize = sz; t.style.fill = color;
+      (t.style as import("pixi.js").TextStyle).wordWrap = true;
+      (t.style as import("pixi.js").TextStyle).wordWrapWidth = menuWidth - 20;
+      t.visible = true;
+    };
+
+    setLabel(0, spec.title, 78, 22, accentColor);
+    const typeLabel = spec.type === "courier" ? "COURIER" : spec.type === "trade" ? "TRADE" :
+      spec.type === "explore" ? "EXPLORE" : spec.type === "kill" ? "KILL" : "AWAY MISSION";
+    const diffLabel = spec.difficulty === "easy" ? "EASY" : spec.difficulty === "normal" ? "NORMAL" : "HARD";
+    setLabel(1, `${typeLabel}  ·  ${diffLabel}`, 108, 14, 0x7799bb);
+    setLabel(2, spec.description, 132, 15, 0xaaccdd);
+    setLabel(3, "", 0, 1, 0); labels[3]!.visible = false; // spacer
+
+    let detailY = 240;
+    if (spec.type === "courier" && spec.destinationLocationId) {
+      setLabel(3, `Deliver to: ${spec.destinationLocationId}`, detailY, 15, 0xddcc88); detailY += 22;
+    } else if (spec.type === "kill" && spec.killCount) {
+      setLabel(3, `Destroy: ${spec.killCount} ships`, detailY, 15, 0xff8888); detailY += 22;
+    } else if (spec.type === "trade" && spec.requiredItemType) {
+      setLabel(3, `Bring: ${spec.requiredItemCount}x ${spec.requiredItemType}`, detailY, 15, 0xddcc88); detailY += 22;
+    }
+
+    setLabel(4, `Reward: ${spec.rewardCredits.toLocaleString()} credits`, detailY, 16, 0x44ff88); detailY += 22;
+    if (spec.rewardReputation > 0) {
+      setLabel(5, `+${spec.rewardReputation} faction reputation`, detailY, 14, 0x66ccff);
+    } else { labels[5]!.visible = false; }
+
+    // Accept / Back buttons
+    const btnItems = ["Accept Mission", "Back"];
+    const btnStartY = 420;
+    const btnSpacing = 70;
+    for (let i = 0; i < btnItems.length; i++) {
+      const t = labels[6 + i]!;
+      const isSel = i === data.menuSelection;
+      const btnY = btnStartY + i * btnSpacing;
+      g.roundRect(menuStartX - 10, btnY - 10, menuWidth, 52, 8)
+        .fill({ color: isSel ? 0x003366 : 0x001122, alpha: 0.85 })
+        .stroke({ color: isSel ? 0xffcc33 : 0x334455, width: isSel ? 3 : 1 });
+      t.text = isSel ? `▶  ${btnItems[i]}` : `   ${btnItems[i]}`;
+      t.x = menuStartX + 10; t.y = btnY;
+      t.anchor.set(0, 0); t.style.fontSize = 22; t.style.fill = isSel ? 0xffcc33 : 0xddeeff;
+      (t.style as import("pixi.js").TextStyle).wordWrap = false;
+      t.visible = true;
+    }
+    for (let i = numLabels; i < this.dockedMenuLabels.length; i++) {
+      this.dockedMenuLabels[i]!.visible = false;
+    }
+
+    this.dockedHint.text = "[↑↓] Navigate  •  [Enter] Confirm  •  [ESC] Back";
+    this.dockedHint.x = this.width * 0.75; this.dockedHint.y = this.height - 40;
+    this.dockedHint.anchor.set(0.5, 0); this.dockedHint.style.fontSize = 16;
+    this.dockedHint.visible = true;
+  }
+
+  private drawSolarShipBuilder(data: SolarShipBuilderRenderData): void {
+    const g = this.solarBuilderGfx;
+    g.clear();
+
+    const W = this.width;
+    const H = this.height;
+    const SPLIT = 800;
+    const CX = 400;
+    const CY = 360;
+
+    // ── Panel backgrounds ───────────────────────────────────────────────────
+    g.rect(0, 0, SPLIT, H).fill({ color: 0x080e18, alpha: 0.97 });
+    g.rect(SPLIT, 0, W - SPLIT, H).fill({ color: 0x0e1a2e, alpha: 0.97 });
+    g.rect(SPLIT, 0, 2, H).fill({ color: 0x2a466b, alpha: 1 });
+
+    // ── Module color lookup ─────────────────────────────────────────────────
+    const moduleColor = (type: string): number => {
+      switch (type) {
+        case "core": return 0x4488ff;
+        case "weapon": return 0xff4444;
+        case "external": return 0x44cc88;
+        case "internal": return 0xffaa44;
+        case "structure": return 0x8899aa;
+        default: return 0xaa55ee; // converter
+      }
+    };
+
+    // World → screen transform
+    const w2sx = (wx: number) => wx * data.zoom + CX + data.panX;
+    const w2sy = (wy: number) => wy * data.zoom + CY + data.panY;
+
+    // ── Placed modules ──────────────────────────────────────────────────────
+    // Ship center in screen space (world origin = (0,0) = core center)
+    const shipScrX = w2sx(0), shipScrY = w2sy(0);
+    const builderHull: Record<string, number> = {
+      core: 0x0b1825, weapon: 0x170e08, external: 0x060f1a,
+      internal: 0x0c1005, structure: 0x0d1218, converter: 0x0d0818,
+    };
+    for (const mod of data.modules) {
+      const verts = mod.vertices;
+      if (verts.length < 3) continue;
+      const sv = verts.map(v => ({ x: w2sx(v.x), y: w2sy(v.y) }));
+      const N = sv.length;
+
+      // Module centroid in screen space
+      const smx = sv.reduce((s, p) => s + p.x, 0) / N;
+      const smy = sv.reduce((s, p) => s + p.y, 0) / N;
+
+      // Circumradius in screen pixels
+      const sR = sv.reduce((s, p) => s + Math.hypot(p.x - smx, p.y - smy), 0) / N;
+
+      // Outward direction from ship center to module centroid
+      const odx = smx - shipScrX, ody = smy - shipScrY, odist = Math.hypot(odx, ody);
+      const sOutX = odist > 1 ? odx / odist : 1;
+      const sOutY = odist > 1 ? ody / odist : 0;
+      const sPerpX = -sOutY, sPerpY = sOutX;
+
+      // ── Hull polygon ──────────────────────────────────────────────────
+      const hc = builderHull[mod.moduleType] ?? 0x0d1218;
+      g.moveTo(sv[0]!.x, sv[0]!.y);
+      for (let i = 1; i < N; i++) g.lineTo(sv[i]!.x, sv[i]!.y);
+      g.closePath().fill({ color: hc, alpha: 0.92 });
+      g.moveTo(sv[0]!.x, sv[0]!.y);
+      for (let i = 1; i < N; i++) g.lineTo(sv[i]!.x, sv[i]!.y);
+      g.closePath().stroke({ color: 0x3a5570, width: 1.2, alpha: 0.9 });
+
+      // ── Type-specific detail overlay ──────────────────────────────────
+      if (mod.moduleType === "core") {
+        g.circle(smx, smy, sR * 0.62).stroke({ color: 0x1155cc, width: 1.2, alpha: 0.75 });
+        g.circle(smx, smy, sR * 0.40).fill({ color: 0x071840, alpha: 0.8 });
+        g.circle(smx, smy, sR * 0.40).stroke({ color: 0x2266ee, width: 1.0, alpha: 0.65 });
+        g.circle(smx, smy, sR * 0.20).fill({ color: 0x1144bb, alpha: 0.9 });
+        g.circle(smx, smy, sR * 0.08).fill({ color: 0x66aaff, alpha: 1 });
+        g.circle(smx, smy, sR * 0.03).fill({ color: 0xffffff, alpha: 1 });
+        for (const p of sv) {
+          const mx2 = (smx + p.x) * 0.5, my2 = (smy + p.y) * 0.5;
+          g.moveTo(smx, smy).lineTo(mx2, my2).stroke({ color: 0x224488, width: 0.8, alpha: 0.6 });
+          g.circle(mx2, my2, sR * 0.04).fill({ color: 0x3377cc, alpha: 0.65 });
+        }
+
+      } else if (mod.moduleType === "weapon") {
+        const barrelBase = sR * 0.15, barrelTip = sR * 1.15, halfW = sR * 0.22;
+        const bx0 = smx + sOutX * barrelBase, by0 = smy + sOutY * barrelBase;
+        const bxtip = smx + sOutX * barrelTip, bytip = smy + sOutY * barrelTip;
+        g.moveTo(bx0 + sPerpX * halfW,        by0 + sPerpY * halfW)
+         .lineTo(bxtip + sPerpX * halfW * 0.5, bytip + sPerpY * halfW * 0.5)
+         .lineTo(bxtip - sPerpX * halfW * 0.5, bytip - sPerpY * halfW * 0.5)
+         .lineTo(bx0 - sPerpX * halfW,         by0 - sPerpY * halfW)
+         .closePath().fill({ color: 0x223344, alpha: 0.95 });
+        g.moveTo(bx0 + sPerpX * halfW, by0 + sPerpY * halfW)
+         .lineTo(bxtip + sPerpX * halfW * 0.5, bytip + sPerpY * halfW * 0.5)
+         .stroke({ color: 0x8899aa, width: 1.0, alpha: 0.8 });
+        for (let ri = 0; ri < 3; ri++) {
+          const t = 0.3 + ri * 0.28;
+          const rx = smx + sOutX * sR * (0.15 + t * 1.0);
+          const ry = smy + sOutY * sR * (0.15 + t * 1.0);
+          const rw = halfW * (1.1 - ri * 0.1);
+          g.moveTo(rx + sPerpX * rw, ry + sPerpY * rw)
+           .lineTo(rx - sPerpX * rw, ry - sPerpY * rw)
+           .stroke({ color: 0x445566, width: 1.2, alpha: 0.85 });
+        }
+        g.circle(bxtip, bytip, sR * 0.22).fill({ color: 0xff3300, alpha: 0.20 });
+        g.circle(bxtip, bytip, sR * 0.12).fill({ color: 0xff6600, alpha: 0.60 });
+        g.circle(bxtip, bytip, sR * 0.055).fill({ color: 0xffcc44, alpha: 0.92 });
+        g.circle(bxtip, bytip, sR * 0.022).fill({ color: 0xffffff, alpha: 1 });
+        g.circle(smx - sOutX * sR * 0.18, smy - sOutY * sR * 0.18, sR * 0.25)
+         .fill({ color: 0x1a2a3a, alpha: 0.9 })
+         .stroke({ color: 0x445566, width: 0.8, alpha: 0.7 });
+
+      } else if (mod.moduleType === "external") {
+        const emitX = smx + sOutX * sR * 0.55, emitY = smy + sOutY * sR * 0.55;
+        g.moveTo(smx - sOutX * sR * 0.1, smy - sOutY * sR * 0.1)
+         .lineTo(emitX, emitY)
+         .stroke({ color: 0x335566, width: 1.2, alpha: 0.75 });
+        g.circle(emitX, emitY, sR * 0.35).fill({ color: 0x0a1e30, alpha: 0.92 });
+        g.circle(emitX, emitY, sR * 0.35).stroke({ color: 0x0099cc, width: 1.2, alpha: 0.88 });
+        g.circle(emitX, emitY, sR * 0.18).fill({ color: 0x004466, alpha: 0.9 });
+        g.circle(emitX, emitY, sR * 0.09).fill({ color: 0x00bbff, alpha: 0.95 });
+        g.circle(emitX, emitY, sR * 0.035).fill({ color: 0xffffff, alpha: 1 });
+        for (let ai = -1; ai <= 1; ai++) {
+          const ang = Math.atan2(sOutY, sOutX) + ai * 0.45;
+          g.moveTo(emitX, emitY)
+           .lineTo(emitX + Math.cos(ang) * sR * 0.55, emitY + Math.sin(ang) * sR * 0.55)
+           .stroke({ color: 0x0099ff, width: 0.8, alpha: ai === 0 ? 0.6 : 0.35 });
+        }
+        g.moveTo(smx + sPerpX * sR * 0.4, smy + sPerpY * sR * 0.4)
+         .lineTo(smx - sPerpX * sR * 0.4, smy - sPerpY * sR * 0.4)
+         .stroke({ color: 0x224455, width: 0.9, alpha: 0.65 });
+
+      } else if (mod.moduleType === "internal") {
+        g.circle(smx, smy, sR * 0.50).fill({ color: 0x1a1000, alpha: 0.85 });
+        g.circle(smx, smy, sR * 0.50).stroke({ color: 0x996600, width: 1.0, alpha: 0.72 });
+        g.circle(smx, smy, sR * 0.28).fill({ color: 0x5a3000, alpha: 0.9 });
+        g.circle(smx, smy, sR * 0.14).fill({ color: 0xffaa00, alpha: 0.92 });
+        g.circle(smx, smy, sR * 0.055).fill({ color: 0xffffff, alpha: 0.9 });
+        for (let i = 0; i < N; i++) {
+          const s2 = sv[i]!, e2 = sv[(i + 1) % N]!;
+          const smx2 = (s2.x + e2.x) / 2, smy2 = (s2.y + e2.y) / 2;
+          g.moveTo(smx, smy).lineTo(smx2, smy2).stroke({ color: 0x886600, width: 0.8, alpha: 0.55 });
+          g.circle(smx2, smy2, sR * 0.05).fill({ color: 0xcc8800, alpha: 0.65 });
+        }
+
+      } else if (mod.moduleType === "structure") {
+        for (let i = 0; i < N; i++) {
+          for (let j = i + 2; j < N - (i === 0 ? 1 : 0); j++) {
+            g.moveTo(sv[i]!.x, sv[i]!.y).lineTo(sv[j]!.x, sv[j]!.y)
+             .stroke({ color: 0x445566, width: 0.9, alpha: 0.65 });
+          }
+        }
+        for (const p of sv) {
+          const bx2 = smx + (p.x - smx) * 0.75, by2 = smy + (p.y - smy) * 0.75;
+          g.circle(bx2, by2, sR * 0.07).fill({ color: 0x667788, alpha: 0.8 });
+        }
+        g.circle(smx, smy, sR * 0.12).fill({ color: 0x334455, alpha: 0.85 })
+         .stroke({ color: 0x556677, width: 0.8, alpha: 0.75 });
+
+      } else { // converter
+        const flowLen = sR * 0.6;
+        g.moveTo(smx - sOutX * flowLen, smy - sOutY * flowLen)
+         .lineTo(smx + sOutX * flowLen, smy + sOutY * flowLen)
+         .stroke({ color: 0x882299, width: 1.8, alpha: 0.78 });
+        const aX = smx + sOutX * flowLen * 0.85, aY = smy + sOutY * flowLen * 0.85;
+        g.moveTo(aX, aY)
+         .lineTo(aX - sOutX * sR * 0.22 + sPerpX * sR * 0.15, aY - sOutY * sR * 0.22 + sPerpY * sR * 0.15)
+         .lineTo(aX - sOutX * sR * 0.22 - sPerpX * sR * 0.15, aY - sOutY * sR * 0.22 - sPerpY * sR * 0.15)
+         .closePath().fill({ color: 0xcc44ff, alpha: 0.88 });
+        g.circle(smx - sOutX * flowLen, smy - sOutY * flowLen, sR * 0.14)
+         .fill({ color: 0x6600cc, alpha: 0.72 });
+        g.circle(smx + sOutX * flowLen, smy + sOutY * flowLen, sR * 0.14)
+         .fill({ color: 0xee00aa, alpha: 0.72 });
+      }
+    }
+
+    // ── Snap point markers ──────────────────────────────────────────────────
+    for (const sp of data.snapPoints) {
+      const sx = w2sx(sp.worldX);
+      const sy = w2sy(sp.worldY);
+      const color = sp.isActive ? 0x00ffaa : 0x336688;
+      const alpha = sp.isActive ? 0.85 : 0.45;
+      g.circle(sx, sy, 5).fill({ color, alpha });
+      g.circle(sx, sy, 7).stroke({ color, width: 1, alpha: alpha * 0.6 });
+    }
+
+    // ── Ghost module ────────────────────────────────────────────────────────
+    if (data.ghost) {
+      const { vertices: gv, moduleType, isSnapped } = data.ghost;
+      const ghostColor = moduleColor(moduleType);
+      const alpha = isSnapped ? 0.55 : 0.3;
+      if (gv.length >= 3) {
+        g.moveTo(w2sx(gv[0]!.x), w2sy(gv[0]!.y));
+        for (let i = 1; i < gv.length; i++) {
+          g.lineTo(w2sx(gv[i]!.x), w2sy(gv[i]!.y));
+        }
+        g.closePath();
+        g.fill({ color: ghostColor, alpha });
+        g.moveTo(w2sx(gv[0]!.x), w2sy(gv[0]!.y));
+        for (let i = 1; i < gv.length; i++) {
+          g.lineTo(w2sx(gv[i]!.x), w2sy(gv[i]!.y));
+        }
+        g.closePath();
+        g.stroke({ color: isSnapped ? 0x00ffaa : 0xffffff, width: 2, alpha: alpha + 0.2 });
+      }
+    }
+
+    // ── Right panel ─────────────────────────────────────────────────────────
+    const rx = SPLIT + 12;
+
+    // Ship name header + SAVE button
+    g.rect(SPLIT + 4, 4, W - SPLIT - 8, 36).fill({ color: 0x112233, alpha: 0.8 });
+    g.rect(SPLIT + 4, 4, W - SPLIT - 8, 36).stroke({ color: 0x2a466b, width: 1 });
+    // SAVE button (right side of header)
+    g.rect(W - 84, 8, 76, 28).fill({ color: 0x005522, alpha: 0.9 });
+    g.rect(W - 84, 8, 76, 28).stroke({ color: 0x00cc66, width: 1 });
+
+    // Budget bars
+    const bx = rx;
+    let by = 52;
+    const bw = W - SPLIT - 24;
+    const budgetRows: Array<{ label: string; used: number; total: number; color: number }> = [
+      { label: "WPN", used: data.budget.weaponUsed, total: data.budget.weaponTotal, color: 0xff4444 },
+      { label: "EXT", used: data.budget.externalUsed, total: data.budget.externalTotal, color: 0x44cc88 },
+      { label: "INT", used: data.budget.internalUsed, total: data.budget.internalTotal, color: 0xffaa44 },
+      { label: "CVT", used: data.budget.converterUsed, total: data.budget.converterTotal, color: 0xaa55ee },
+    ];
+    for (const row of budgetRows) {
+      g.rect(bx, by, bw, 11).fill({ color: 0x0a1824, alpha: 0.8 });
+      const fillW = row.total > 0 ? (row.used / row.total) * bw : 0;
+      g.rect(bx, by, fillW, 11).fill({ color: row.color, alpha: 0.75 });
+      g.rect(bx, by, bw, 11).stroke({ color: 0x2a466b, width: 1 });
+      by += 14;
+    }
+    // Parts counter row
+    {
+      const fillW = (data.budget.partsUsed / data.budget.partsMax) * bw;
+      g.rect(bx, by, bw, 11).fill({ color: 0x0a1824, alpha: 0.8 });
+      g.rect(bx, by, fillW, 11).fill({ color: 0x888899, alpha: 0.6 });
+      g.rect(bx, by, bw, 11).stroke({ color: 0x2a466b, width: 1 });
+      by += 14;
+    }
+
+    // ── Core-sides toggle strip ──────────────────────────────────────────────
+    const CORE_SIDES_Y = 98;
+    const panelW = W - SPLIT - 8;
+    g.rect(SPLIT + 4, CORE_SIDES_Y, panelW, 20).fill({ color: 0x0a1824, alpha: 0.9 });
+    g.rect(SPLIT + 4, CORE_SIDES_Y, panelW, 20).stroke({ color: 0x2a466b, width: 1 });
+    // Left arrow chevron
+    g.moveTo(SPLIT + 14, CORE_SIDES_Y + 10).lineTo(SPLIT + 20, CORE_SIDES_Y + 5).lineTo(SPLIT + 20, CORE_SIDES_Y + 15).closePath()
+      .fill({ color: 0x88aacc, alpha: 0.9 });
+    // Right arrow chevron
+    g.moveTo(SPLIT + 4 + panelW - 10, CORE_SIDES_Y + 10).lineTo(SPLIT + 4 + panelW - 16, CORE_SIDES_Y + 5).lineTo(SPLIT + 4 + panelW - 16, CORE_SIDES_Y + 15).closePath()
+      .fill({ color: 0x88aacc, alpha: 0.9 });
+
+    // Palette header
+    const TILE_START_Y = 120;
+    g.rect(SPLIT + 4, TILE_START_Y - 2, W - SPLIT - 8, 2).fill({ color: 0x2a466b, alpha: 0.8 });
+
+    // Palette tiles with inline buttons
+    const TILE_H = 36;
+    const TILE_W = W - SPLIT - 8;
+    const BTN_W = 38;
+    const BTN_H = 22;
+    const BTN_GAP = 3;
+    // Button x positions (right-aligned): [BUY] [SELL] [TRASH]
+    const trashX = SPLIT + 4 + TILE_W - BTN_W;
+    const sellX = trashX - BTN_GAP - BTN_W;
+    const buyX = sellX - BTN_GAP - BTN_W;
+
+    for (let i = 0; i < data.palette.length; i++) {
+      const item = data.palette[i]!;
+      const ty = TILE_START_Y + i * TILE_H;
+      if (ty + TILE_H > H) break;
+
+      // Alternating row backgrounds
+      const isEven = i % 2 === 0;
+      const baseBg = isEven ? 0x0e1a2e : 0x0b1626;
+      const tileBg = item.isSelected ? 0x1a3a5c : baseBg;
+      g.rect(SPLIT + 4, ty, TILE_W, TILE_H - 1)
+        .fill({ color: tileBg, alpha: item.isSelected ? 0.97 : 0.85 });
+
+      // Selected border (2px, bright)
+      if (item.isSelected) {
+        g.rect(SPLIT + 4, ty, TILE_W, TILE_H - 1)
+          .stroke({ color: 0x44ccff, width: 2, alpha: 1.0 });
+      }
+
+      // Color swatch
+      const swatchColor = moduleColor(item.moduleType);
+      g.rect(SPLIT + 8, ty + 8, 10, 20).fill({ color: swatchColor, alpha: 0.85 });
+
+      // Inline buttons
+      const btnTop = ty + (TILE_H - BTN_H) / 2;
+
+      // BUY button (green when in stock, dim when not)
+      const canBuy = item.shopStock > 0;
+      g.rect(buyX, btnTop, BTN_W, BTN_H).fill({ color: canBuy ? 0x006633 : 0x1a2a1a, alpha: canBuy ? 0.9 : 0.5 });
+      g.rect(buyX, btnTop, BTN_W, BTN_H).stroke({ color: canBuy ? 0x00cc66 : 0x334433, width: 1 });
+
+      // SELL button (orange when owned, dim when not)
+      const canSell = item.quantity > 0;
+      g.rect(sellX, btnTop, BTN_W, BTN_H).fill({ color: canSell ? 0x664400 : 0x1a1a0a, alpha: canSell ? 0.9 : 0.5 });
+      g.rect(sellX, btnTop, BTN_W, BTN_H).stroke({ color: canSell ? 0xffaa00 : 0x443322, width: 1 });
+
+      // TRASH button (red when owned, dim when not)
+      g.rect(trashX, btnTop, BTN_W, BTN_H).fill({ color: canSell ? 0x660000 : 0x1a0a0a, alpha: canSell ? 0.9 : 0.5 });
+      g.rect(trashX, btnTop, BTN_W, BTN_H).stroke({ color: canSell ? 0xff3322 : 0x442222, width: 1 });
+    }
+
+    // ── Status message (overlaid center-bottom of left panel) ───────────────
+    if (data.statusMsg) {
+      const msgW = 240;
+      const msgH = 32;
+      const mx = (SPLIT - msgW) / 2;
+      const my = H - 52;
+      g.rect(mx, my, msgW, msgH).fill({ color: 0x003322, alpha: 0.85 });
+      g.rect(mx, my, msgW, msgH).stroke({ color: 0x00ffaa, width: 1.5 });
+      this.solarBuilderStatusText.text = data.statusMsg;
+      this.solarBuilderStatusText.x = SPLIT / 2;
+      this.solarBuilderStatusText.y = my + msgH / 2;
+      this.solarBuilderStatusText.visible = true;
+    } else {
+      this.solarBuilderStatusText.visible = false;
+    }
+
+    // ── Title (ship name) ────────────────────────────────────────────────────
+    this.solarBuilderTitleText.text = data.shipName.toUpperCase();
+    this.solarBuilderTitleText.x = SPLIT + (W - SPLIT) / 2;
+    this.solarBuilderTitleText.y = 22;
+    this.solarBuilderTitleText.visible = true;
+
+    // ── Budget labels ─────────────────────────────────────────────────────────
+    const budgetLabelDefs = [
+      `WPN  ${data.budget.weaponUsed}/${data.budget.weaponTotal}`,
+      `EXT  ${data.budget.externalUsed}/${data.budget.externalTotal}`,
+      `INT  ${data.budget.internalUsed}/${data.budget.internalTotal}`,
+      `CVT  ${data.budget.converterUsed}/${data.budget.converterTotal}`,
+      `PARTS  ${data.budget.partsUsed}/${data.budget.partsMax}`,
+    ];
+    this.ensureTextPool(this.solarBuilderBudgetLabels, budgetLabelDefs.length, 11);
+    for (let i = 0; i < budgetLabelDefs.length; i++) {
+      const t = this.solarBuilderBudgetLabels[i]!;
+      t.text = budgetLabelDefs[i]!;
+      t.x = SPLIT + 8;
+      t.y = 52 + i * 14;
+      t.anchor.set(0, 0.5);
+      t.visible = true;
+    }
+
+    // ── SAVE button label ──────────────────────────────────────────────────────
+    this.ensureTextPool(this.solarBuilderBudgetLabels, budgetLabelDefs.length + 2, 11);
+    {
+      const tSave = this.solarBuilderBudgetLabels[budgetLabelDefs.length + 1]!;
+      tSave.text = "SAVE";
+      tSave.x = W - 84 + 38;
+      tSave.y = 22;
+      tSave.anchor.set(0.5, 0.5);
+      tSave.style.fill = 0x00ff88;
+      tSave.style.fontSize = 12;
+      tSave.visible = true;
+    }
+
+    // ── Core-sides label (centre of toggle strip) ─────────────────────────────
+    {
+      const t = this.solarBuilderBudgetLabels[budgetLabelDefs.length]!;
+      t.text = `CORE  ${data.coreSideCount}S`;
+      t.x = SPLIT + (W - SPLIT) / 2;
+      t.y = CORE_SIDES_Y + 10;
+      t.anchor.set(0.5, 0.5);
+      t.style.fill = 0xaaccff;
+      t.style.fontSize = 11;
+      t.visible = true;
+    }
+
+    // ── Palette item labels + button labels ───────────────────────────────────
+    // Each palette row needs: name label + BUY / SELL / TRASH labels → 4 texts per row
+    const TEXTS_PER_ROW = 4;
+    this.ensureTextPool(this.solarBuilderPaletteLabels, data.palette.length * TEXTS_PER_ROW, 11);
+    for (let i = 0; i < data.palette.length; i++) {
+      const item = data.palette[i]!;
+      const ty = TILE_START_Y + i * TILE_H;
+      const visible = ty + TILE_H <= H;
+      const btnTop = ty + (TILE_H - BTN_H) / 2;
+
+      // Name + qty label
+      const tName = this.solarBuilderPaletteLabels[i * TEXTS_PER_ROW]!;
+      if (!visible) { tName.visible = false; }
+      else {
+        tName.text = `${item.name.toUpperCase()} ×${item.quantity}`;
+        tName.x = SPLIT + 22;
+        tName.y = ty + TILE_H / 2;
+        tName.anchor.set(0, 0.5);
+        tName.style.fill = item.isSelected ? 0xffffff : 0x99bbdd;
+        tName.style.fontSize = 11;
+        tName.visible = true;
+      }
+
+      // BUY label
+      const tBuy = this.solarBuilderPaletteLabels[i * TEXTS_PER_ROW + 1]!;
+      if (!visible) { tBuy.visible = false; }
+      else {
+        tBuy.text = item.shopStock > 0 ? `B${item.shopStock}` : "BUY";
+        tBuy.x = buyX + BTN_W / 2;
+        tBuy.y = btnTop + BTN_H / 2;
+        tBuy.anchor.set(0.5, 0.5);
+        tBuy.style.fill = item.shopStock > 0 ? 0x00ff88 : 0x334433;
+        tBuy.style.fontSize = 10;
+        tBuy.visible = true;
+      }
+
+      // SELL label
+      const tSell = this.solarBuilderPaletteLabels[i * TEXTS_PER_ROW + 2]!;
+      if (!visible) { tSell.visible = false; }
+      else {
+        tSell.text = "SELL";
+        tSell.x = sellX + BTN_W / 2;
+        tSell.y = btnTop + BTN_H / 2;
+        tSell.anchor.set(0.5, 0.5);
+        tSell.style.fill = item.quantity > 0 ? 0xffaa44 : 0x443322;
+        tSell.style.fontSize = 10;
+        tSell.visible = true;
+      }
+
+      // TRASH label
+      const tTrash = this.solarBuilderPaletteLabels[i * TEXTS_PER_ROW + 3]!;
+      if (!visible) { tTrash.visible = false; }
+      else {
+        tTrash.text = "DEL";
+        tTrash.x = trashX + BTN_W / 2;
+        tTrash.y = btnTop + BTN_H / 2;
+        tTrash.anchor.set(0.5, 0.5);
+        tTrash.style.fill = item.quantity > 0 ? 0xff4433 : 0x442222;
+        tTrash.style.fontSize = 10;
+        tTrash.visible = true;
+      }
+    }
+    for (let i = data.palette.length * TEXTS_PER_ROW; i < this.solarBuilderPaletteLabels.length; i++) {
+      this.solarBuilderPaletteLabels[i]!.visible = false;
+    }
+  }
+
+  private drawSolarMyShips(ships: ReadonlyArray<SavedBlueprintSummary>): void {
+    const g = this.solarSystemGfx;
+    g.clear();
+    const W = this.width;
+    const H = this.height;
+
+    g.rect(0, 0, W, H).fill({ color: 0x080e18, alpha: 0.97 });
+
+    // Title
+    this.solarBuilderTitleText.text = "MY SHIPS";
+    this.solarBuilderTitleText.x = W / 2;
+    this.solarBuilderTitleText.y = 30;
+    this.solarBuilderTitleText.visible = true;
+    g.rect(0, 56, W, 2).fill({ color: 0x2a466b, alpha: 0.9 });
+
+    if (ships.length === 0) {
+      this.ensureTextPool(this.solarBuilderBudgetLabels, 1, 14);
+      const t = this.solarBuilderBudgetLabels[0]!;
+      t.text = "No ships saved — build one in the Shipyard!";
+      t.x = W / 2; t.y = H / 2;
+      t.anchor.set(0.5, 0.5);
+      t.style.fill = 0x6688aa;
+      t.style.fontSize = 14;
+      t.visible = true;
+      return;
+    }
+
+    const ROW_H = 52;
+    const LIST_Y = 80;
+    const BTN_W = 110;
+    const BTN_GAP = 8;
+    const rightEdge = W - 16;
+    const deleteX = rightEdge - BTN_W;
+    const loadX = deleteX - BTN_GAP - BTN_W;
+    const activeX = loadX - BTN_GAP - BTN_W;
+
+    // We need (1 name label + 3 button labels) * ships + hint at top
+    const LABELS_PER_ROW = 4;
+    this.ensureTextPool(this.solarBuilderBudgetLabels, ships.length * LABELS_PER_ROW + 1, 12);
+
+    // Hint label (index 0)
+    const hint = this.solarBuilderBudgetLabels[0]!;
+    hint.text = "↑↓ navigate  |  ESC back";
+    hint.x = 16; hint.y = H - 20;
+    hint.anchor.set(0, 0.5);
+    hint.style.fill = 0x446688;
+    hint.style.fontSize = 11;
+    hint.visible = true;
+
+    for (let i = 0; i < ships.length; i++) {
+      const ship = ships[i]!;
+      const ty = LIST_Y + i * ROW_H;
+      if (ty + ROW_H > H - 40) break;
+
+      const rowBg = ship.isActive ? 0x112233 : (i % 2 === 0 ? 0x0a1624 : 0x080e18);
+      g.rect(0, ty, W, ROW_H - 1).fill({ color: rowBg, alpha: 0.9 });
+      if (ship.isActive) {
+        g.rect(0, ty, W, ROW_H - 1).stroke({ color: 0x44ccff, width: 2, alpha: 0.8 });
+      }
+
+      const btnY = ty + (ROW_H - 26) / 2;
+
+      // SET ACTIVE button
+      const isActive = ship.isActive;
+      g.rect(activeX, btnY, BTN_W, 26).fill({ color: isActive ? 0x003355 : 0x002233, alpha: 0.9 });
+      g.rect(activeX, btnY, BTN_W, 26).stroke({ color: isActive ? 0x44ccff : 0x225577, width: 1 });
+
+      // LOAD button
+      g.rect(loadX, btnY, BTN_W, 26).fill({ color: 0x112233, alpha: 0.9 });
+      g.rect(loadX, btnY, BTN_W, 26).stroke({ color: 0x3366aa, width: 1 });
+
+      // DELETE button
+      g.rect(deleteX, btnY, BTN_W, 26).fill({ color: 0x220000, alpha: 0.9 });
+      g.rect(deleteX, btnY, BTN_W, 26).stroke({ color: 0x882222, width: 1 });
+
+      const base = i * LABELS_PER_ROW + 1;
+
+      // Name label
+      const tName = this.solarBuilderBudgetLabels[base]!;
+      tName.text = `${ship.isActive ? "★ " : ""}${ship.name.toUpperCase()}  C${ship.sizeClass}  ${ship.partCount} PARTS`;
+      tName.x = 16; tName.y = ty + ROW_H / 2;
+      tName.anchor.set(0, 0.5);
+      tName.style.fill = ship.isActive ? 0xaaddff : 0x99bbcc;
+      tName.style.fontSize = 12;
+      tName.visible = true;
+
+      // SET ACTIVE label
+      const tActive = this.solarBuilderBudgetLabels[base + 1]!;
+      tActive.text = isActive ? "ACTIVE" : "SET ACTIVE";
+      tActive.x = activeX + BTN_W / 2; tActive.y = btnY + 13;
+      tActive.anchor.set(0.5, 0.5);
+      tActive.style.fill = isActive ? 0x44ccff : 0x4488aa;
+      tActive.style.fontSize = 10;
+      tActive.visible = true;
+
+      // LOAD label
+      const tLoad = this.solarBuilderBudgetLabels[base + 2]!;
+      tLoad.text = "LOAD TO BUILDER";
+      tLoad.x = loadX + BTN_W / 2; tLoad.y = btnY + 13;
+      tLoad.anchor.set(0.5, 0.5);
+      tLoad.style.fill = 0x6699cc;
+      tLoad.style.fontSize = 10;
+      tLoad.visible = true;
+
+      // DELETE label
+      const tDel = this.solarBuilderBudgetLabels[base + 3]!;
+      tDel.text = "DELETE";
+      tDel.x = deleteX + BTN_W / 2; tDel.y = btnY + 13;
+      tDel.anchor.set(0.5, 0.5);
+      tDel.style.fill = 0xcc4444;
+      tDel.style.fontSize = 10;
+      tDel.visible = true;
+    }
+    for (let i = ships.length * LABELS_PER_ROW + 1; i < this.solarBuilderBudgetLabels.length; i++) {
+      this.solarBuilderBudgetLabels[i]!.visible = false;
+    }
+  }
+
+  private drawSolarShop(data: ShopRenderData): void {
+    const g = this.solarShopGfx;
+    g.clear();
+
+    const W = this.width;
+    const H = this.height;
+    const HEADER_H = 64;
+    const ROW_H = 52;
+    const LIST_X = 40;
+    const LIST_W = W - 80;
+    const COL_H_Y = HEADER_H + 16;       // column header row y
+    const ROWS_START_Y = COL_H_Y + 28;   // first data row y
+
+    // Background
+    g.rect(0, 0, W, H).fill({ color: 0x05080f, alpha: 1 });
+    g.rect(0, 0, W, HEADER_H).fill({ color: 0x0a1428, alpha: 1 });
+    g.moveTo(0, HEADER_H).lineTo(W, HEADER_H).stroke({ color: 0x2a5090, width: 1 });
+    // Column header bar
+    g.rect(LIST_X, COL_H_Y, LIST_W, 28).fill({ color: 0x0d1e38, alpha: 1 });
+    g.rect(LIST_X, COL_H_Y + 28, LIST_W, 1).fill({ color: 0x1e3a60, alpha: 1 });
+
+    // Title
+    this.solarShopTitleText.text = `◈  ${data.locationName.toUpperCase()}  —  ${data.economyType.toUpperCase()} ECONOMY`;
+    this.solarShopTitleText.x = W / 2;
+    this.solarShopTitleText.y = HEADER_H / 2;
+    this.solarShopTitleText.visible = true;
+
+    // Credits
+    this.solarShopCreditsText.text = `CREDITS: ${data.playerCredits.toLocaleString()} ¢`;
+    this.solarShopCreditsText.x = W - 24;
+    this.solarShopCreditsText.y = HEADER_H / 2;
+    this.solarShopCreditsText.visible = true;
+
+    // Status message
+    if (data.statusMsg) {
+      this.solarShopStatusText.text = data.statusMsg;
+      this.solarShopStatusText.x = W / 2;
+      this.solarShopStatusText.y = H - 36;
+      this.solarShopStatusText.visible = true;
+    } else {
+      this.solarShopStatusText.visible = false;
+    }
+
+    // Column x positions
+    const COL_NAME_X  = LIST_X + 8;
+    const COL_TYPE_X  = LIST_X + LIST_W * 0.38;
+    const COL_DMD_X   = LIST_X + LIST_W * 0.52;
+    const COL_PRICE_X = LIST_X + LIST_W * 0.70;
+    const COL_STOCK_X = LIST_X + LIST_W * 0.82;
+    const COL_OWNED_X = LIST_X + LIST_W * 0.92;
+
+    // Column header labels (6 texts, reuse solarShopRowLabels pool)
+    const HEADERS = ["MODULE", "TYPE", "DEMAND", "PRICE ¢", "STOCK", "OWNED"] as const;
+    const HDR_XS   = [COL_NAME_X, COL_TYPE_X, COL_DMD_X, COL_PRICE_X, COL_STOCK_X, COL_OWNED_X] as const;
+    this.ensureTextPool(this.solarShopRowLabels, HEADERS.length, 11);
+    for (let i = 0; i < HEADERS.length; i++) {
+      const t = this.solarShopRowLabels[i]!;
+      t.text = HEADERS[i]!;
+      t.x = HDR_XS[i]!;
+      t.y = COL_H_Y + 14;
+      t.anchor.set(0, 0.5);
+      t.style.fill = 0x5588aa;
+      t.style.fontSize = 11;
+      t.visible = true;
+    }
+    for (let i = HEADERS.length; i < this.solarShopRowLabels.length; i++) {
+      this.solarShopRowLabels[i]!.visible = false;
+    }
+
+    // Row data — separate pools per column
+    const maxVisible = Math.min(data.entries.length, Math.floor((H - ROWS_START_Y - 48) / ROW_H));
+    this.ensureTextPool(this.solarShopNameLabels,   maxVisible, 13);
+    this.ensureTextPool(this.solarShopTypeLabels,   maxVisible, 12);
+    this.ensureTextPool(this.solarShopDemandLabels, maxVisible, 12);
+    this.ensureTextPool(this.solarShopPriceLabels,  maxVisible, 13);
+    this.ensureTextPool(this.solarShopStockLabels,  maxVisible, 13);
+    this.ensureTextPool(this.solarShopOwnedLabels,  maxVisible, 13);
+
+    const demandColor = (d: string): number => {
+      if (d === "oversupply") return 0x44dd44;
+      if (d === "surplus")    return 0x88cc66;
+      if (d === "scarce")     return 0xff9944;
+      if (d === "shortage")   return 0xff4444;
+      return 0xaabbcc; // normal
+    };
+
+    for (let i = 0; i < maxVisible; i++) {
+      const entry = data.entries[i];
+      if (!entry) {
+        this.solarShopNameLabels[i]!.visible   = false;
+        this.solarShopTypeLabels[i]!.visible   = false;
+        this.solarShopDemandLabels[i]!.visible = false;
+        this.solarShopPriceLabels[i]!.visible  = false;
+        this.solarShopStockLabels[i]!.visible  = false;
+        this.solarShopOwnedLabels[i]!.visible  = false;
+        continue;
+      }
+
+      const ry = ROWS_START_Y + i * ROW_H;
+      const isSelected = entry.isSelected;
+      const isOutOfStock = entry.stock <= 0;
+      const rowFill = isSelected ? 0x0d2240 : (i % 2 === 0 ? 0x080d18 : 0x060b14);
+      g.rect(LIST_X, ry, LIST_W, ROW_H).fill({ color: rowFill, alpha: 1 });
+      if (isSelected) {
+        g.rect(LIST_X, ry, 3, ROW_H).fill({ color: 0x00ccff, alpha: 1 });
+        g.rect(LIST_X, ry, LIST_W, ROW_H).stroke({ color: 0x2255aa, width: 1 });
+      }
+
+      const baseAlpha = isOutOfStock ? 0.45 : 1.0;
+      const textFill  = isSelected ? 0xffffff : 0x99bbcc;
+      const midY = ry + ROW_H / 2;
+
+      const n = this.solarShopNameLabels[i]!;
+      n.text = entry.name.toUpperCase();
+      n.x = COL_NAME_X; n.y = midY;
+      n.anchor.set(0, 0.5);
+      n.style.fill = textFill; n.style.fontSize = 13;
+      n.alpha = baseAlpha; n.visible = true;
+
+      const ty = this.solarShopTypeLabels[i]!;
+      ty.text = entry.moduleType.toUpperCase();
+      ty.x = COL_TYPE_X; ty.y = midY;
+      ty.anchor.set(0, 0.5);
+      ty.style.fill = 0x6699bb; ty.style.fontSize = 12;
+      ty.alpha = baseAlpha; ty.visible = true;
+
+      const dc = demandColor(entry.demand);
+      const dl = this.solarShopDemandLabels[i]!;
+      dl.text = DEMAND_LABEL[entry.demand];
+      dl.x = COL_DMD_X; dl.y = midY;
+      dl.anchor.set(0, 0.5);
+      dl.style.fill = isSelected ? dc : dc;
+      dl.style.fontSize = 12;
+      dl.alpha = baseAlpha; dl.visible = true;
+      // demand pip
+      g.circle(COL_DMD_X - 10, midY, 4).fill({ color: dc, alpha: baseAlpha });
+
+      const pr = this.solarShopPriceLabels[i]!;
+      pr.text = entry.price.toLocaleString();
+      pr.x = COL_PRICE_X; pr.y = midY;
+      pr.anchor.set(0, 0.5);
+      pr.style.fill = isSelected ? 0xffcc44 : 0xcc9922; pr.style.fontSize = 13;
+      pr.alpha = baseAlpha; pr.visible = true;
+
+      const sk = this.solarShopStockLabels[i]!;
+      sk.text = isOutOfStock ? "—" : String(entry.stock);
+      sk.x = COL_STOCK_X; sk.y = midY;
+      sk.anchor.set(0, 0.5);
+      sk.style.fill = isOutOfStock ? 0x664444 : 0xaabbcc; sk.style.fontSize = 13;
+      sk.alpha = 1.0; sk.visible = true;
+
+      const ow = this.solarShopOwnedLabels[i]!;
+      ow.text = entry.owned > 0 ? String(entry.owned) : "—";
+      ow.x = COL_OWNED_X; ow.y = midY;
+      ow.anchor.set(0, 0.5);
+      ow.style.fill = entry.owned > 0 ? 0x44dd88 : 0x445566; ow.style.fontSize = 13;
+      ow.alpha = 1.0; ow.visible = true;
+    }
+
+    // Hide unused pool entries
+    for (let i = maxVisible; i < this.solarShopNameLabels.length;   i++) this.solarShopNameLabels[i]!.visible   = false;
+    for (let i = maxVisible; i < this.solarShopTypeLabels.length;   i++) this.solarShopTypeLabels[i]!.visible   = false;
+    for (let i = maxVisible; i < this.solarShopDemandLabels.length; i++) this.solarShopDemandLabels[i]!.visible = false;
+    for (let i = maxVisible; i < this.solarShopPriceLabels.length;  i++) this.solarShopPriceLabels[i]!.visible  = false;
+    for (let i = maxVisible; i < this.solarShopStockLabels.length;  i++) this.solarShopStockLabels[i]!.visible  = false;
+    for (let i = maxVisible; i < this.solarShopOwnedLabels.length;  i++) this.solarShopOwnedLabels[i]!.visible  = false;
   }
 
   private drawShipyard(data: ShipyardRenderData): void {
@@ -3420,65 +5334,186 @@ export class GameRenderer {
     colour: number,
     alpha: number,
   ): void {
-    const fill = { color: colour, alpha };
-    const accent = { color: 0xffffff, alpha: alpha * 0.35 };
+    const fill   = { color: colour, alpha };
+    const dark   = { color: 0x000000, alpha: alpha * 0.35 };
+    const bright = { color: 0xffffff, alpha: alpha * 0.55 };
+    const dim    = { color: 0xffffff, alpha: alpha * 0.25 };
     switch (kind) {
-      case "core-hex":
-        drawHexagon(g, cx, cy, Math.min(w, h) / 2, 0, fill, { color: 0xffffff, width: 1, alpha });
-        drawCircle(g, cx, cy, Math.min(w, h) / 5, { color: 0xffffff, alpha });
+      case "core-hex": {
+        // Hex power-core with energy rings and centre crystal
+        const r = Math.min(w, h) / 2;
+        drawHexagon(g, cx, cy, r, 0, fill, { color: 0xffffff, width: 1.5, alpha });
+        drawHexagon(g, cx, cy, r * 0.65, 0, dark, { color: 0xffffff, width: 0.8, alpha: alpha * 0.4 });
+        drawCircle(g, cx, cy, r * 0.28, { color: 0xffffff, alpha });
+        // Corner bolts
+        for (let i = 0; i < 6; i++) {
+          const a = (i / 6) * Math.PI * 2;
+          drawCircle(g, cx + Math.cos(a) * r * 0.78, cy + Math.sin(a) * r * 0.78, r * 0.09, bright);
+        }
         break;
+      }
       case "hull-delta": {
-        const hw = w / 2;
-        const hh = h / 2;
+        // Armoured delta hull with panel lines and rivets
+        const hw = w / 2; const hh = h / 2;
+        g.poly([cx + hw, cy, cx - hw, cy - hh, cx - hw * 0.6, cy, cx - hw, cy + hh]).fill(fill);
         g.poly([cx + hw, cy, cx - hw, cy - hh, cx - hw * 0.6, cy, cx - hw, cy + hh])
-          .fill(fill);
-        drawRect(g, cx - hw * 0.2, cy, hw * 0.8, hh * 0.4, accent);
+          .stroke({ color: 0xffffff, width: 0.8, alpha: alpha * 0.4 });
+        // Spine line
+        g.moveTo(cx + hw * 0.7, cy).lineTo(cx - hw * 0.5, cy).stroke({ color: 0xffffff, width: 1, alpha: alpha * 0.5 });
+        // Panel highlight
+        g.poly([cx - hw * 0.1, cy - hh * 0.1, cx - hw * 0.7, cy - hh * 0.7, cx - hw * 0.7, cy])
+          .fill({ color: 0xffffff, alpha: alpha * 0.12 });
+        // Rivets
+        for (let i = 0; i < 3; i++) {
+          drawCircle(g, cx - hw * 0.3 + i * hw * 0.28, cy, h * 0.07, bright);
+        }
         break;
       }
       case "hull-block": {
+        // Armoured block with bevelled edges and grill
         drawRect(g, cx, cy, w, h, fill);
-        drawRect(g, cx, cy, w * 0.5, h * 0.4, accent);
+        g.rect(cx - w / 2, cy - h / 2, w, h).stroke({ color: 0xffffff, width: 1, alpha: alpha * 0.4 });
+        // Bevelled inner panel
+        const bev = w * 0.08;
+        g.poly([
+          cx - w / 2 + bev, cy - h / 2,
+          cx + w / 2 - bev, cy - h / 2,
+          cx + w / 2, cy - h / 2 + bev,
+          cx + w / 2, cy + h / 2 - bev,
+          cx + w / 2 - bev, cy + h / 2,
+          cx - w / 2 + bev, cy + h / 2,
+          cx - w / 2, cy + h / 2 - bev,
+          cx - w / 2, cy - h / 2 + bev,
+        ]).fill({ color: 0x000000, alpha: alpha * 0.2 });
+        // Horizontal grill lines
+        for (let i = 1; i < 4; i++) {
+          const ly = cy - h / 2 + (h / 4) * i;
+          g.moveTo(cx - w * 0.35, ly).lineTo(cx + w * 0.35, ly)
+           .stroke({ color: 0xffffff, width: 0.7, alpha: alpha * 0.3 });
+        }
         break;
       }
       case "wing-fin-top": {
-        const hw = w / 2;
-        const hh = h / 2;
+        const hw = w / 2; const hh = h / 2;
         g.poly([cx - hw, cy + hh, cx + hw, cy + hh, cx + hw * 0.6, cy - hh, cx - hw * 0.4, cy - hh * 0.4])
-          .fill(fill);
+          .fill(fill)
+          .stroke({ color: 0xffffff, width: 0.8, alpha: alpha * 0.4 });
+        // Surface tension lines (aerofoil ribs)
+        for (let i = 1; i <= 3; i++) {
+          const t2 = i / 4;
+          g.moveTo(cx - hw + (cx + hw - (cx - hw)) * t2, cy + hh)
+           .lineTo(cx - hw * 0.4 + (cx + hw * 0.6 - (cx - hw * 0.4)) * t2, cy - hh * 0.4)
+           .stroke({ color: 0xffffff, width: 0.6, alpha: alpha * 0.2 });
+        }
         break;
       }
       case "wing-fin-bot": {
-        const hw = w / 2;
-        const hh = h / 2;
+        const hw = w / 2; const hh = h / 2;
         g.poly([cx - hw, cy - hh, cx + hw, cy - hh, cx + hw * 0.6, cy + hh, cx - hw * 0.4, cy + hh * 0.4])
-          .fill(fill);
+          .fill(fill)
+          .stroke({ color: 0xffffff, width: 0.8, alpha: alpha * 0.4 });
+        for (let i = 1; i <= 3; i++) {
+          const t2 = i / 4;
+          g.moveTo(cx - hw + (cx + hw - (cx - hw)) * t2, cy - hh)
+           .lineTo(cx - hw * 0.4 + (cx + hw * 0.6 - (cx - hw * 0.4)) * t2, cy + hh * 0.4)
+           .stroke({ color: 0xffffff, width: 0.6, alpha: alpha * 0.2 });
+        }
         break;
       }
       case "wing-long": {
+        // Swept wing with leading-edge highlight and spar lines
         drawRect(g, cx, cy, w, h, fill);
-        drawRect(g, cx, cy, w * 0.4, h * 0.85, accent);
+        g.rect(cx - w / 2, cy - h / 2, w, h).stroke({ color: 0xffffff, width: 0.8, alpha: alpha * 0.35 });
+        // Leading edge highlight
+        g.rect(cx - w / 2, cy - h / 2, w * 0.1, h).fill({ color: 0xffffff, alpha: alpha * 0.2 });
+        // Spar lines
+        for (let i = 1; i < 4; i++) {
+          const lx = cx - w / 2 + (w / 4) * i;
+          g.moveTo(lx, cy - h * 0.4).lineTo(lx, cy + h * 0.4)
+           .stroke({ color: 0xffffff, width: 0.6, alpha: alpha * 0.25 });
+        }
         break;
       }
       case "engine-nozzle": {
-        drawRect(g, cx, cy, w * 0.8, h, fill);
-        drawTriangle(g, cx - w * 0.5, cy, h * 0.6, Math.PI, { color: 0xff9e3d, alpha });
+        // Rocket nozzle: cylindrical housing + expanding bell + flame
+        const nw = w * 0.75; const nh = h;
+        // Housing cylinder
+        drawRect(g, cx + nw * 0.1, cy, nw, nh * 0.6, fill);
+        g.rect(cx + nw * 0.1 - nw / 2, cy - nh * 0.3, nw, nh * 0.6)
+          .stroke({ color: 0xffffff, width: 0.8, alpha: alpha * 0.35 });
+        // Nozzle bell (expanding shape)
+        const bellX = cx - nw * 0.2;
+        g.poly([bellX, cy - nh * 0.22, bellX, cy + nh * 0.22, bellX - w * 0.38, cy + nh * 0.42, bellX - w * 0.38, cy - nh * 0.42])
+          .fill({ color: colour, alpha: alpha * 0.85 })
+          .stroke({ color: 0xffffff, width: 0.8, alpha: alpha * 0.3 });
+        // Flame glow
+        g.circle(bellX - w * 0.42, cy, nh * 0.28).fill({ color: 0xff9e3d, alpha: alpha * 0.8 });
+        g.circle(bellX - w * 0.52, cy, nh * 0.16).fill({ color: 0xffffaa, alpha: alpha * 0.7 });
+        // Intake ring at back of housing
+        g.rect(cx + nw * 0.6 - 2, cy - nh * 0.3, 4, nh * 0.6).fill(dim);
         break;
       }
       case "engine-plasma": {
-        drawRect(g, cx + w * 0.1, cy, w * 0.7, h, fill);
-        drawTriangle(g, cx - w * 0.4, cy, h * 0.7, Math.PI, { color: 0xff3df0, alpha });
-        drawCircle(g, cx + w * 0.25, cy, h * 0.25, accent);
+        // Plasma drive: streamlined housing + plasma coil + bright core
+        const pw = w * 0.65;
+        drawRect(g, cx + pw * 0.15, cy, pw, h, fill);
+        g.rect(cx + pw * 0.15 - pw / 2, cy - h / 2, pw, h)
+          .stroke({ color: 0xffffff, width: 0.8, alpha: alpha * 0.35 });
+        // Plasma coil (spiral rings)
+        for (let i = 0; i < 3; i++) {
+          const lx = cx - pw * 0.3 + i * pw * 0.1;
+          g.circle(lx, cy, h * 0.22).stroke({ color: 0xff66ff, width: 1, alpha: alpha * 0.5 });
+        }
+        // Plasma exhaust nozzle with vibrant core
+        const exhaX = cx - pw * 0.45;
+        drawTriangle(g, exhaX, cy, h * 0.72, Math.PI, { color: 0xff44cc, alpha });
+        g.circle(exhaX - w * 0.02, cy, h * 0.18).fill({ color: 0xffffff, alpha: alpha * 0.85 });
+        g.circle(exhaX - w * 0.02, cy, h * 0.32).fill({ color: 0xff99ff, alpha: alpha * 0.4 });
         break;
       }
       case "cannon-barrel": {
-        drawRect(g, cx, cy, w, h * 0.6, fill);
-        drawRect(g, cx + w * 0.3, cy, w * 0.35, h, { color: 0xffffff, alpha: alpha * 0.6 });
+        // Heavy cannon: wide breech + long barrel + muzzle brake
+        const bw = w * 0.55; const bh = h * 0.7;
+        // Breech block
+        drawRect(g, cx + bw * 0.05, cy, bw, h, fill);
+        g.rect(cx + bw * 0.05 - bw / 2, cy - h / 2, bw, h)
+          .stroke({ color: 0xffffff, width: 0.8, alpha: alpha * 0.35 });
+        // Barrel
+        g.rect(cx + bw * 0.05 + bw * 0.3, cy - bh / 2, bw * 0.7, bh).fill(fill);
+        g.rect(cx + bw * 0.05 + bw * 0.3, cy - bh / 2, bw * 0.7, bh)
+          .stroke({ color: 0xffffff, width: 0.6, alpha: alpha * 0.3 });
+        // Muzzle brake (two slots at the tip)
+        const muzzleX = cx + bw * 0.55 + bw;
+        g.rect(muzzleX - 2, cy - bh * 0.45, 5, bh * 0.38).fill(dark);
+        g.rect(muzzleX - 2, cy + bh * 0.05, 5, bh * 0.38).fill(dark);
+        // Barrel highlight
+        g.rect(cx + bw * 0.35 + bw * 0.3, cy - bh / 2, bw * 0.12, bh)
+          .fill({ color: 0xffffff, alpha: alpha * 0.18 });
+        // Cooling vents on breech
+        for (let i = 0; i < 3; i++) {
+          const vy = cy - h * 0.25 + i * h * 0.22;
+          g.rect(cx - bw * 0.35, vy, bw * 0.22, h * 0.08).fill(dark);
+        }
         break;
       }
       case "shield-ring": {
+        // Force-field projector: ring + emitter core + energy arcs
         const r = Math.min(w, h) / 2;
-        drawCircle(g, cx, cy, r, { color: colour, alpha: alpha * 0.3 }, { color: colour, width: 2, alpha });
-        drawCircle(g, cx, cy, r * 0.5, fill);
+        // Outer energy ring with glow
+        drawCircle(g, cx, cy, r, { color: colour, alpha: alpha * 0.22 }, { color: colour, width: 2.5, alpha });
+        drawCircle(g, cx, cy, r * 0.82, { color: 0x000000, alpha: alpha * 0.15 }, { color: 0xffffff, width: 0.6, alpha: alpha * 0.3 });
+        // Central emitter
+        drawCircle(g, cx, cy, r * 0.36, fill);
+        g.circle(cx, cy, r * 0.2).fill({ color: 0xffffff, alpha: alpha * 0.7 });
+        // Four energy arc nodes on the ring
+        for (let i = 0; i < 4; i++) {
+          const a = (i / 4) * Math.PI * 2;
+          const nx = cx + Math.cos(a) * r * 0.85;
+          const ny = cy + Math.sin(a) * r * 0.85;
+          drawCircle(g, nx, ny, r * 0.1, { color: 0xffffff, alpha: alpha * 0.7 });
+          g.moveTo(cx, cy).lineTo(nx, ny)
+           .stroke({ color: 0xffffff, width: 0.5, alpha: alpha * 0.2 });
+        }
         break;
       }
       default:

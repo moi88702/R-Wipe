@@ -50,6 +50,39 @@ export type {
 export type { DockingCheckResult, LocationProximity } from "./docking";
 
 export type {
+  EconomyType,
+  DemandLevel,
+  ShopEntry,
+  LocationShopState,
+  ShopRenderEntry,
+  ShopRenderData,
+} from "./economy";
+export { DEMAND_LEVELS, DEMAND_MULTIPLIER, DEMAND_LABEL } from "./economy";
+
+export type {
+  ShipClass,
+  SolarModuleType,
+  PolygonShape,
+  ConverterSpec,
+  ModuleStats,
+  SolarModuleDefinition,
+  CoreDefinition,
+  PlacedSolarModule,
+  SolarShipBlueprint,
+  BudgetState,
+  PlaceResult,
+  SolarSnapPoint,
+  SideData,
+  ModuleGeometry,
+  SolarBuilderModuleData,
+  SolarBuilderSnapPointData,
+  SolarBuilderGhostData,
+  SolarBuilderPaletteItem,
+  SolarBuilderContextMenu,
+  SolarShipBuilderRenderData,
+} from "./solarShipBuilder";
+
+export type {
   StationTurretConfig,
   StationSpawnConfig,
   EnemyStationDefinition,
@@ -81,6 +114,8 @@ export interface InputState {
   pointer?: { x: number; y: number } | null;
   /** One-frame pulse: a click/tap just landed this frame. */
   pointerDownPulse?: { x: number; y: number } | null;
+  /** One-frame pulse: right-click just landed this frame. */
+  pointerRightClickPulse?: { x: number; y: number } | null;
   /** True whenever the primary pointer is pressed (mouse button or finger). */
   pointerHeld?: boolean;
 
@@ -199,6 +234,12 @@ export interface InputState {
    * distinguish keyboard fire from the virtual fire button.
    */
   spaceHeld?: boolean;
+
+  /**
+   * F key pulse — dock at the nearest station OR jump through a gate (solar-system mode).
+   * One-frame pulse; cleared by InputHandler.endFrame().
+   */
+  dockPulse?: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -632,7 +673,13 @@ export type ScreenType =
   | "shipyard"
   | "solar-system"
   | "solar-system-paused"
-  | "docked";
+  | "docked"
+  | "solar-shipyard"
+  | "solar-shop"
+  | "solar-my-ships"
+  | "solar-npc-talk"
+  | "solar-missions"
+  | "solar-mission-detail";
 
 /**
  * Dev-only cheat payload parsed from URL query params. Every field is optional
