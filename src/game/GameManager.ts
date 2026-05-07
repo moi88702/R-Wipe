@@ -44,12 +44,16 @@ import { layoutBlueprint, type Placement } from "./parts/geometry";
 import { canSnap } from "./parts/assembly";
 import { soundManager } from "../audio/SoundManager";
 import { getPirateBlueprint } from "./data/PirateBlueprintRegistry";
+import { getEarthBlueprint } from "./data/EarthBlueprintRegistry";
+import { getMarsBlueprint } from "./data/MarsBlueprintRegistry";
+import { SolarStationRegistry, type StationFaction } from "./data/SolarStationRegistry";
 import type { SolarShipBlueprint, SavedBlueprintSummary } from "../types/solarShipBuilder";
 import { GeometryEngine } from "./shipbuilder/GeometryEngine";
 
 interface SolarEnemyBase {
   id: string;
   name: string;
+  faction: StationFaction;
   position: { x: number; y: number };
   health: number;
   maxHealth: number;
@@ -58,11 +62,20 @@ interface SolarEnemyBase {
   lastSpawnMs: number;
   spawnIntervalMs: number;
   maxShips: number;
+  spawnRoster: ReadonlyArray<{ name: string; typeIdx: number; sizeClass: number }>;
+  spawnRadiusKm: number;
+  turretRangeKm: number;
+  turretDamage: number;
+  turretCooldownMs: number;
+  turretWeaponIdx: number;
+  lastTurretFireMs: number;
 }
 
 interface SolarEnemyShip {
   id: string;
   baseId: string;
+  faction: StationFaction;
+  name: string;
   typeIdx: number;
   sizeClass: number;
   position: { x: number; y: number };
@@ -77,6 +90,7 @@ interface SolarEnemyShip {
 interface SolarEnemyProjectile {
   id: string;
   weaponIdx: number;
+  sourceFaction: StationFaction;
   position: { x: number; y: number };
   velocity: { x: number; y: number };
   lifeMs: number;
@@ -150,6 +164,12 @@ const ENEMY_WEAPON_LOADOUT: ReadonlyArray<readonly [number, number]> = [
   [7, 6], // Spectre:     Graviton Beam + Photon Torpedo
   [3, 8], // Ravager:     Nuclear Missile + Quantum Disruptor
 ];
+
+const FACTION_COLORS: Record<StationFaction, number> = {
+  pirate: 0xff3333,
+  earth: 0x4488ff,
+  mars: 0xff8844,
+};
 
 /** Menu item ids used by updateMenu / updatePause. */
 type MainMenuItem = "play" | "campaign" | "solar-system" | "shipyard" | "stats";
@@ -260,6 +280,16 @@ export class GameManager {
     modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
     coreRadius: number;
   }>();
+  private readonly earthBlueprintModulesCache = new Map<number, {
+    modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
+    coreRadius: number;
+  }>();
+  private readonly marsBlueprintModulesCache = new Map<number, {
+    modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
+    coreRadius: number;
+  }>();
+  /** Factions that have attacked Mars ships — triggers Mars retaliation. */
+  private marsProvokedFactions: Set<StationFaction | "player"> = new Set();
   /** Where the shipyard should return when ESC is pressed. */
   private shipyardReturnScreen: "main-menu" | "docked" = "main-menu";
   /** Selection in the solar-system pause overlay (0=Resume, 1=Quit). */
@@ -1215,21 +1245,28 @@ export class GameManager {
     sessionState.dockedLocationId = "station-earth-orbit";
     sessionState.nearbyLocations = ["station-earth-orbit"];
 
-    // Initialize the pirate base in Sol system.
-    this.solarEnemyBases = [
-      {
-        id: "pirate-base-sol",
-        name: "Pirate Stronghold",
-        position: { x: 250, y: 120 },
-        health: 500,
-        maxHealth: 500,
-        alertLevel: "dormant",
-        alertRadiusKm: 180,
-        lastSpawnMs: 0,
-        spawnIntervalMs: 5000,
-        maxShips: 6,
-      },
-    ];
+    // Initialize combat stations from the data registry.
+    this.marsProvokedFactions = new Set();
+    this.solarEnemyBases = SolarStationRegistry.getStationsBySystem("sol").map(def => ({
+      id: def.id,
+      name: def.name,
+      faction: def.faction,
+      position: { ...def.position },
+      health: def.health,
+      maxHealth: def.health,
+      alertLevel: def.startInCombat ? ("combat" as const) : ("dormant" as const),
+      alertRadiusKm: def.alertRadiusKm,
+      lastSpawnMs: 0,
+      spawnIntervalMs: def.spawn.intervalMs,
+      maxShips: def.spawn.maxShips,
+      spawnRoster: def.spawn.roster,
+      spawnRadiusKm: def.spawn.radiusKm,
+      turretRangeKm: def.turret.rangeKm,
+      turretDamage: def.turret.damage,
+      turretCooldownMs: def.turret.cooldownMs,
+      turretWeaponIdx: def.turret.weaponIdx,
+      lastTurretFireMs: 0,
+    }));
     this.solarEnemyShips = [];
     this.solarEnemyProjectiles = [];
     this.solarEnemyNextId = 0;
@@ -1662,8 +1699,15 @@ export class GameManager {
   }
 
   /** Apply damage to an enemy ship, removing it and checking missions if destroyed. */
-  private damageEnemyShip(ship: SolarEnemyShip, damage: number): void {
+  private damageEnemyShip(ship: SolarEnemyShip, damage: number, attackerFaction?: StationFaction | "player"): void {
     ship.health -= damage;
+    // Attacking a Mars ship provokes the entire Mars faction.
+    if (ship.faction === "mars" && attackerFaction && attackerFaction !== "mars") {
+      this.marsProvokedFactions.add(attackerFaction);
+      // Mars station also enters combat when its ships are attacked.
+      const marsBase = this.solarEnemyBases.find(b => b.faction === "mars");
+      if (marsBase && marsBase.alertLevel === "dormant") marsBase.alertLevel = "combat";
+    }
     if (ship.health <= 0) {
       this.solarExplosions.push({
         x: ship.position.x,
@@ -1734,7 +1778,7 @@ export class GameManager {
       let hit = false;
       for (const ship of this.solarEnemyShips) {
         if (Math.hypot(ship.position.x - proj.position.x, ship.position.y - proj.position.y) < 10) {
-          this.damageEnemyShip(ship, proj.damage);
+          this.damageEnemyShip(ship, proj.damage, "player");
           hit = true;
           break;
         }
@@ -1796,34 +1840,41 @@ export class GameManager {
     for (const base of this.solarEnemyBases) {
       if (base.health <= 0) continue;
 
+      // Dormant stations wake when the player gets close.
       const distToBase = Math.hypot(playerPos.x - base.position.x, playerPos.y - base.position.y);
       if (base.alertLevel === "dormant" && distToBase <= base.alertRadiusKm) {
-        base.alertLevel = "combat"; // skip "alerted" for snappier gameplay
+        base.alertLevel = "combat";
       }
       if (base.alertLevel !== "combat") continue;
 
+      // ── Spawn ────────────────────────────────────────────────────────────
       const activeForBase = this.solarEnemyShips.filter((s) => s.baseId === base.id).length;
       const timeSinceSpawn = nowMs - base.lastSpawnMs;
       if (activeForBase < base.maxShips && timeSinceSpawn >= base.spawnIntervalMs) {
         const angle = Math.random() * Math.PI * 2;
-        const typeIdx = this.solarEnemyNextId % SOLAR_ENEMY_TYPES.length;
+        const rosterIdx = activeForBase % base.spawnRoster.length;
+        const entry = base.spawnRoster[rosterIdx]!;
+        const typeIdx = entry.typeIdx;
+        const sizeClass = entry.sizeClass;
         const typeDef = SOLAR_ENEMY_TYPES[typeIdx]!;
         const loadout = ENEMY_WEAPON_LOADOUT[typeIdx]!;
-        // Scale ship using pirate blueprint stats when available
-        const sizeClass = (typeIdx % 9) + 1;
-        const pirateBp = getPirateBlueprint(sizeClass);
-        const coreDef = pirateBp
-          ? SolarModuleRegistry.getModule(pirateBp.modules[0]!.moduleDefId)
+        // Derive HP from blueprint core if available, else fall back to type default.
+        const bpForSpawn = this.getFactionBlueprintModules(base.faction, sizeClass);
+        const coreMod = bpForSpawn
+          ? null // no need to look up — use sizeClass-scaled formula below
           : null;
-        const health = coreDef?.stats.hp ?? typeDef.health;
+        void coreMod;
+        const health = typeDef.health * (1 + sizeClass * 0.5);
         const newShip: SolarEnemyShip = {
           id: `enemy-${++this.solarEnemyNextId}`,
           baseId: base.id,
+          faction: base.faction,
+          name: entry.name,
           typeIdx,
           sizeClass,
           position: {
-            x: base.position.x + Math.cos(angle) * 20,
-            y: base.position.y + Math.sin(angle) * 20,
+            x: base.position.x + Math.cos(angle) * base.spawnRadiusKm,
+            y: base.position.y + Math.sin(angle) * base.spawnRadiusKm,
           },
           velocity: { x: 0, y: 0 },
           heading: 0,
@@ -1835,6 +1886,31 @@ export class GameManager {
         this.solarEnemyShips.push(newShip);
         base.lastSpawnMs = nowMs;
       }
+
+      // ── Station turrets — fire at nearest enemy-faction ship ─────────────
+      if (nowMs - base.lastTurretFireMs >= base.turretCooldownMs) {
+        // Turrets fire at ships of enemy factions within range.
+        // Pirates fire at Earth ships (and player).
+        // Earth fires at pirates.
+        // Mars fires only when provoked.
+        let turretTarget: { x: number; y: number } | null = null;
+        let turretDist = base.turretRangeKm;
+
+        for (const ship of this.solarEnemyShips) {
+          if (!this.areFactionEnemies(base.faction, ship.faction)) continue;
+          const d = Math.hypot(ship.position.x - base.position.x, ship.position.y - base.position.y);
+          if (d < turretDist) { turretDist = d; turretTarget = ship.position; }
+        }
+        // Pirate turrets also fire at the player.
+        if (base.faction === "pirate" || (base.faction === "mars" && this.marsProvokedFactions.has("player"))) {
+          const pd = Math.hypot(playerPos.x - base.position.x, playerPos.y - base.position.y);
+          if (pd < turretDist && !this.solarPlayerDead) { turretDist = pd; turretTarget = playerPos; }
+        }
+
+        if (turretTarget) {
+          this.fireTurretAt(base, turretTarget, nowMs);
+        }
+      }
     }
 
     // ── Ships: movement + firing ──────────────────────────────────────────
@@ -1842,11 +1918,37 @@ export class GameManager {
       const typeDef = SOLAR_ENEMY_TYPES[ship.typeIdx]!;
       const loadout = ENEMY_WEAPON_LOADOUT[ship.typeIdx]!;
 
-      const dx = playerPos.x - ship.position.x;
-      const dy = playerPos.y - ship.position.y;
-      const dist = Math.hypot(dx, dy) || 1;
-      const dirX = dx / dist;
-      const dirY = dy / dist;
+      const targetPos = this.getEnemyTargetPos(ship, playerPos);
+
+      let dirX: number;
+      let dirY: number;
+      let dist: number;
+
+      if (targetPos) {
+        const dx = targetPos.x - ship.position.x;
+        const dy = targetPos.y - ship.position.y;
+        dist = Math.hypot(dx, dy) || 1;
+        dirX = dx / dist;
+        dirY = dy / dist;
+      } else {
+        // No target: patrol by orbiting base.
+        const base = this.solarEnemyBases.find(b => b.id === ship.baseId);
+        const bx = base?.position.x ?? ship.position.x;
+        const by = base?.position.y ?? ship.position.y;
+        const toBaseX = bx - ship.position.x;
+        const toBaseY = by - ship.position.y;
+        const baseDist = Math.hypot(toBaseX, toBaseY) || 1;
+        const orbitR = 50;
+        if (baseDist > orbitR + 10) {
+          dirX = toBaseX / baseDist;
+          dirY = toBaseY / baseDist;
+        } else {
+          const ang = Math.atan2(ship.position.y - by, ship.position.x - bx);
+          dirX = -Math.sin(ang) * 0.5;
+          dirY = Math.cos(ang) * 0.5;
+        }
+        dist = baseDist;
+      }
 
       const accelMs2 = typeDef.speed * 0.4;
       ship.velocity.x += dirX * accelMs2 * dtS;
@@ -1862,12 +1964,14 @@ export class GameManager {
       ship.position.y += (ship.velocity.y * dtS) / 1000;
       ship.heading = (Math.atan2(dirX, -dirY) * 180) / Math.PI;
 
+      if (!targetPos) continue; // neutral — no weapons fire
+
       // Weapon 0 fire
       ship.weapon0CooldownMs = Math.max(0, ship.weapon0CooldownMs - deltaMs);
       if (ship.weapon0CooldownMs === 0) {
         const wDef = SOLAR_WEAPONS[loadout[0]]!;
         if (dist <= wDef.range) {
-          this.fireEnemyWeapon(ship, loadout[0], playerPos, dist);
+          this.fireEnemyWeapon(ship, loadout[0], targetPos, dist);
           ship.weapon0CooldownMs = wDef.cooldownMs;
         }
       }
@@ -1877,13 +1981,13 @@ export class GameManager {
       if (ship.weapon1CooldownMs === 0) {
         const wDef = SOLAR_WEAPONS[loadout[1]]!;
         if (dist <= wDef.range) {
-          this.fireEnemyWeapon(ship, loadout[1], playerPos, dist);
+          this.fireEnemyWeapon(ship, loadout[1], targetPos, dist);
           ship.weapon1CooldownMs = wDef.cooldownMs;
         }
       }
     }
 
-    // ── Projectiles: movement + player collision ──────────────────────────
+    // ── Projectiles: movement + collision ────────────────────────────────
     const hitRadius = 5; // km — proximity hit
     this.solarDamageFlashMs = Math.max(0, this.solarDamageFlashMs - deltaMs);
 
@@ -1894,10 +1998,32 @@ export class GameManager {
       p.position.x += (p.velocity.x * dtS) / 1000;
       p.position.y += (p.velocity.y * dtS) / 1000;
 
+      // Cross-faction ship damage: any projectile can hit ships of enemy factions.
+      // This also triggers Mars provocation when pirate shots graze Mars ships.
+      for (const targetShip of this.solarEnemyShips) {
+        if (targetShip.faction === p.sourceFaction) continue;
+        // Pirate shots hit anyone (can accidentally provoke Mars).
+        // Earth shots only hit pirates (and Mars if provoked).
+        // Mars shots only hit if provoked.
+        const isPirateShot = p.sourceFaction === "pirate";
+        const canHit = isPirateShot || this.areFactionEnemies(p.sourceFaction, targetShip.faction);
+        if (!canHit) continue;
+        const dx2 = targetShip.position.x - p.position.x;
+        const dy2 = targetShip.position.y - p.position.y;
+        if (dx2 * dx2 + dy2 * dy2 <= hitRadius * hitRadius) {
+          this.damageEnemyShip(targetShip, p.damage, p.sourceFaction);
+          return false;
+        }
+      }
+
+      // Player collision: pirates and provoked factions can hit the player.
+      const hitsPlayer = p.sourceFaction === "pirate"
+        || (p.sourceFaction === "mars" && this.marsProvokedFactions.has("player"));
+      if (!hitsPlayer || this.solarPlayerDead) return true;
+
       const dpx = p.position.x - playerPos.x;
       const dpy = p.position.y - playerPos.y;
       if (dpx * dpx + dpy * dpy <= hitRadius * hitRadius) {
-        // Hit player — shield absorbs first
         let dmg = p.damage;
         if (this.solarPlayerShield > 0) {
           const absorbed = Math.min(this.solarPlayerShield, dmg);
@@ -1908,7 +2034,6 @@ export class GameManager {
         soundManager.solarHit();
         this.solarDamageFlashMs = 300;
         if (this.solarPlayerHealth <= 0 && this.solarDeathTimerMs === 0) {
-          // Start death sequence: ship vanishes, 5 s explosion watch + 1 s fade
           this.solarDeathTimerMs = GameManager.SOLAR_DEATH_DURATION_MS;
           this.solarPlayerDead = true;
           const pPos = this.solarSystem?.getSessionState().playerPosition ?? { x: 0, y: 0 };
@@ -1929,12 +2054,12 @@ export class GameManager {
   private fireEnemyWeapon(
     ship: SolarEnemyShip,
     weaponIdx: number,
-    playerPos: { x: number; y: number },
+    targetPos: { x: number; y: number },
     dist: number,
   ): void {
     const wDef = SOLAR_WEAPONS[weaponIdx]!;
-    const dx = playerPos.x - ship.position.x;
-    const dy = playerPos.y - ship.position.y;
+    const dx = targetPos.x - ship.position.x;
+    const dy = targetPos.y - ship.position.y;
     const dn = dist || 1;
     // Slight inaccuracy for gameplay feel (±5° spread)
     const spread = (Math.random() - 0.5) * 0.175;
@@ -1946,11 +2071,29 @@ export class GameManager {
     this.solarEnemyProjectiles.push({
       id: `proj-${++this.solarEnemyNextId}`,
       weaponIdx,
+      sourceFaction: ship.faction,
       position: { x: ship.position.x, y: ship.position.y },
       velocity: { x: dirX * wDef.speed, y: dirY * wDef.speed },
       lifeMs: (wDef.range / wDef.speed) * 1_000_000, // life = range / speed (km/(m/s) * 1000 * 1000)
       damage: wDef.damage,
     });
+  }
+
+  private fireTurretAt(base: SolarEnemyBase, targetPos: { x: number; y: number }, nowMs: number): void {
+    const wDef = SOLAR_WEAPONS[base.turretWeaponIdx]!;
+    const dx = targetPos.x - base.position.x;
+    const dy = targetPos.y - base.position.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    this.solarEnemyProjectiles.push({
+      id: `turret-${++this.solarEnemyNextId}`,
+      weaponIdx: base.turretWeaponIdx,
+      sourceFaction: base.faction,
+      position: { x: base.position.x, y: base.position.y },
+      velocity: { x: (dx / dist) * wDef.speed, y: (dy / dist) * wDef.speed },
+      lifeMs: (base.turretRangeKm / wDef.speed) * 1_000_000,
+      damage: base.turretDamage,
+    });
+    base.lastTurretFireMs = nowMs;
   }
 
   private attemptGateJump(sourceGate: SystemGate): void {
@@ -2542,6 +2685,68 @@ export class GameManager {
       if (bp) this.pirateBlueprintModulesCache.set(sizeClass, this.computeBlueprintModules(bp));
     }
     return this.pirateBlueprintModulesCache.get(sizeClass);
+  }
+
+  private getEarthBlueprintModules(sizeClass: number) {
+    if (!this.earthBlueprintModulesCache.has(sizeClass)) {
+      const bp = getEarthBlueprint(sizeClass);
+      if (bp) this.earthBlueprintModulesCache.set(sizeClass, this.computeBlueprintModules(bp));
+    }
+    return this.earthBlueprintModulesCache.get(sizeClass);
+  }
+
+  private getMarsBlueprintModules(sizeClass: number) {
+    if (!this.marsBlueprintModulesCache.has(sizeClass)) {
+      const bp = getMarsBlueprint(sizeClass);
+      if (bp) this.marsBlueprintModulesCache.set(sizeClass, this.computeBlueprintModules(bp));
+    }
+    return this.marsBlueprintModulesCache.get(sizeClass);
+  }
+
+  private getFactionBlueprintModules(faction: StationFaction, sizeClass: number) {
+    if (faction === "earth") return this.getEarthBlueprintModules(sizeClass);
+    if (faction === "mars") return this.getMarsBlueprintModules(sizeClass);
+    return this.getPirateBlueprintModules(sizeClass);
+  }
+
+  /** True when ships of faction `a` should attack ships of faction `b`. */
+  private areFactionEnemies(a: StationFaction, b: StationFaction): boolean {
+    if (a === b) return false;
+    if (a === "pirate" && b === "earth") return true;
+    if (a === "earth" && b === "pirate") return true;
+    if (a === "mars") return this.marsProvokedFactions.has(b);
+    if (b === "mars") return this.marsProvokedFactions.has(a);
+    return false;
+  }
+
+  /**
+   * Returns the best target position for `ship` this frame, or null if
+   * the ship has no valid target (neutral / no enemies in system).
+   * "player" is passed explicitly so it can be included/excluded by faction.
+   */
+  private getEnemyTargetPos(
+    ship: SolarEnemyShip,
+    playerPos: { x: number; y: number },
+  ): { x: number; y: number } | null {
+    let nearest: { x: number; y: number } | null = null;
+    let nearestDist = Infinity;
+
+    for (const other of this.solarEnemyShips) {
+      if (other.id === ship.id) continue;
+      if (!this.areFactionEnemies(ship.faction, other.faction)) continue;
+      const d = Math.hypot(other.position.x - ship.position.x, other.position.y - ship.position.y);
+      if (d < nearestDist) { nearestDist = d; nearest = other.position; }
+    }
+
+    // Pirates always chase the player. Mars chases the player only if provoked.
+    const pirate = ship.faction === "pirate";
+    const marsHostileToPlayer = ship.faction === "mars" && this.marsProvokedFactions.has("player");
+    if (pirate || marsHostileToPlayer) {
+      const d = Math.hypot(playerPos.x - ship.position.x, playerPos.y - ship.position.y);
+      if (d < nearestDist) { nearestDist = d; nearest = playerPos; }
+    }
+
+    return nearest;
   }
 
   private saveSolarBlueprint(bp: SolarShipBlueprint): void {
@@ -3603,17 +3808,17 @@ export class GameManager {
     // Enemy ships and stations for this system
     const enemyShips = this.currentSystemId === "sol"
       ? this.solarEnemyShips.map((s) => {
-          const pirate = this.getPirateBlueprintModules(s.sizeClass);
+          const bp = this.getFactionBlueprintModules(s.faction, s.sizeClass);
           return {
             id: s.id,
             typeIdx: s.typeIdx,
-            color: SOLAR_ENEMY_TYPES[s.typeIdx]?.color ?? 0xff3333,
+            color: FACTION_COLORS[s.faction] ?? (SOLAR_ENEMY_TYPES[s.typeIdx]?.color ?? 0xff3333),
             position: s.position,
             heading: s.heading,
             health: s.health,
             maxHealth: s.maxHealth,
             sizeClass: s.sizeClass,
-            ...(pirate ? { blueprintModules: pirate.modules, blueprintCoreRadius: pirate.coreRadius } : {}),
+            ...(bp ? { blueprintModules: bp.modules, blueprintCoreRadius: bp.coreRadius } : {}),
           };
         })
       : [];

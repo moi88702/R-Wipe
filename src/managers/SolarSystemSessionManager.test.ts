@@ -133,7 +133,7 @@ describe("SolarSystemSessionManager", () => {
   describe("Session initialization", () => {
     it("creates valid session state with player at starting position", () => {
       const state = manager.getSessionState();
-      expect(state.playerPosition).toEqual({ x: 0, y: 1000 });
+      expect(state.playerPosition).toEqual({ x: 0, y: 400 });
       expect(state.nearbyLocations).toEqual([]);
       expect(state.dockedLocationId).toBeNull();
     });
@@ -220,7 +220,7 @@ describe("SolarSystemSessionManager", () => {
 
     it("dock() fails when not in range", () => {
       const station = manager.getCurrentSystem().locations[0];
-      // Player stays at starting position (1000 km away)
+      // Player stays at starting position (400 km away)
 
       const result = manager.dock(station!.id);
       expect(result).toBe(false);
@@ -321,8 +321,8 @@ describe("SolarSystemSessionManager", () => {
 
   describe("Zoom control", () => {
     it("setZoomLevel() clamps to valid range", () => {
-      manager.setZoomLevel(0.001); // Below min 0.02
-      expect(manager.getSessionState().zoomLevel).toBe(0.02);
+      manager.setZoomLevel(0.001); // Below min 0.5
+      expect(manager.getSessionState().zoomLevel).toBe(0.5);
 
       manager.setZoomLevel(100); // Above max 20.0
       expect(manager.getSessionState().zoomLevel).toBe(20.0);
