@@ -3015,8 +3015,9 @@ export class GameRenderer {
     }
 
     // ── Enemy ships ───────────────────────────────────────────────────────
-    // Scale enemy size with zoom so they shrink when zoomed out.
-    const enemyScale = Math.max(0.3, Math.min(1.5, 0.6 * kmToPx));
+    // Ship km radius = (4 + sizeClass*2) * 0.6 km — no upper cap so ships
+    // scale proportionally with zoom just like planets.
+    const enemyScale = Math.max(0.3, 0.6 * kmToPx);
     this.ensureTextPool(this.solarEnemyLabels, data.enemyShips.length, 10);
     for (let i = 0; i < data.enemyShips.length; i++) {
       const ship = data.enemyShips[i]!;
@@ -3028,17 +3029,18 @@ export class GameRenderer {
         continue;
       }
 
+      // Screen radius of the ship hull — drives both bpScale and bar placement
+      const screenR = Math.max(4, (4 + ship.sizeClass * 2) * enemyScale);
       if (ship.blueprintModules && ship.blueprintModules.length > 0 && ship.blueprintCoreRadius) {
-        const targetR = (4 + ship.sizeClass * 2) * enemyScale;
-        const bpScale = targetR / ship.blueprintCoreRadius;
+        const bpScale = screenR / ship.blueprintCoreRadius;
         this.drawBlueprintShip(g, p.x, p.y, ship.heading, ship.blueprintModules, bpScale);
       } else {
-        this.drawDeltaWing(g, p.x, p.y, ship.heading, ship.color, enemyScale);
+        this.drawDeltaWing(g, p.x, p.y, ship.heading, ship.color, screenR / 16);
       }
-      // Health bar (scales slightly with enemy size)
-      const barW = Math.max(16, 24 * enemyScale);
+      // Health bar sits just below the rendered hull
+      const barW = Math.max(14, screenR * 1.6);
       const ratio = ship.health / ship.maxHealth;
-      const barY = p.y + Math.max(9, 13 * enemyScale);
+      const barY = p.y + screenR + 3;
       g.rect(p.x - barW / 2, barY, barW, 3).fill({ color: 0x333333, alpha: 0.7 });
       g.rect(p.x - barW / 2, barY, barW * ratio, 3).fill({ color: ship.color, alpha: 0.9 });
       label.visible = false;
@@ -3084,12 +3086,12 @@ export class GameRenderer {
       for (const ship of data.friendlyShips) {
         const fp = w2s(ship.position.x, ship.position.y);
         if (offscreen(fp.x, fp.y)) continue;
-        this.drawDeltaWing(g, fp.x, fp.y, ship.heading, 0x44ff88, enemyScale * 0.85);
-        // Green health bar
+        const fScreenR = Math.max(4, 6 * enemyScale); // class-1 sized by default
+        this.drawDeltaWing(g, fp.x, fp.y, ship.heading, 0x44ff88, fScreenR / 16);
         const ratio = ship.health / ship.maxHealth;
-        const barW = 20 * enemyScale;
-        g.rect(fp.x - barW / 2, fp.y + 12 * enemyScale, barW, 3).fill({ color: 0x333333, alpha: 0.7 });
-        g.rect(fp.x - barW / 2, fp.y + 12 * enemyScale, barW * ratio, 3).fill({ color: 0x44ff88, alpha: 0.9 });
+        const fBarW = Math.max(14, fScreenR * 1.6);
+        g.rect(fp.x - fBarW / 2, fp.y + fScreenR + 3, fBarW, 3).fill({ color: 0x333333, alpha: 0.7 });
+        g.rect(fp.x - fBarW / 2, fp.y + fScreenR + 3, fBarW * ratio, 3).fill({ color: 0x44ff88, alpha: 0.9 });
       }
     }
 
@@ -3137,10 +3139,9 @@ export class GameRenderer {
     }
 
     // ── Engine glow (always on) + thrust exhaust ─────────────────────────
-    // playerTargetR: same formula as enemies so player and enemies share a
-    // consistent visual scale. Uses the player's sizeClass (defaults to 2).
-    const playerTargetR = Math.max(3, Math.min(60,
-      (4 + (data.playerSizeClass ?? 2) * 2) * enemyScale));
+    // playerTargetR: same uncapped formula as enemies — ship grows with zoom
+    // proportionally, same km-radius = (4 + sizeClass*2) * 0.6.
+    const playerTargetR = Math.max(3, (4 + (data.playerSizeClass ?? 2) * 2) * enemyScale);
     const gs = playerTargetR / 16; // glow + exhaust scale factor
     if (!data.solarPlayerDead) {
       const headRad = (data.playerHeading * Math.PI) / 180;

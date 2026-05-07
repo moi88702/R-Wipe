@@ -1529,7 +1529,10 @@ export class GameManager {
       const worldX = (sx - pcx) / kmToPx + playerPos.x;
       const worldY = (sy - pcy) / kmToPx + playerPos.y;
       const sensorRange = 200; // km
-      let bestDist = 50; // km click-radius
+      // Click target radius in km: 30 screen-px converted to world units so
+      // the hit area always matches the rendered ship regardless of zoom.
+      const clickRadiusKm = 30 / kmToPx;
+      let bestDist = clickRadiusKm;
       let clicked: string | null = null;
       for (const ship of this.solarEnemyShips) {
         const d = Math.hypot(ship.position.x - worldX, ship.position.y - worldY);
@@ -3539,12 +3542,19 @@ export class GameManager {
         }
       : undefined;
 
-    // Laser flash FX — include weapon-tip screen offset for the origin
+    // Laser flash FX — include weapon-tip screen offset for the origin.
+    // bpScale must match the renderer's formula exactly (same zoom-aware computation).
     let laserOriginDx = 0;
     let laserOriginDy = 0;
     if (this.solarPlayerBlueprintCache && this.laserFlashMs > 0) {
       const { modules, coreRadius } = this.solarPlayerBlueprintCache;
-      const bpScale = 16 / coreRadius;
+      const laserKmToPx = Math.max(0.05, sessionState.zoomLevel);
+      const laserEnemyScale = Math.max(0.3, 0.6 * laserKmToPx);
+      const activeBpForLaser = this.solarActiveBlueprintId
+        ? this.solarSavedBlueprints.get(this.solarActiveBlueprintId) : undefined;
+      const laserSzClass = activeBpForLaser?.sizeClass ?? 2;
+      const laserTargetR = Math.max(3, (4 + laserSzClass * 2) * laserEnemyScale);
+      const bpScale = laserTargetR / coreRadius;
       const heading = sessionState.playerHeading;
       const h = (heading * Math.PI) / 180;
       const cosH = Math.cos(h);
