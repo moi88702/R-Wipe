@@ -1082,7 +1082,7 @@ export class GameRenderer {
     this.menuLayer.addChild(this.shipyardGfx);
 
     this.shipyardTitle = new Text({
-      text: "SHIPYARD",
+      text: "AWAY CRAFT BUILDER",
       style: new TextStyle({
         fontFamily: "monospace",
         fontSize: 28,
@@ -4366,6 +4366,156 @@ export class GameRenderer {
     this.dockedHint.visible = true;
   }
 
+  /**
+   * Draw one ship-builder module with detailed functional visuals.
+   * Shared by both placed modules and the ghost preview.
+   * `sv` = screen-space vertices, `alphaMult` scales all alpha values,
+   * `isGhost` suppresses the outer snap-state stroke (caller adds it for ghost).
+   */
+  private drawBuilderModuleDetail(
+    g: Graphics,
+    sv: Array<{ x: number; y: number }>,
+    moduleType: string,
+    shipScrX: number,
+    shipScrY: number,
+    alphaMult: number,
+    isGhost: boolean,
+  ): void {
+    const N = sv.length;
+    if (N < 3) return;
+    const a = (base: number) => Math.min(1, base * alphaMult);
+
+    const smx = sv.reduce((s, p) => s + p.x, 0) / N;
+    const smy = sv.reduce((s, p) => s + p.y, 0) / N;
+    const sR  = sv.reduce((s, p) => s + Math.hypot(p.x - smx, p.y - smy), 0) / N;
+
+    const odx = smx - shipScrX, ody = smy - shipScrY, odist = Math.hypot(odx, ody);
+    const sOutX = odist > 1 ? odx / odist : 1;
+    const sOutY = odist > 1 ? ody / odist : 0;
+    const sPerpX = -sOutY, sPerpY = sOutX;
+
+    const hull: Record<string, number> = {
+      core: 0x0b1825, weapon: 0x170e08, external: 0x060f1a,
+      internal: 0x0c1005, structure: 0x0d1218, converter: 0x0d0818,
+    };
+
+    // Hull polygon
+    const hc = hull[moduleType] ?? 0x0d1218;
+    g.moveTo(sv[0]!.x, sv[0]!.y);
+    for (let i = 1; i < N; i++) g.lineTo(sv[i]!.x, sv[i]!.y);
+    g.closePath().fill({ color: hc, alpha: a(0.92) });
+    if (!isGhost) {
+      g.moveTo(sv[0]!.x, sv[0]!.y);
+      for (let i = 1; i < N; i++) g.lineTo(sv[i]!.x, sv[i]!.y);
+      g.closePath().stroke({ color: 0x3a5570, width: 1.2, alpha: a(0.9) });
+    }
+
+    if (moduleType === "core") {
+      g.circle(smx, smy, sR * 0.62).stroke({ color: 0x1155cc, width: 1.2, alpha: a(0.75) });
+      g.circle(smx, smy, sR * 0.40).fill({ color: 0x071840, alpha: a(0.8) });
+      g.circle(smx, smy, sR * 0.40).stroke({ color: 0x2266ee, width: 1.0, alpha: a(0.65) });
+      g.circle(smx, smy, sR * 0.20).fill({ color: 0x1144bb, alpha: a(0.9) });
+      g.circle(smx, smy, sR * 0.08).fill({ color: 0x66aaff, alpha: a(1) });
+      g.circle(smx, smy, sR * 0.03).fill({ color: 0xffffff, alpha: a(1) });
+      for (const p of sv) {
+        const mx2 = (smx + p.x) * 0.5, my2 = (smy + p.y) * 0.5;
+        g.moveTo(smx, smy).lineTo(mx2, my2).stroke({ color: 0x224488, width: 0.8, alpha: a(0.6) });
+        g.circle(mx2, my2, sR * 0.04).fill({ color: 0x3377cc, alpha: a(0.65) });
+      }
+
+    } else if (moduleType === "weapon") {
+      const barrelBase = sR * 0.15, barrelTip = sR * 1.15, halfW = sR * 0.22;
+      const bx0 = smx + sOutX * barrelBase, by0 = smy + sOutY * barrelBase;
+      const bxtip = smx + sOutX * barrelTip, bytip = smy + sOutY * barrelTip;
+      g.moveTo(bx0 + sPerpX * halfW,        by0 + sPerpY * halfW)
+       .lineTo(bxtip + sPerpX * halfW * 0.5, bytip + sPerpY * halfW * 0.5)
+       .lineTo(bxtip - sPerpX * halfW * 0.5, bytip - sPerpY * halfW * 0.5)
+       .lineTo(bx0 - sPerpX * halfW,         by0 - sPerpY * halfW)
+       .closePath().fill({ color: 0x223344, alpha: a(0.95) });
+      g.moveTo(bx0 + sPerpX * halfW, by0 + sPerpY * halfW)
+       .lineTo(bxtip + sPerpX * halfW * 0.5, bytip + sPerpY * halfW * 0.5)
+       .stroke({ color: 0x8899aa, width: 1.0, alpha: a(0.8) });
+      for (let ri = 0; ri < 3; ri++) {
+        const t = 0.3 + ri * 0.28;
+        const rx = smx + sOutX * sR * (0.15 + t * 1.0);
+        const ry = smy + sOutY * sR * (0.15 + t * 1.0);
+        const rw = halfW * (1.1 - ri * 0.1);
+        g.moveTo(rx + sPerpX * rw, ry + sPerpY * rw)
+         .lineTo(rx - sPerpX * rw, ry - sPerpY * rw)
+         .stroke({ color: 0x445566, width: 1.2, alpha: a(0.85) });
+      }
+      g.circle(bxtip, bytip, sR * 0.22).fill({ color: 0xff3300, alpha: a(0.20) });
+      g.circle(bxtip, bytip, sR * 0.12).fill({ color: 0xff6600, alpha: a(0.60) });
+      g.circle(bxtip, bytip, sR * 0.055).fill({ color: 0xffcc44, alpha: a(0.92) });
+      g.circle(bxtip, bytip, sR * 0.022).fill({ color: 0xffffff, alpha: a(1) });
+      g.circle(smx - sOutX * sR * 0.18, smy - sOutY * sR * 0.18, sR * 0.25)
+       .fill({ color: 0x1a2a3a, alpha: a(0.9) })
+       .stroke({ color: 0x445566, width: 0.8, alpha: a(0.7) });
+
+    } else if (moduleType === "external") {
+      const emitX = smx + sOutX * sR * 0.55, emitY = smy + sOutY * sR * 0.55;
+      g.moveTo(smx - sOutX * sR * 0.1, smy - sOutY * sR * 0.1)
+       .lineTo(emitX, emitY)
+       .stroke({ color: 0x335566, width: 1.2, alpha: a(0.75) });
+      g.circle(emitX, emitY, sR * 0.35).fill({ color: 0x0a1e30, alpha: a(0.92) });
+      g.circle(emitX, emitY, sR * 0.35).stroke({ color: 0x0099cc, width: 1.2, alpha: a(0.88) });
+      g.circle(emitX, emitY, sR * 0.18).fill({ color: 0x004466, alpha: a(0.9) });
+      g.circle(emitX, emitY, sR * 0.09).fill({ color: 0x00bbff, alpha: a(0.95) });
+      g.circle(emitX, emitY, sR * 0.035).fill({ color: 0xffffff, alpha: a(1) });
+      for (let ai = -1; ai <= 1; ai++) {
+        const ang = Math.atan2(sOutY, sOutX) + ai * 0.45;
+        g.moveTo(emitX, emitY)
+         .lineTo(emitX + Math.cos(ang) * sR * 0.55, emitY + Math.sin(ang) * sR * 0.55)
+         .stroke({ color: 0x0099ff, width: 0.8, alpha: a(ai === 0 ? 0.6 : 0.35) });
+      }
+      g.moveTo(smx + sPerpX * sR * 0.4, smy + sPerpY * sR * 0.4)
+       .lineTo(smx - sPerpX * sR * 0.4, smy - sPerpY * sR * 0.4)
+       .stroke({ color: 0x224455, width: 0.9, alpha: a(0.65) });
+
+    } else if (moduleType === "internal") {
+      g.circle(smx, smy, sR * 0.50).fill({ color: 0x1a1000, alpha: a(0.85) });
+      g.circle(smx, smy, sR * 0.50).stroke({ color: 0x996600, width: 1.0, alpha: a(0.72) });
+      g.circle(smx, smy, sR * 0.28).fill({ color: 0x5a3000, alpha: a(0.9) });
+      g.circle(smx, smy, sR * 0.14).fill({ color: 0xffaa00, alpha: a(0.92) });
+      g.circle(smx, smy, sR * 0.055).fill({ color: 0xffffff, alpha: a(0.9) });
+      for (let i = 0; i < N; i++) {
+        const s2 = sv[i]!, e2 = sv[(i + 1) % N]!;
+        const smx2 = (s2.x + e2.x) / 2, smy2 = (s2.y + e2.y) / 2;
+        g.moveTo(smx, smy).lineTo(smx2, smy2).stroke({ color: 0x886600, width: 0.8, alpha: a(0.55) });
+        g.circle(smx2, smy2, sR * 0.05).fill({ color: 0xcc8800, alpha: a(0.65) });
+      }
+
+    } else if (moduleType === "structure") {
+      for (let i = 0; i < N; i++) {
+        for (let j = i + 2; j < N - (i === 0 ? 1 : 0); j++) {
+          g.moveTo(sv[i]!.x, sv[i]!.y).lineTo(sv[j]!.x, sv[j]!.y)
+           .stroke({ color: 0x445566, width: 0.9, alpha: a(0.65) });
+        }
+      }
+      for (const p of sv) {
+        const bx2 = smx + (p.x - smx) * 0.75, by2 = smy + (p.y - smy) * 0.75;
+        g.circle(bx2, by2, sR * 0.07).fill({ color: 0x667788, alpha: a(0.8) });
+      }
+      g.circle(smx, smy, sR * 0.12).fill({ color: 0x334455, alpha: a(0.85) })
+       .stroke({ color: 0x556677, width: 0.8, alpha: a(0.75) });
+
+    } else { // converter
+      const flowLen = sR * 0.6;
+      g.moveTo(smx - sOutX * flowLen, smy - sOutY * flowLen)
+       .lineTo(smx + sOutX * flowLen, smy + sOutY * flowLen)
+       .stroke({ color: 0x882299, width: 1.8, alpha: a(0.78) });
+      const aX = smx + sOutX * flowLen * 0.85, aY = smy + sOutY * flowLen * 0.85;
+      g.moveTo(aX, aY)
+       .lineTo(aX - sOutX * sR * 0.22 + sPerpX * sR * 0.15, aY - sOutY * sR * 0.22 + sPerpY * sR * 0.15)
+       .lineTo(aX - sOutX * sR * 0.22 - sPerpX * sR * 0.15, aY - sOutY * sR * 0.22 - sPerpY * sR * 0.15)
+       .closePath().fill({ color: 0xcc44ff, alpha: a(0.88) });
+      g.circle(smx - sOutX * flowLen, smy - sOutY * flowLen, sR * 0.14)
+       .fill({ color: 0x6600cc, alpha: a(0.72) });
+      g.circle(smx + sOutX * flowLen, smy + sOutY * flowLen, sR * 0.14)
+       .fill({ color: 0xee00aa, alpha: a(0.72) });
+    }
+  }
+
   private drawSolarShipBuilder(data: SolarShipBuilderRenderData): void {
     const g = this.solarBuilderGfx;
     g.clear();
@@ -4400,143 +4550,11 @@ export class GameRenderer {
     // ── Placed modules ──────────────────────────────────────────────────────
     // Ship center in screen space (world origin = (0,0) = core center)
     const shipScrX = w2sx(0), shipScrY = w2sy(0);
-    const builderHull: Record<string, number> = {
-      core: 0x0b1825, weapon: 0x170e08, external: 0x060f1a,
-      internal: 0x0c1005, structure: 0x0d1218, converter: 0x0d0818,
-    };
     for (const mod of data.modules) {
       const verts = mod.vertices;
       if (verts.length < 3) continue;
       const sv = verts.map(v => ({ x: w2sx(v.x), y: w2sy(v.y) }));
-      const N = sv.length;
-
-      // Module centroid in screen space
-      const smx = sv.reduce((s, p) => s + p.x, 0) / N;
-      const smy = sv.reduce((s, p) => s + p.y, 0) / N;
-
-      // Circumradius in screen pixels
-      const sR = sv.reduce((s, p) => s + Math.hypot(p.x - smx, p.y - smy), 0) / N;
-
-      // Outward direction from ship center to module centroid
-      const odx = smx - shipScrX, ody = smy - shipScrY, odist = Math.hypot(odx, ody);
-      const sOutX = odist > 1 ? odx / odist : 1;
-      const sOutY = odist > 1 ? ody / odist : 0;
-      const sPerpX = -sOutY, sPerpY = sOutX;
-
-      // ── Hull polygon ──────────────────────────────────────────────────
-      const hc = builderHull[mod.moduleType] ?? 0x0d1218;
-      g.moveTo(sv[0]!.x, sv[0]!.y);
-      for (let i = 1; i < N; i++) g.lineTo(sv[i]!.x, sv[i]!.y);
-      g.closePath().fill({ color: hc, alpha: 0.92 });
-      g.moveTo(sv[0]!.x, sv[0]!.y);
-      for (let i = 1; i < N; i++) g.lineTo(sv[i]!.x, sv[i]!.y);
-      g.closePath().stroke({ color: 0x3a5570, width: 1.2, alpha: 0.9 });
-
-      // ── Type-specific detail overlay ──────────────────────────────────
-      if (mod.moduleType === "core") {
-        g.circle(smx, smy, sR * 0.62).stroke({ color: 0x1155cc, width: 1.2, alpha: 0.75 });
-        g.circle(smx, smy, sR * 0.40).fill({ color: 0x071840, alpha: 0.8 });
-        g.circle(smx, smy, sR * 0.40).stroke({ color: 0x2266ee, width: 1.0, alpha: 0.65 });
-        g.circle(smx, smy, sR * 0.20).fill({ color: 0x1144bb, alpha: 0.9 });
-        g.circle(smx, smy, sR * 0.08).fill({ color: 0x66aaff, alpha: 1 });
-        g.circle(smx, smy, sR * 0.03).fill({ color: 0xffffff, alpha: 1 });
-        for (const p of sv) {
-          const mx2 = (smx + p.x) * 0.5, my2 = (smy + p.y) * 0.5;
-          g.moveTo(smx, smy).lineTo(mx2, my2).stroke({ color: 0x224488, width: 0.8, alpha: 0.6 });
-          g.circle(mx2, my2, sR * 0.04).fill({ color: 0x3377cc, alpha: 0.65 });
-        }
-
-      } else if (mod.moduleType === "weapon") {
-        const barrelBase = sR * 0.15, barrelTip = sR * 1.15, halfW = sR * 0.22;
-        const bx0 = smx + sOutX * barrelBase, by0 = smy + sOutY * barrelBase;
-        const bxtip = smx + sOutX * barrelTip, bytip = smy + sOutY * barrelTip;
-        g.moveTo(bx0 + sPerpX * halfW,        by0 + sPerpY * halfW)
-         .lineTo(bxtip + sPerpX * halfW * 0.5, bytip + sPerpY * halfW * 0.5)
-         .lineTo(bxtip - sPerpX * halfW * 0.5, bytip - sPerpY * halfW * 0.5)
-         .lineTo(bx0 - sPerpX * halfW,         by0 - sPerpY * halfW)
-         .closePath().fill({ color: 0x223344, alpha: 0.95 });
-        g.moveTo(bx0 + sPerpX * halfW, by0 + sPerpY * halfW)
-         .lineTo(bxtip + sPerpX * halfW * 0.5, bytip + sPerpY * halfW * 0.5)
-         .stroke({ color: 0x8899aa, width: 1.0, alpha: 0.8 });
-        for (let ri = 0; ri < 3; ri++) {
-          const t = 0.3 + ri * 0.28;
-          const rx = smx + sOutX * sR * (0.15 + t * 1.0);
-          const ry = smy + sOutY * sR * (0.15 + t * 1.0);
-          const rw = halfW * (1.1 - ri * 0.1);
-          g.moveTo(rx + sPerpX * rw, ry + sPerpY * rw)
-           .lineTo(rx - sPerpX * rw, ry - sPerpY * rw)
-           .stroke({ color: 0x445566, width: 1.2, alpha: 0.85 });
-        }
-        g.circle(bxtip, bytip, sR * 0.22).fill({ color: 0xff3300, alpha: 0.20 });
-        g.circle(bxtip, bytip, sR * 0.12).fill({ color: 0xff6600, alpha: 0.60 });
-        g.circle(bxtip, bytip, sR * 0.055).fill({ color: 0xffcc44, alpha: 0.92 });
-        g.circle(bxtip, bytip, sR * 0.022).fill({ color: 0xffffff, alpha: 1 });
-        g.circle(smx - sOutX * sR * 0.18, smy - sOutY * sR * 0.18, sR * 0.25)
-         .fill({ color: 0x1a2a3a, alpha: 0.9 })
-         .stroke({ color: 0x445566, width: 0.8, alpha: 0.7 });
-
-      } else if (mod.moduleType === "external") {
-        const emitX = smx + sOutX * sR * 0.55, emitY = smy + sOutY * sR * 0.55;
-        g.moveTo(smx - sOutX * sR * 0.1, smy - sOutY * sR * 0.1)
-         .lineTo(emitX, emitY)
-         .stroke({ color: 0x335566, width: 1.2, alpha: 0.75 });
-        g.circle(emitX, emitY, sR * 0.35).fill({ color: 0x0a1e30, alpha: 0.92 });
-        g.circle(emitX, emitY, sR * 0.35).stroke({ color: 0x0099cc, width: 1.2, alpha: 0.88 });
-        g.circle(emitX, emitY, sR * 0.18).fill({ color: 0x004466, alpha: 0.9 });
-        g.circle(emitX, emitY, sR * 0.09).fill({ color: 0x00bbff, alpha: 0.95 });
-        g.circle(emitX, emitY, sR * 0.035).fill({ color: 0xffffff, alpha: 1 });
-        for (let ai = -1; ai <= 1; ai++) {
-          const ang = Math.atan2(sOutY, sOutX) + ai * 0.45;
-          g.moveTo(emitX, emitY)
-           .lineTo(emitX + Math.cos(ang) * sR * 0.55, emitY + Math.sin(ang) * sR * 0.55)
-           .stroke({ color: 0x0099ff, width: 0.8, alpha: ai === 0 ? 0.6 : 0.35 });
-        }
-        g.moveTo(smx + sPerpX * sR * 0.4, smy + sPerpY * sR * 0.4)
-         .lineTo(smx - sPerpX * sR * 0.4, smy - sPerpY * sR * 0.4)
-         .stroke({ color: 0x224455, width: 0.9, alpha: 0.65 });
-
-      } else if (mod.moduleType === "internal") {
-        g.circle(smx, smy, sR * 0.50).fill({ color: 0x1a1000, alpha: 0.85 });
-        g.circle(smx, smy, sR * 0.50).stroke({ color: 0x996600, width: 1.0, alpha: 0.72 });
-        g.circle(smx, smy, sR * 0.28).fill({ color: 0x5a3000, alpha: 0.9 });
-        g.circle(smx, smy, sR * 0.14).fill({ color: 0xffaa00, alpha: 0.92 });
-        g.circle(smx, smy, sR * 0.055).fill({ color: 0xffffff, alpha: 0.9 });
-        for (let i = 0; i < N; i++) {
-          const s2 = sv[i]!, e2 = sv[(i + 1) % N]!;
-          const smx2 = (s2.x + e2.x) / 2, smy2 = (s2.y + e2.y) / 2;
-          g.moveTo(smx, smy).lineTo(smx2, smy2).stroke({ color: 0x886600, width: 0.8, alpha: 0.55 });
-          g.circle(smx2, smy2, sR * 0.05).fill({ color: 0xcc8800, alpha: 0.65 });
-        }
-
-      } else if (mod.moduleType === "structure") {
-        for (let i = 0; i < N; i++) {
-          for (let j = i + 2; j < N - (i === 0 ? 1 : 0); j++) {
-            g.moveTo(sv[i]!.x, sv[i]!.y).lineTo(sv[j]!.x, sv[j]!.y)
-             .stroke({ color: 0x445566, width: 0.9, alpha: 0.65 });
-          }
-        }
-        for (const p of sv) {
-          const bx2 = smx + (p.x - smx) * 0.75, by2 = smy + (p.y - smy) * 0.75;
-          g.circle(bx2, by2, sR * 0.07).fill({ color: 0x667788, alpha: 0.8 });
-        }
-        g.circle(smx, smy, sR * 0.12).fill({ color: 0x334455, alpha: 0.85 })
-         .stroke({ color: 0x556677, width: 0.8, alpha: 0.75 });
-
-      } else { // converter
-        const flowLen = sR * 0.6;
-        g.moveTo(smx - sOutX * flowLen, smy - sOutY * flowLen)
-         .lineTo(smx + sOutX * flowLen, smy + sOutY * flowLen)
-         .stroke({ color: 0x882299, width: 1.8, alpha: 0.78 });
-        const aX = smx + sOutX * flowLen * 0.85, aY = smy + sOutY * flowLen * 0.85;
-        g.moveTo(aX, aY)
-         .lineTo(aX - sOutX * sR * 0.22 + sPerpX * sR * 0.15, aY - sOutY * sR * 0.22 + sPerpY * sR * 0.15)
-         .lineTo(aX - sOutX * sR * 0.22 - sPerpX * sR * 0.15, aY - sOutY * sR * 0.22 - sPerpY * sR * 0.15)
-         .closePath().fill({ color: 0xcc44ff, alpha: 0.88 });
-        g.circle(smx - sOutX * flowLen, smy - sOutY * flowLen, sR * 0.14)
-         .fill({ color: 0x6600cc, alpha: 0.72 });
-        g.circle(smx + sOutX * flowLen, smy + sOutY * flowLen, sR * 0.14)
-         .fill({ color: 0xee00aa, alpha: 0.72 });
-      }
+      this.drawBuilderModuleDetail(g, sv, mod.moduleType, shipScrX, shipScrY, 1.0, false);
     }
 
     // ── Snap point markers ──────────────────────────────────────────────────
@@ -4549,24 +4567,18 @@ export class GameRenderer {
       g.circle(sx, sy, 7).stroke({ color, width: 1, alpha: alpha * 0.6 });
     }
 
-    // ── Ghost module ────────────────────────────────────────────────────────
+    // ── Ghost module — same detailed visuals, partially transparent ──────────
     if (data.ghost) {
       const { vertices: gv, moduleType, isSnapped } = data.ghost;
-      const ghostColor = moduleColor(moduleType);
-      const alpha = isSnapped ? 0.55 : 0.3;
       if (gv.length >= 3) {
-        g.moveTo(w2sx(gv[0]!.x), w2sy(gv[0]!.y));
-        for (let i = 1; i < gv.length; i++) {
-          g.lineTo(w2sx(gv[i]!.x), w2sy(gv[i]!.y));
-        }
-        g.closePath();
-        g.fill({ color: ghostColor, alpha });
-        g.moveTo(w2sx(gv[0]!.x), w2sy(gv[0]!.y));
-        for (let i = 1; i < gv.length; i++) {
-          g.lineTo(w2sx(gv[i]!.x), w2sy(gv[i]!.y));
-        }
-        g.closePath();
-        g.stroke({ color: isSnapped ? 0x00ffaa : 0xffffff, width: 2, alpha: alpha + 0.2 });
+        const gsv = gv.map(v => ({ x: w2sx(v.x), y: w2sy(v.y) }));
+        this.drawBuilderModuleDetail(g, gsv, moduleType, shipScrX, shipScrY,
+          isSnapped ? 0.55 : 0.30, true);
+        // Snap-state outline on top
+        g.moveTo(gsv[0]!.x, gsv[0]!.y);
+        for (let i = 1; i < gsv.length; i++) g.lineTo(gsv[i]!.x, gsv[i]!.y);
+        g.closePath().stroke({ color: isSnapped ? 0x00ffaa : 0xffffff, width: 2,
+          alpha: isSnapped ? 0.75 : 0.45 });
       }
     }
 
@@ -5523,7 +5535,7 @@ export class GameRenderer {
 
   /** Populates the 4-item main-menu list and highlights the selected one. */
   private updateMainMenu(selectedIdx: number): void {
-    const items = ["PLAY", "CAMPAIGN", "SOLAR SYSTEM", "SHIPYARD", "STATS"];
+    const items = ["PLAY", "CAMPAIGN", "SOLAR SYSTEM", "AWAY CRAFT", "STATS"];
     this.renderMenuList(items, selectedIdx, this.height / 2 + 40, 40);
   }
 
