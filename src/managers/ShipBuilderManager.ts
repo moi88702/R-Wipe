@@ -19,6 +19,7 @@ import type {
   SolarBuilderContextMenu,
   SavedBlueprintSummary,
   ShipClass,
+  CorePickerItem,
 } from "../types/solarShipBuilder";
 import { SolarModuleRegistry } from "../game/data/SolarModuleRegistry";
 import { BlueprintEngine } from "../game/shipbuilder/BlueprintEngine";
@@ -41,6 +42,9 @@ export class ShipBuilderManager {
   private statusMsg: string | null = null;
   private statusMs = 0;
   private contextMenu: SolarBuilderContextMenu | null = null;
+  private corePicker: ReadonlyArray<CorePickerItem> | null = null;
+  private renameMode = false;
+  private renameBuf = "";
 
   static readonly LEFT_PANEL_W = 800;
   static readonly CANVAS_CX = 400;
@@ -71,7 +75,82 @@ export class ShipBuilderManager {
     this.engine = null;
     this.selectedDefId = null;
     this.contextMenu = null;
+    this.corePicker = null;
+    this.renameMode = false;
+    this.renameBuf = "";
     return bp;
+  }
+
+  // ── Core picker ─────────────────────────────────────────────────────────
+
+  openCorePicker(inventory: ReadonlyMap<string, number>): void {
+    this.contextMenu = null;
+    this.corePicker = SolarModuleRegistry.getCores(1)
+      .map((c): CorePickerItem => ({
+        defId: c.id,
+        name: c.name,
+        weaponPoints: c.weaponPoints,
+        externalPoints: c.externalPoints,
+        internalPoints: c.internalPoints,
+        quantity: inventory.get(c.id) ?? 0,
+      }));
+  }
+
+  closeCorePicker(): void {
+    this.corePicker = null;
+  }
+
+  isCorePicking(): boolean {
+    return this.corePicker !== null;
+  }
+
+  /** Consume one core from inventory and open builder with it. Returns inventory delta or null if unavailable. */
+  selectCore(defId: string, inventory: ReadonlyMap<string, number>): InventoryDelta | null {
+    const owned = inventory.get(defId) ?? 0;
+    if (owned <= 0) {
+      this.setStatus("NO CORE IN INVENTORY");
+      return null;
+    }
+    const def = SolarModuleRegistry.getModule(defId);
+    if (!def || def.type !== "core") return null;
+    this.corePicker = null;
+    this.open(defId, 6);
+    this.setStatus("NEW SHIP CREATED");
+    return { moduleDefId: defId, delta: -1 };
+  }
+
+  // ── Rename mode ──────────────────────────────────────────────────────────
+
+  enterRenameMode(): void {
+    if (!this.engine) return;
+    this.renameBuf = this.engine.getBlueprint().name;
+    this.renameMode = true;
+  }
+
+  isRenaming(): boolean {
+    return this.renameMode;
+  }
+
+  handleRenameInput(typedText: string, backspace: boolean, confirm: boolean, cancel: boolean): void {
+    if (!this.renameMode) return;
+    if (cancel) {
+      this.renameMode = false;
+      this.renameBuf = "";
+      return;
+    }
+    if (confirm) {
+      const name = this.renameBuf.trim();
+      if (name.length > 0) this.renameBlueprint(name);
+      this.renameMode = false;
+      this.renameBuf = "";
+      return;
+    }
+    if (backspace) {
+      this.renameBuf = this.renameBuf.slice(0, -1);
+    }
+    if (typedText) {
+      this.renameBuf = (this.renameBuf + typedText).slice(0, 40);
+    }
   }
 
   getBlueprint(): SolarShipBlueprint | null {
@@ -265,7 +344,10 @@ export class ShipBuilderManager {
       const geom = geometries.get(m.placedId);
       const def = defs.get(m.moduleDefId);
       if (!geom || !def) return [];
-      return [{ placedId: m.placedId, vertices: geom.vertices, moduleType: def.type }];
+      const vertices = def.shape.verts
+        ? GeometryEngine.buildCustomVertices(def.shape.verts, def.shape.sideLengthPx, geom.worldX, geom.worldY, geom.rotationRad)
+        : geom.vertices;
+      return [{ placedId: m.placedId, vertices, worldX: geom.worldX, worldY: geom.worldY, moduleType: def.type, partKind: def.partKind, grade: def.sizeClass }];
     });
 
     const openSnaps = GeometryEngine.getOpenSnapPoints(geometries, blueprint.modules, defs);
@@ -286,12 +368,12 @@ export class ShipBuilderManager {
           const { worldX, worldY, rotationRad } = snapResult.transform;
           const N = selectedDef.type === "core" ? blueprint.coreSideCount : selectedDef.shape.sides;
           const vertices = GeometryEngine.buildVertices(N, selectedDef.shape.sideLengthPx, worldX, worldY, rotationRad);
-          ghost = { vertices, moduleType: selectedDef.type, isSnapped: true };
+          ghost = { vertices, moduleType: selectedDef.type, partKind: selectedDef.partKind, grade: selectedDef.sizeClass, isSnapped: true };
         } else {
           const worldPos = this.screenToWorld(this.cursorX, this.cursorY);
           const N = selectedDef.type === "core" ? blueprint.coreSideCount : selectedDef.shape.sides;
           const vertices = GeometryEngine.buildVertices(N, selectedDef.shape.sideLengthPx, worldPos.x, worldPos.y, 0);
-          ghost = { vertices, moduleType: selectedDef.type, isSnapped: false };
+          ghost = { vertices, moduleType: selectedDef.type, partKind: selectedDef.partKind, grade: selectedDef.sizeClass, isSnapped: false };
         }
       }
     }
@@ -311,6 +393,9 @@ export class ShipBuilderManager {
       playerCredits,
       coreSideCount: blueprint.coreSideCount,
       savedBlueprints: savedBlueprints ?? [],
+      corePicker: this.corePicker,
+      renameMode: this.renameMode,
+      renameBuf: this.renameBuf,
     };
   }
 

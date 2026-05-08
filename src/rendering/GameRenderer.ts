@@ -35,6 +35,8 @@ import {
 import { drawBossBody } from "./BossArt";
 import { createNPCRobot } from "./NPCRobotRenderer";
 import { NPCRobotAnimator } from "./NPCRobotAnimator";
+import { getFactionColors, type FactionColors } from "../game/data/FactionColors";
+import { getGradeColors } from "../game/data/GradeColors";
 
 interface Star {
   x: number;
@@ -251,15 +253,24 @@ export interface SolarSystemRenderData {
     readonly heading: number;
     readonly health: number;
     readonly maxHealth: number;
+    readonly faction?: string;
     readonly blueprintModules?: ReadonlyArray<{
       readonly vertices: ReadonlyArray<{ readonly x: number; readonly y: number }>;
+      readonly worldX: number;
+      readonly worldY: number;
       readonly moduleType: string;
+      readonly partKind: string;
+      readonly grade: number;
     }>;
     readonly blueprintCoreRadius?: number;
   }>;
   readonly playerBlueprintModules?: ReadonlyArray<{
     readonly vertices: ReadonlyArray<{ readonly x: number; readonly y: number }>;
+    readonly worldX: number;
+    readonly worldY: number;
     readonly moduleType: string;
+    readonly partKind: string;
+    readonly grade: number;
   }>;
   readonly playerBlueprintCoreRadius?: number;
   readonly playerSizeClass?: number;
@@ -280,6 +291,30 @@ export interface SolarSystemRenderData {
     readonly health: number;
     readonly maxHealth: number;
     readonly alertLevel: "dormant" | "alerted" | "combat";
+    readonly faction?: string;
+    readonly sizeClass?: number;
+    readonly heading?: number;
+    readonly blueprintModules?: ReadonlyArray<{
+      readonly vertices: ReadonlyArray<{ readonly x: number; readonly y: number }>;
+      readonly worldX: number;
+      readonly worldY: number;
+      readonly moduleType: string;
+      readonly partKind: string;
+      readonly grade: number;
+    }>;
+    readonly blueprintCoreRadius?: number;
+  }>;
+  /** Id of the currently click-selected enemy ship (thin white ring). */
+  readonly selectedShipId?: string;
+  /**
+   * Ghost markers for enemy ships that were previously scanned but are now
+   * outside scanner range.  Position is stale (the ship has moved since last
+   * contact).  Rendered as hollow diamond icons.
+   */
+  readonly lastKnownEnemyPositions?: ReadonlyArray<{
+    readonly id: string;
+    readonly position: { x: number; y: number };
+    readonly color: number;
   }>;
   readonly laserFlash?: {
     readonly targetX: number;
@@ -291,6 +326,8 @@ export interface SolarSystemRenderData {
   };
   /** 0 = no warp, 1 = full warp, 0–1 during deceleration. */
   readonly warpIntensity?: number;
+  /** 0–1 while holding forward to charge the warp drive; resets to 0 once warp activates. */
+  readonly warpChargeFraction?: number;
   /** Solar-system pause menu selection (0=Resume, 1=Quit). */
   readonly pauseMenuSelection?: number;
   /** Populated when screen === "docked"; drives drawDockedMenu. */
@@ -359,6 +396,11 @@ export interface SolarSystemRenderData {
   readonly deathFade?: number;
   /** True when the player ship is dead (hide the ship sprite). */
   readonly solarPlayerDead?: boolean;
+  /** Zoom slider state for the left-edge zoom bar. */
+  readonly zoomBar?: {
+    readonly fraction: number; // 0 = min zoom, 1 = max zoom (log scale)
+    readonly label: string;    // e.g. "1.5x"
+  };
 }
 
 export interface GalaxyMapData {
@@ -544,11 +586,14 @@ export class GameRenderer {
   private readonly solarGateLabels: Text[] = [];
   private readonly solarEnemyLabels: Text[] = [];
   private readonly solarEnemyStationLabels: Text[] = [];
+  // Zoom bar label (single text node).
+  private readonly zoomBarLabel: Text[] = [];
   // Galaxy-map text pool — system names.
   private readonly galaxySystemLabels: Text[] = [];
   // Solar-system status / system-name banner.
   private readonly solarSystemNameText: Text;
   private readonly solarApproachText: Text;
+  private readonly solarSpeedBarLabel: Text;
   // Docked screen elements.
   private readonly dockedTitle: Text;
   private readonly dockedHint: Text;
@@ -591,6 +636,10 @@ export class GameRenderer {
   private readonly shipyardSavedLabels: Text[] = [];
   private readonly shipyardSavedHeader: Text;
   private readonly shipyardStatusText: Text;
+
+  private readonly isTouchDevice: boolean =
+    typeof window !== "undefined" &&
+    (("ontouchstart" in window) || navigator.maxTouchPoints > 0);
 
   constructor(app: Application, width: number, height: number) {
     this.app = app;
@@ -997,6 +1046,21 @@ export class GameRenderer {
     this.solarApproachText.visible = false;
     this.menuLayer.addChild(this.solarApproachText);
 
+    this.solarSpeedBarLabel = new Text({
+      text: "",
+      style: new TextStyle({
+        fontFamily: "monospace",
+        fontSize: 10,
+        fill: 0x88aacc,
+        letterSpacing: 1,
+      }),
+    });
+    this.solarSpeedBarLabel.anchor.set(0.5, 1);
+    this.solarSpeedBarLabel.x = width / 2;
+    this.solarSpeedBarLabel.y = height - 14;
+    this.solarSpeedBarLabel.visible = false;
+    this.menuLayer.addChild(this.solarSpeedBarLabel);
+
     // Docked screen — title + hint. Menu items live in a pool.
     this.dockedTitle = new Text({
       text: "",
@@ -1246,13 +1310,17 @@ export class GameRenderer {
     this.pauseTitle.visible = isPause || isSolarPaused;
     // Solar system view labels
     this.solarSystemNameText.visible = isSolarSystem;
-    // solarApproachText visibility is set inside drawSolarSystem each frame.
-    if (!isSolarSystem) this.solarApproachText.visible = false;
+    // solarApproachText / solarSpeedBarLabel visibility set inside drawSolarSystem each frame.
+    if (!isSolarSystem) {
+      this.solarApproachText.visible = false;
+      this.solarSpeedBarLabel.visible = false;
+    }
     for (const t of this.solarBodyLabels) t.visible = isSolarSystem;
     for (const t of this.solarLocationLabels) t.visible = isSolarSystem;
     for (const t of this.solarGateLabels) t.visible = isSolarSystem;
     for (const t of this.solarEnemyLabels) t.visible = isSolarSystem;
     for (const t of this.solarEnemyStationLabels) t.visible = isSolarSystem;
+    for (const t of this.zoomBarLabel) t.visible = isSolarSystem;
     // Galaxy-map labels visible only when galaxy map drawn (set in drawGalaxyMap).
     if (!isSolarSystem) for (const t of this.galaxySystemLabels) t.visible = false;
     // Docked screen labels
@@ -2814,6 +2882,8 @@ export class GameRenderer {
     });
     const offscreen = (sx: number, sy: number, pad = 80): boolean =>
       sx < -pad || sx > this.width + pad || sy < -pad || sy > this.height + pad;
+    // Ship/station screen-space scale factor: px per km model unit
+    const enemyScale = Math.max(0.3, 0.6 * kmToPx);
 
     // ── Celestial bodies ───────────────────────────────────────────────────
     this.ensureTextPool(this.solarBodyLabels, data.celestialBodies.length, 13);
@@ -2987,25 +3057,39 @@ export class GameRenderer {
         : base.alertLevel === "alerted"
           ? 0xff8800
           : 0xaa4444;
-      const r = 12;
-      // Hexagon shape for enemy base
-      g.poly(
-        Array.from({ length: 6 }, (_, k) => {
-          const a = (k / 6) * Math.PI * 2;
-          return [p.x + Math.cos(a) * r, p.y + Math.sin(a) * r] as [number, number];
-        }).flat(),
-      ).fill({ color: alertColor, alpha: 0.9 });
-      g.circle(p.x, p.y, r + 3).stroke({ color: alertColor, width: 1, alpha: 0.5 });
+
+      // Stations render as large blueprint ships (3× ship scale for the same sizeClass)
+      const stationSzClass = base.sizeClass ?? 4;
+      const stationScreenR = Math.max(16, (4 + stationSzClass * 2) * enemyScale * 3);
+
+      if (base.blueprintModules && base.blueprintModules.length > 0 && base.blueprintCoreRadius) {
+        const bpScale = stationScreenR / base.blueprintCoreRadius;
+        this.drawBlueprintShip(g, p.x, p.y, base.heading ?? 0, base.blueprintModules, bpScale, getFactionColors(base.faction));
+        // Alert ring around the station hull
+        g.circle(p.x, p.y, stationScreenR * 1.15).stroke({ color: alertColor, width: 1.5, alpha: 0.55 });
+      } else {
+        // Fallback hexagon
+        const r = stationScreenR * 0.5;
+        g.poly(
+          Array.from({ length: 6 }, (_, k) => {
+            const a = (k / 6) * Math.PI * 2;
+            return [p.x + Math.cos(a) * r, p.y + Math.sin(a) * r] as [number, number];
+          }).flat(),
+        ).fill({ color: alertColor, alpha: 0.9 });
+        g.circle(p.x, p.y, r + 3).stroke({ color: alertColor, width: 1, alpha: 0.5 });
+      }
+
       // Health bar
       if (base.maxHealth > 0) {
-        const barW = 36;
+        const barW = Math.max(40, stationScreenR * 1.8);
         const ratio = base.health / base.maxHealth;
-        g.rect(p.x - barW / 2, p.y + r + 4, barW, 4).fill({ color: 0x333333, alpha: 0.7 });
-        g.rect(p.x - barW / 2, p.y + r + 4, barW * ratio, 4).fill({ color: alertColor, alpha: 0.9 });
+        const barY = p.y + stationScreenR * 1.2 + 4;
+        g.rect(p.x - barW / 2, barY, barW, 4).fill({ color: 0x333333, alpha: 0.7 });
+        g.rect(p.x - barW / 2, barY, barW * ratio, 4).fill({ color: alertColor, alpha: 0.9 });
       }
       label.text = `${base.name}\n${base.alertLevel.toUpperCase()}`;
       label.x = p.x;
-      label.y = p.y - r - 14;
+      label.y = p.y - stationScreenR * 1.2 - 6;
       label.anchor.set(0.5, 1);
       label.style.fill = alertColor;
       label.visible = true;
@@ -3017,7 +3101,6 @@ export class GameRenderer {
     // ── Enemy ships ───────────────────────────────────────────────────────
     // Ship km radius = (4 + sizeClass*2) * 0.6 km — no upper cap so ships
     // scale proportionally with zoom just like planets.
-    const enemyScale = Math.max(0.3, 0.6 * kmToPx);
     this.ensureTextPool(this.solarEnemyLabels, data.enemyShips.length, 10);
     for (let i = 0; i < data.enemyShips.length; i++) {
       const ship = data.enemyShips[i]!;
@@ -3033,9 +3116,13 @@ export class GameRenderer {
       const screenR = Math.max(4, (4 + ship.sizeClass * 2) * enemyScale);
       if (ship.blueprintModules && ship.blueprintModules.length > 0 && ship.blueprintCoreRadius) {
         const bpScale = screenR / ship.blueprintCoreRadius;
-        this.drawBlueprintShip(g, p.x, p.y, ship.heading, ship.blueprintModules, bpScale);
+        this.drawBlueprintShip(g, p.x, p.y, ship.heading, ship.blueprintModules, bpScale, getFactionColors(ship.faction));
       } else {
         this.drawDeltaWing(g, p.x, p.y, ship.heading, ship.color, screenR / 16);
+      }
+      // Selection ring (thin white circle around click-selected ship)
+      if (data.selectedShipId === ship.id) {
+        g.circle(p.x, p.y, screenR * 1.6).stroke({ color: 0xffffff, width: 1.2, alpha: 0.85 });
       }
       // Health bar sits just below the rendered hull
       const barW = Math.max(14, screenR * 1.6);
@@ -3047,6 +3134,32 @@ export class GameRenderer {
     }
     for (let i = data.enemyShips.length; i < this.solarEnemyLabels.length; i++) {
       this.solarEnemyLabels[i]!.visible = false;
+    }
+
+    // ── Last-known-position ghost markers ─────────────────────────────────
+    if (data.lastKnownEnemyPositions) {
+      for (const ghost of data.lastKnownEnemyPositions) {
+        const p = w2s(ghost.position.x, ghost.position.y);
+        if (offscreen(p.x, p.y, 20)) continue;
+        const s = 7 * Math.max(0.5, Math.min(1.5, kmToPx));
+        const clampedS = Math.max(5, Math.min(10, s));
+        // Hollow diamond outline
+        g.poly([
+          { x: p.x,             y: p.y - clampedS },
+          { x: p.x + clampedS,  y: p.y            },
+          { x: p.x,             y: p.y + clampedS },
+          { x: p.x - clampedS,  y: p.y            },
+        ]).stroke({ color: ghost.color, width: 1.5, alpha: 0.5 });
+        // Centre dot
+        g.circle(p.x, p.y, 1.8).fill({ color: ghost.color, alpha: 0.5 });
+        // Cross hair inside diamond — marks "last seen here"
+        g.moveTo(p.x - clampedS * 0.35, p.y)
+          .lineTo(p.x + clampedS * 0.35, p.y)
+          .stroke({ color: ghost.color, width: 1, alpha: 0.35 });
+        g.moveTo(p.x, p.y - clampedS * 0.35)
+          .lineTo(p.x, p.y + clampedS * 0.35)
+          .stroke({ color: ghost.color, width: 1, alpha: 0.35 });
+      }
     }
 
     // ── Enemy projectiles ─────────────────────────────────────────────────
@@ -3138,33 +3251,56 @@ export class GameRenderer {
       }
     }
 
-    // ── Engine glow (always on) + thrust exhaust ─────────────────────────
-    // playerTargetR: same uncapped formula as enemies — ship grows with zoom
-    // proportionally, same km-radius = (4 + sizeClass*2) * 0.6.
+    // ── Engine glow (idle) + thrust exhaust ──────────────────────────────
     const playerTargetR = Math.max(3, (4 + (data.playerSizeClass ?? 2) * 2) * enemyScale);
-    const gs = playerTargetR / 16; // glow + exhaust scale factor
+    const gs = playerTargetR / 16;
     if (!data.solarPlayerDead) {
       const headRad = (data.playerHeading * Math.PI) / 180;
-      const engineOff = gs * 18;
-      const backX = cx - Math.sin(headRad) * engineOff;
-      const backY = cy + Math.cos(headRad) * engineOff;
-      // Persistent idle glow
-      g.circle(backX, backY, 9 * gs).fill({ color: 0xff4400, alpha: 0.12 });
-      g.circle(backX, backY, 5 * gs).fill({ color: 0xff6600, alpha: 0.28 });
-      g.circle(backX, backY, 3 * gs).fill({ color: 0xffaa44, alpha: 0.55 });
-      g.circle(backX, backY, 1.5 * gs).fill({ color: 0xffffff, alpha: 0.8 });
-    }
-    if (data.thrustActive && !data.solarPlayerDead) {
-      const headRad = (data.playerHeading * Math.PI) / 180;
-      const engineOff = gs * 18;
-      const backX = cx - Math.sin(headRad) * engineOff;
-      const backY = cy + Math.cos(headRad) * engineOff;
-      // Inner flame
-      g.circle(backX, backY, 5 * gs).fill({ color: 0x66aaff, alpha: 0.9 });
-      g.circle(backX - Math.sin(headRad) * 8 * gs, backY + Math.cos(headRad) * 8 * gs, 4 * gs)
-        .fill({ color: 0x4488ff, alpha: 0.6 });
-      g.circle(backX - Math.sin(headRad) * 14 * gs, backY + Math.cos(headRad) * 14 * gs, 2 * gs)
-        .fill({ color: 0x2266ff, alpha: 0.3 });
+      const cosH = Math.cos(headRad);
+      const sinH = Math.sin(headRad);
+
+      const engineKinds = ["thruster", "ion-engine", "warp-nacelle", "gravity-drive"];
+      const engineMods = data.playerBlueprintModules?.filter(m => engineKinds.includes(m.partKind)) ?? [];
+      const bpScale = data.playerBlueprintCoreRadius ? playerTargetR / data.playerBlueprintCoreRadius : gs;
+
+      if (engineMods.length > 0) {
+        for (const eng of engineMods) {
+          const ex = cx + (eng.worldX * cosH - eng.worldY * sinH) * bpScale;
+          const ey = cy + (eng.worldX * sinH + eng.worldY * cosH) * bpScale;
+          const dist = Math.hypot(eng.worldX, eng.worldY);
+          let outX: number, outY: number;
+          if (dist > 0.5) {
+            const oux = eng.worldX / dist, ouy = eng.worldY / dist;
+            outX = oux * cosH - ouy * sinH;
+            outY = oux * sinH + ouy * cosH;
+          } else {
+            outX = -sinH;
+            outY = cosH;
+          }
+          g.circle(ex, ey, 9 * gs).fill({ color: 0xff4400, alpha: 0.12 });
+          g.circle(ex, ey, 5 * gs).fill({ color: 0xff6600, alpha: 0.28 });
+          g.circle(ex, ey, 3 * gs).fill({ color: 0xffaa44, alpha: 0.55 });
+          g.circle(ex, ey, 1.5 * gs).fill({ color: 0xffffff, alpha: 0.8 });
+          if (data.thrustActive) {
+            g.circle(ex, ey, 5 * gs).fill({ color: 0x66aaff, alpha: 0.9 });
+            g.circle(ex + outX * 8 * gs, ey + outY * 8 * gs, 4 * gs).fill({ color: 0x4488ff, alpha: 0.6 });
+            g.circle(ex + outX * 14 * gs, ey + outY * 14 * gs, 2 * gs).fill({ color: 0x2266ff, alpha: 0.3 });
+          }
+        }
+      } else {
+        // Fallback: no engine modules — single glow at stern
+        const backX = cx - sinH * gs * 18;
+        const backY = cy + cosH * gs * 18;
+        g.circle(backX, backY, 9 * gs).fill({ color: 0xff4400, alpha: 0.12 });
+        g.circle(backX, backY, 5 * gs).fill({ color: 0xff6600, alpha: 0.28 });
+        g.circle(backX, backY, 3 * gs).fill({ color: 0xffaa44, alpha: 0.55 });
+        g.circle(backX, backY, 1.5 * gs).fill({ color: 0xffffff, alpha: 0.8 });
+        if (data.thrustActive) {
+          g.circle(backX, backY, 5 * gs).fill({ color: 0x66aaff, alpha: 0.9 });
+          g.circle(backX - sinH * 8 * gs, backY + cosH * 8 * gs, 4 * gs).fill({ color: 0x4488ff, alpha: 0.6 });
+          g.circle(backX - sinH * 14 * gs, backY + cosH * 14 * gs, 2 * gs).fill({ color: 0x2266ff, alpha: 0.3 });
+        }
+      }
     }
 
     // ── Velocity vector ───────────────────────────────────────────────────
@@ -3281,7 +3417,7 @@ export class GameRenderer {
     if (!data.solarPlayerDead) {
       if (data.playerBlueprintModules && data.playerBlueprintModules.length > 0 && data.playerBlueprintCoreRadius) {
         const bpScale = playerTargetR / data.playerBlueprintCoreRadius;
-        this.drawBlueprintShip(g, cx, cy, data.playerHeading, data.playerBlueprintModules, bpScale);
+        this.drawBlueprintShip(g, cx, cy, data.playerHeading, data.playerBlueprintModules, bpScale, getFactionColors("player"));
       } else {
         this.drawDeltaWing(g, cx, cy, data.playerHeading, 0x00ffff, playerTargetR / 16);
       }
@@ -3383,9 +3519,133 @@ export class GameRenderer {
       for (const t of this.galaxySystemLabels) t.visible = false;
     }
 
-    // ── Virtual touch controls (always visible) ───────────────────────────
-    if (!data.mapOpen) {
+    // ── Zoom bar (left edge, always visible unless map open) ─────────────
+    if (!data.mapOpen && data.zoomBar) {
+      this.drawZoomBar(g, data.zoomBar);
+    } else {
+      for (const t of this.zoomBarLabel) t.visible = false;
+    }
+
+    // ── Speed / warp bar (bottom centre, always visible unless map/docked) ──
+    if (!data.mapOpen && !data.docked) {
+      this.drawSpeedWarpBar(g, data);
+    }
+
+    // ── Virtual touch controls (touch devices only) ───────────────────────
+    if (!data.mapOpen && this.isTouchDevice) {
       this.drawSolarVirtualControls(g, data.virtualControls);
+    }
+  }
+
+  private drawSpeedWarpBar(g: Graphics, data: SolarSystemRenderData): void {
+    const cx = this.width / 2;
+    const barH = 10;
+    const barW = 340;
+    const barY = this.height - barH - 6;
+    const barX = cx - barW / 2;
+    const radius = 5;
+
+    const NORMAL_MAX_SPEED_MS = 10000;
+    const speed = Math.hypot(data.playerVelocity.x, data.playerVelocity.y);
+    const warpIntensity = data.warpIntensity ?? 0;
+    const warpCharge = data.warpChargeFraction ?? 0;
+
+    let fraction: number;
+    let fillColor: number;
+    let labelColor: number;
+    let labelText: string;
+
+    if (warpIntensity > 0) {
+      fraction = warpIntensity;
+      fillColor = 0x00eeff;
+      labelColor = 0x00eeff;
+      labelText = warpIntensity >= 0.98 ? "WARP DRIVE" : "WARP DISENGAGING";
+    } else if (warpCharge > 0) {
+      fraction = warpCharge;
+      fillColor = 0xff9900;
+      labelColor = 0xff9900;
+      labelText = "CHARGING WARP";
+    } else {
+      fraction = Math.min(1, speed / NORMAL_MAX_SPEED_MS);
+      // green at low speed → yellow → orange-red at high
+      const t = fraction;
+      const r = Math.round(Math.min(0xff, t * 2 * 0xff));
+      const gr = Math.round(Math.min(0xcc, (1 - Math.max(0, t - 0.5) * 2) * 0xcc));
+      fillColor = (r << 16) | (gr << 8) | 0x11;
+      labelColor = 0x88aacc;
+      const km_s = speed / 1000;
+      labelText = km_s < 10 ? `${km_s.toFixed(1)} km/s` : `${Math.round(km_s)} km/s`;
+    }
+
+    // Track
+    g.roundRect(barX, barY, barW, barH, radius)
+      .fill({ color: 0x000e1a, alpha: 0.80 })
+      .stroke({ color: 0x224455, width: 1, alpha: 0.7 });
+
+    // Fill
+    if (fraction > 0.005) {
+      const fillW = Math.max(radius * 2, barW * fraction);
+      g.roundRect(barX, barY, fillW, barH, radius)
+        .fill({ color: fillColor, alpha: warpIntensity > 0 ? 0.92 : 0.78 });
+    }
+
+    // Subtle animated shimmer when warp is fully active
+    if (warpIntensity >= 0.98) {
+      const shimmer = 0.06 + 0.05 * Math.sin(Date.now() / 150);
+      g.roundRect(barX, barY, barW, barH, radius)
+        .fill({ color: 0xffffff, alpha: shimmer });
+    }
+
+    // Label above the bar
+    this.solarSpeedBarLabel.text = labelText;
+    this.solarSpeedBarLabel.style.fill = labelColor;
+    this.solarSpeedBarLabel.x = cx;
+    this.solarSpeedBarLabel.y = barY - 2;
+    this.solarSpeedBarLabel.visible = true;
+  }
+
+  private drawZoomBar(g: Graphics, bar: { fraction: number; label: string }): void {
+    const x = 12, top = 110, bottom = 540, w = 28;
+    const h = bottom - top;
+    const handleY = bottom - bar.fraction * h;
+
+    // Track background
+    g.roundRect(x, top, w, h, 6).fill({ color: 0x001830, alpha: 0.75 });
+    g.roundRect(x, top, w, h, 6).stroke({ color: 0x224455, width: 1, alpha: 0.8 });
+
+    // Filled portion (below handle)
+    const fillH = bottom - handleY;
+    if (fillH > 0) {
+      g.roundRect(x + 2, handleY, w - 4, fillH, 4).fill({ color: 0x006688, alpha: 0.7 });
+    }
+
+    // Notch marks at 25% intervals
+    for (let tick = 1; tick < 4; tick++) {
+      const ty = bottom - (tick / 4) * h;
+      g.moveTo(x + 4, ty).lineTo(x + w - 4, ty).stroke({ color: 0x334455, width: 0.8, alpha: 0.6 });
+    }
+
+    // Draggable handle
+    const hcx = x + w / 2;
+    g.circle(hcx, handleY, 9).fill({ color: 0x00ccff, alpha: 0.85 });
+    g.circle(hcx, handleY, 9).stroke({ color: 0x00ffff, width: 1.5, alpha: 0.9 });
+    g.circle(hcx, handleY, 4).fill({ color: 0xffffff, alpha: 0.6 });
+
+    // Plus / minus labels
+    g.moveTo(hcx - 4, top - 14).lineTo(hcx + 4, top - 14).stroke({ color: 0x00ccff, width: 1.5, alpha: 0.8 });
+    g.moveTo(hcx, top - 18).lineTo(hcx, top - 10).stroke({ color: 0x00ccff, width: 1.5, alpha: 0.8 });
+    g.moveTo(hcx - 4, bottom + 10).lineTo(hcx + 4, bottom + 10).stroke({ color: 0x00ccff, width: 1.5, alpha: 0.8 });
+
+    // Zoom level label below the bar (anchor is 0.5,0.5 — position is center)
+    this.ensureTextPool(this.zoomBarLabel, 1, 12);
+    const lbl = this.zoomBarLabel[0];
+    if (lbl) {
+      lbl.visible = true;
+      lbl.text = bar.label;
+      lbl.style.fill = 0x00ccff;
+      lbl.style.fontSize = 12;
+      lbl.x = x + w / 2;
+      lbl.y = bottom + 24;
     }
   }
 
@@ -3555,10 +3815,16 @@ export class GameRenderer {
     headingDeg: number,
     modules: ReadonlyArray<{
       vertices: ReadonlyArray<{ x: number; y: number }>;
+      worldX: number;
+      worldY: number;
       moduleType: string;
+      partKind: string;
+      grade: number;
     }>,
     bpScale: number,
+    palette?: FactionColors,
   ): void {
+    const p = palette ?? getFactionColors();
     const h = (headingDeg * Math.PI) / 180;
     const cosH = Math.cos(h);
     const sinH = Math.sin(h);
@@ -3567,10 +3833,10 @@ export class GameRenderer {
       y: cy + (v.x * sinH + v.y * cosH) * bpScale,
     });
 
-    // Hull colors — dark materials, not gaudy type-colors
-    const hull: Record<string, number> = {
-      core: 0x0b1825, weapon: 0x170e08, external: 0x060f1a,
-      internal: 0x0c1005, structure: 0x0d1218, converter: 0x0d0818,
+    // Hull base colors by broad type — faction tinted
+    const hullByType: Record<string, number> = {
+      core: p.hull.fill, weapon: 0x170e08, external: 0x060f1a,
+      internal: 0x0c1005, structure: 0x0d1218, converter: 0x0d0818, factory: 0x0c1005,
     };
 
     for (const mod of modules) {
@@ -3587,153 +3853,460 @@ export class GameRenderer {
 
       // Outward direction: from ship center (cx,cy) to module centroid
       const ddx = mx - cx, ddy = my - cy, ddist = Math.hypot(ddx, ddy);
-      // For core (near center), fall back to ship heading as "forward"
       const outX = ddist > 0.5 ? ddx / ddist : sinH;
       const outY = ddist > 0.5 ? ddy / ddist : -cosH;
+      const perpX = -outY, perpY = outX;
+
+      // Grade palette for physical material + effect colors
+      const gp = getGradeColors(mod.grade);
 
       // ── Base hull polygon ──────────────────────────────────────────────
-      const hullColor = hull[mod.moduleType] ?? 0x0d1218;
+      const hullColor = hullByType[mod.moduleType] ?? 0x0d1218;
       g.moveTo(pts[0]!.x, pts[0]!.y);
       for (let i = 1; i < N; i++) g.lineTo(pts[i]!.x, pts[i]!.y);
       g.closePath().fill({ color: hullColor, alpha: 0.95 });
-
-      // Hull outline — brighter where the module faces outward (bevel effect)
       g.moveTo(pts[0]!.x, pts[0]!.y);
       for (let i = 1; i < N; i++) g.lineTo(pts[i]!.x, pts[i]!.y);
-      g.closePath().stroke({ color: 0x3a5570, width: 0.7, alpha: 0.85 });
+      g.closePath().stroke({ color: p.hull.edge, width: 0.7, alpha: 0.85 });
 
-      // ── Type-specific details ──────────────────────────────────────────
-      const perpX = -outY, perpY = outX;
+      // ── Per-kind detail ────────────────────────────────────────────────
 
-      if (mod.moduleType === "core") {
-        // Concentric reactor rings with spokes
-        g.circle(mx, my, R * 0.62).stroke({ color: 0x1155cc, width: 0.8, alpha: 0.7 });
-        g.circle(mx, my, R * 0.40).fill({ color: 0x071840, alpha: 0.8 });
-        g.circle(mx, my, R * 0.40).stroke({ color: 0x2266ee, width: 0.6, alpha: 0.6 });
-        g.circle(mx, my, R * 0.20).fill({ color: 0x1144bb, alpha: 0.9 });
-        g.circle(mx, my, R * 0.08).fill({ color: 0x66aaff, alpha: 0.95 });
+      if (mod.partKind === "core") {
+        // Concentric reactor rings with spokes — grade colors for inner glow
+        g.circle(mx, my, R * 0.62).stroke({ color: p.reactor.ring, width: 0.8, alpha: 0.7 });
+        g.circle(mx, my, R * 0.40).fill({ color: gp.surface, alpha: 0.8 });
+        g.circle(mx, my, R * 0.40).stroke({ color: p.reactor.ring, width: 0.6, alpha: 0.6 });
+        g.circle(mx, my, R * 0.22).fill({ color: gp.highlight, alpha: 0.4 });
+        g.circle(mx, my, R * 0.08).fill({ color: gp.effect, alpha: 0.95 });
         g.circle(mx, my, R * 0.03).fill({ color: 0xffffff, alpha: 1 });
-        for (const p of pts) {
-          const smx = (mx + p.x) * 0.5, smy = (my + p.y) * 0.5;
-          g.moveTo(mx, my).lineTo(smx, smy).stroke({ color: 0x224488, width: 0.5, alpha: 0.55 });
-          g.circle(smx, smy, R * 0.04).fill({ color: 0x3377cc, alpha: 0.6 });
+        for (const pt of pts) {
+          const smx = (mx + pt.x) * 0.5, smy = (my + pt.y) * 0.5;
+          g.moveTo(mx, my).lineTo(smx, smy).stroke({ color: p.engine.glow, width: 0.5, alpha: 0.55 });
+          g.circle(smx, smy, R * 0.04).fill({ color: p.reactor.ring, alpha: 0.6 });
         }
+        for (const pt of pts) g.circle(pt.x, pt.y, R * 0.04).fill({ color: p.lights, alpha: 0.8 });
 
-      } else if (mod.moduleType === "weapon") {
-        // Gun barrel from centroid toward tip, then extending past the polygon
-        const barrelBase = R * 0.15;
-        const barrelTip = R * 1.15;    // barrel extends past polygon edge
-        const halfW = R * 0.20;
-        const bx0 = mx + outX * barrelBase, by0 = my + outY * barrelBase;
-        const bxtip = mx + outX * barrelTip, bytip = my + outY * barrelTip;
-
-        // Barrel housing (trapezoidal)
-        g.moveTo(bx0 + perpX * halfW,      by0 + perpY * halfW)
-         .lineTo(bxtip + perpX * halfW * 0.5, bytip + perpY * halfW * 0.5)
-         .lineTo(bxtip - perpX * halfW * 0.5, bytip - perpY * halfW * 0.5)
-         .lineTo(bx0 - perpX * halfW,      by0 - perpY * halfW)
-         .closePath().fill({ color: 0x223344, alpha: 0.95 });
-        // Top edge highlight
-        g.moveTo(bx0 + perpX * halfW, by0 + perpY * halfW)
-         .lineTo(bxtip + perpX * halfW * 0.5, bytip + perpY * halfW * 0.5)
-         .stroke({ color: 0x778899, width: 0.7, alpha: 0.8 });
-        // Barrel rings
+      } else if (mod.partKind === "cannon") {
+        // Trapezoidal barrel, grade material, grade muzzle
+        const bBase = R * 0.15, bTip = R * 1.15, hw = R * 0.20;
+        const bx0 = mx + outX * bBase, by0 = my + outY * bBase;
+        const bxtip = mx + outX * bTip, bytip = my + outY * bTip;
+        g.moveTo(bx0 + perpX * hw,       by0 + perpY * hw)
+         .lineTo(bxtip + perpX * hw * 0.5, bytip + perpY * hw * 0.5)
+         .lineTo(bxtip - perpX * hw * 0.5, bytip - perpY * hw * 0.5)
+         .lineTo(bx0 - perpX * hw,        by0 - perpY * hw)
+         .closePath().fill({ color: gp.surface, alpha: 0.95 });
+        g.moveTo(bx0 + perpX * hw, by0 + perpY * hw)
+         .lineTo(bxtip + perpX * hw * 0.5, bytip + perpY * hw * 0.5)
+         .stroke({ color: gp.highlight, width: 0.7, alpha: 0.8 });
         for (let ri = 0; ri < 3; ri++) {
           const t = 0.3 + ri * 0.28;
-          const rx = mx + outX * R * (0.15 + t * 1.0);
-          const ry = my + outY * R * (0.15 + t * 1.0);
-          const rw = halfW * (1.1 - ri * 0.1);
-          g.moveTo(rx + perpX * rw, ry + perpY * rw)
-           .lineTo(rx - perpX * rw, ry - perpY * rw)
-           .stroke({ color: ri === 0 ? 0x556677 : 0x445566, width: 0.8, alpha: 0.85 });
+          const rx = mx + outX * R * (0.15 + t), ry = my + outY * R * (0.15 + t);
+          const rw = hw * (1.1 - ri * 0.1);
+          g.moveTo(rx + perpX * rw, ry + perpY * rw).lineTo(rx - perpX * rw, ry - perpY * rw)
+           .stroke({ color: gp.highlight, width: 0.8, alpha: 0.75 });
         }
-        // Muzzle glow (orange-red heat)
-        g.circle(bxtip, bytip, R * 0.22).fill({ color: 0xff3300, alpha: 0.18 });
-        g.circle(bxtip, bytip, R * 0.12).fill({ color: 0xff6600, alpha: 0.55 });
-        g.circle(bxtip, bytip, R * 0.055).fill({ color: 0xffcc44, alpha: 0.9 });
+        g.circle(bxtip, bytip, R * 0.22).fill({ color: gp.glow, alpha: 0.20 });
+        g.circle(bxtip, bytip, R * 0.12).fill({ color: gp.effect, alpha: 0.60 });
+        g.circle(bxtip, bytip, R * 0.055).fill({ color: gp.effect, alpha: 0.95 });
         g.circle(bxtip, bytip, R * 0.022).fill({ color: 0xffffff, alpha: 1 });
-        // Breech block at base
         g.circle(mx - outX * R * 0.18, my - outY * R * 0.18, R * 0.25)
-         .fill({ color: 0x1a2a3a, alpha: 0.9 })
-         .stroke({ color: 0x445566, width: 0.5, alpha: 0.7 });
+         .fill({ color: gp.surface, alpha: 0.9 }).stroke({ color: p.hull.edge, width: 0.5, alpha: 0.7 });
 
-      } else if (mod.moduleType === "external") {
-        // Sensor/emitter pod: projector dish at tip direction
-        const emitX = mx + outX * R * 0.55, emitY = my + outY * R * 0.55;
-        // Housing strut
-        g.moveTo(mx - outX * R * 0.1, my - outY * R * 0.1)
-         .lineTo(emitX, emitY)
-         .stroke({ color: 0x335566, width: 0.8, alpha: 0.7 });
-        // Emitter dish housing
-        g.circle(emitX, emitY, R * 0.35).fill({ color: 0x0a1e30, alpha: 0.92 });
-        g.circle(emitX, emitY, R * 0.35).stroke({ color: 0x0099cc, width: 0.8, alpha: 0.85 });
-        // Inner emitter lens
-        g.circle(emitX, emitY, R * 0.18).fill({ color: 0x004466, alpha: 0.9 });
-        g.circle(emitX, emitY, R * 0.09).fill({ color: 0x00bbff, alpha: 0.95 });
-        g.circle(emitX, emitY, R * 0.035).fill({ color: 0xffffff, alpha: 1 });
-        // Radiating energy arcs (3 beams outward)
-        for (let ai = -1; ai <= 1; ai++) {
-          const ang = Math.atan2(outY, outX) + ai * 0.45;
-          g.moveTo(emitX, emitY)
-           .lineTo(emitX + Math.cos(ang) * R * 0.55, emitY + Math.sin(ang) * R * 0.55)
-           .stroke({ color: 0x0099ff, width: 0.5, alpha: ai === 0 ? 0.55 : 0.3 });
+      } else if (mod.partKind === "laser") {
+        // Long slim emitter spine — no rings, focusing crystal at tip
+        const spineTip = R * 1.25, spineBase = R * 0.15, hw = R * 0.08;
+        const sx0 = mx + outX * spineBase, sy0 = my + outY * spineBase;
+        const sxtip = mx + outX * spineTip, sytip = my + outY * spineTip;
+        // Emitter spine
+        g.moveTo(sx0 + perpX * hw, sy0 + perpY * hw)
+         .lineTo(sxtip + perpX * hw * 0.3, sytip + perpY * hw * 0.3)
+         .lineTo(sxtip - perpX * hw * 0.3, sytip - perpY * hw * 0.3)
+         .lineTo(sx0 - perpX * hw, sy0 - perpY * hw)
+         .closePath().fill({ color: gp.surface, alpha: 0.95 });
+        g.moveTo(sx0 + perpX * hw, sy0 + perpY * hw)
+         .lineTo(sxtip + perpX * hw * 0.3, sytip + perpY * hw * 0.3)
+         .stroke({ color: gp.highlight, width: 0.7, alpha: 0.9 });
+        // Focusing crystal lens
+        g.circle(sxtip, sytip, R * 0.16).fill({ color: gp.effect, alpha: 0.35 });
+        g.circle(sxtip, sytip, R * 0.10).fill({ color: gp.effect, alpha: 0.80 });
+        g.circle(sxtip, sytip, R * 0.04).fill({ color: 0xffffff, alpha: 1.0 });
+        // Lens beam forward
+        g.moveTo(sxtip, sytip)
+         .lineTo(sxtip + outX * R * 0.5, sytip + outY * R * 0.5)
+         .stroke({ color: gp.effect, width: 0.8, alpha: 0.5 });
+        // Optic housing block at base
+        g.circle(mx - outX * R * 0.1, my - outY * R * 0.1, R * 0.22)
+         .fill({ color: gp.surface, alpha: 0.85 }).stroke({ color: gp.highlight, width: 0.5, alpha: 0.6 });
+        // Faction-colored trim light
+        g.circle(mx, my, R * 0.06).fill({ color: p.lights, alpha: 0.7 });
+
+      } else if (mod.partKind === "torpedo") {
+        // Rectangular launcher tube array — 3 openings
+        const tubeW = R * 0.55, tubeH = R * 0.80;
+        const tx = mx + outX * R * 0.2, ty = my + outY * R * 0.2;
+        g.rect(tx - perpX * tubeW - outX * tubeH * 0.5, ty - perpY * tubeW - outY * tubeH * 0.5,
+               perpX * tubeW * 2 + outX * tubeH, perpY === 0 ? tubeH : perpX * tubeW * 2 + outY * tubeH);
+        // Draw tube array as 3 circular openings
+        for (let ti = -1; ti <= 1; ti++) {
+          const tx2 = mx + outX * R * 0.55 + perpX * ti * R * 0.28;
+          const ty2 = my + outY * R * 0.55 + perpY * ti * R * 0.28;
+          g.circle(tx2, ty2, R * 0.14).fill({ color: 0x050505, alpha: 0.95 });
+          g.circle(tx2, ty2, R * 0.14).stroke({ color: gp.surface, width: 0.8, alpha: 0.9 });
+          g.circle(tx2, ty2, R * 0.07).fill({ color: gp.effect, alpha: 0.55 });
         }
-        // Side mounting flanges
-        g.moveTo(mx + perpX * R * 0.4, my + perpY * R * 0.4)
-         .lineTo(mx - perpX * R * 0.4, my - perpY * R * 0.4)
-         .stroke({ color: 0x224455, width: 0.6, alpha: 0.6 });
+        // Housing body fill
+        g.moveTo(mx + outX * R * 0.1 - perpX * R * 0.45, my + outY * R * 0.1 - perpY * R * 0.45)
+         .lineTo(mx + outX * R * 0.8 - perpX * R * 0.45, my + outY * R * 0.8 - perpY * R * 0.45)
+         .lineTo(mx + outX * R * 0.8 + perpX * R * 0.45, my + outY * R * 0.8 + perpY * R * 0.45)
+         .lineTo(mx + outX * R * 0.1 + perpX * R * 0.45, my + outY * R * 0.1 + perpY * R * 0.45)
+         .closePath().stroke({ color: gp.surface, width: 1.0, alpha: 0.7 });
+        g.circle(mx, my, R * 0.06).fill({ color: p.lights, alpha: 0.7 });
 
-      } else if (mod.moduleType === "internal") {
-        // Power reactor / thruster core — amber glow
-        g.circle(mx, my, R * 0.50).fill({ color: 0x1a1000, alpha: 0.85 });
-        g.circle(mx, my, R * 0.50).stroke({ color: 0x996600, width: 0.7, alpha: 0.7 });
-        g.circle(mx, my, R * 0.28).fill({ color: 0x5a3000, alpha: 0.9 });
-        g.circle(mx, my, R * 0.14).fill({ color: 0xffaa00, alpha: 0.9 });
+      } else if (mod.partKind === "plasma") {
+        // Plasma containment globe wrapped in coils
+        const globeX = mx + outX * R * 0.55, globeY = my + outY * R * 0.55;
+        // Containment strut
+        g.moveTo(mx - outX * R * 0.1, my - outY * R * 0.1)
+         .lineTo(globeX, globeY).stroke({ color: gp.surface, width: 1.0, alpha: 0.8 });
+        // Coil rings around globe
+        for (let ci = 0; ci < 3; ci++) {
+          const ca = Math.atan2(outY, outX) + (ci - 1) * 0.55;
+          g.moveTo(globeX - Math.cos(ca) * R * 0.40, globeY - Math.sin(ca) * R * 0.40)
+           .lineTo(globeX + Math.cos(ca) * R * 0.40, globeY + Math.sin(ca) * R * 0.40)
+           .stroke({ color: gp.highlight, width: 1.2, alpha: 0.75 });
+        }
+        g.circle(globeX, globeY, R * 0.34).fill({ color: gp.glow, alpha: 0.25 });
+        g.circle(globeX, globeY, R * 0.22).fill({ color: gp.effect, alpha: 0.55 });
+        g.circle(globeX, globeY, R * 0.10).fill({ color: 0xffffff, alpha: 0.9 });
+        g.circle(mx, my, R * 0.06).fill({ color: p.lights, alpha: 0.7 });
+
+      } else if (mod.partKind === "radar") {
+        // Parabolic dish on mounting strut
+        const dishX = mx + outX * R * 0.50, dishY = my + outY * R * 0.50;
+        g.moveTo(mx - outX * R * 0.1, my - outY * R * 0.1)
+         .lineTo(dishX, dishY).stroke({ color: gp.surface, width: 0.9, alpha: 0.75 });
+        // Dish arc
+        const dishAng = Math.atan2(outY, outX);
+        const da = 0.9;
+        g.moveTo(dishX + Math.cos(dishAng - da) * R * 0.42, dishY + Math.sin(dishAng - da) * R * 0.42)
+         .arc(dishX, dishY, R * 0.42, dishAng - da, dishAng + da)
+         .stroke({ color: gp.highlight, width: 1.2, alpha: 0.85 });
+        // Dish fill line across
+        g.moveTo(dishX + Math.cos(dishAng - da) * R * 0.42, dishY + Math.sin(dishAng - da) * R * 0.42)
+         .lineTo(dishX + Math.cos(dishAng + da) * R * 0.42, dishY + Math.sin(dishAng + da) * R * 0.42)
+         .stroke({ color: gp.surface, width: 0.7, alpha: 0.6 });
+        // Radar sweep arcs (faction beam color)
+        for (let ai = 1; ai <= 2; ai++) {
+          const sr = R * (0.55 + ai * 0.2);
+          g.moveTo(dishX + Math.cos(dishAng - 0.35) * sr, dishY + Math.sin(dishAng - 0.35) * sr)
+           .arc(dishX, dishY, sr, dishAng - 0.35, dishAng + 0.35)
+           .stroke({ color: p.sensors.beam, width: 0.5, alpha: 0.45 - ai * 0.1 });
+        }
+        // Dish center feed
+        g.circle(dishX, dishY, R * 0.06).fill({ color: p.sensors.lens, alpha: 0.9 });
+
+      } else if (mod.partKind === "lidar") {
+        // Fan of 5 thin pointed sensor rods
+        const baseAng = Math.atan2(outY, outX);
+        for (let li = -2; li <= 2; li++) {
+          const la = baseAng + li * 0.22;
+          const tipDist = R * (1.0 - Math.abs(li) * 0.08);
+          const lx = mx + Math.cos(la) * tipDist, ly = my + Math.sin(la) * tipDist;
+          g.moveTo(mx + outX * R * 0.12, my + outY * R * 0.12)
+           .lineTo(lx, ly).stroke({ color: gp.surface, width: 0.9, alpha: 0.8 });
+          g.circle(lx, ly, R * 0.06).fill({ color: gp.effect, alpha: li === 0 ? 0.9 : 0.6 });
+        }
+        // Central housing
+        g.circle(mx + outX * R * 0.12, my + outY * R * 0.12, R * 0.15)
+         .fill({ color: gp.surface, alpha: 0.85 }).stroke({ color: p.hull.edge, width: 0.5, alpha: 0.7 });
+
+      } else if (mod.partKind === "scrambler") {
+        // X-crossed dipole antenna + interference rings
+        const ant = R * 0.75;
+        for (let ai = 0; ai < 2; ai++) {
+          const aa = Math.atan2(outY, outX) + ai * 1.5708;
+          g.moveTo(mx - Math.cos(aa) * ant, my - Math.sin(aa) * ant)
+           .lineTo(mx + Math.cos(aa) * ant, my + Math.sin(aa) * ant)
+           .stroke({ color: gp.surface, width: 1.1, alpha: 0.85 });
+          // End knobs
+          g.circle(mx + Math.cos(aa) * ant, my + Math.sin(aa) * ant, R * 0.07)
+           .fill({ color: gp.highlight, alpha: 0.9 });
+          g.circle(mx - Math.cos(aa) * ant, my - Math.sin(aa) * ant, R * 0.07)
+           .fill({ color: gp.highlight, alpha: 0.9 });
+        }
+        // Interference rings
+        for (let ri = 1; ri <= 2; ri++) {
+          g.circle(mx, my, R * ri * 0.38).stroke({ color: gp.effect, width: 0.6, alpha: 0.4 - ri * 0.1 });
+        }
+        g.circle(mx, my, R * 0.10).fill({ color: gp.effect, alpha: 0.8 });
+
+      } else if (mod.partKind === "webber") {
+        // Warp disruptor: curling tentacle beams
+        const wbAng = Math.atan2(outY, outX);
+        for (let wi = 0; wi < 5; wi++) {
+          const wa = wbAng + (wi - 2) * 0.42;
+          const wLen = R * (0.85 + (wi % 2) * 0.15);
+          const ctrlX = mx + Math.cos(wa + 0.5) * R * 0.6;
+          const ctrlY = my + Math.sin(wa + 0.5) * R * 0.6;
+          const endX = mx + Math.cos(wa) * wLen, endY = my + Math.sin(wa) * wLen;
+          g.moveTo(mx + outX * R * 0.1, my + outY * R * 0.1)
+           .quadraticCurveTo(ctrlX, ctrlY, endX, endY)
+           .stroke({ color: gp.effect, width: 0.8, alpha: 0.65 });
+          g.circle(endX, endY, R * 0.07).fill({ color: gp.effect, alpha: 0.8 });
+        }
+        g.circle(mx + outX * R * 0.1, my + outY * R * 0.1, R * 0.18)
+         .fill({ color: gp.surface, alpha: 0.85 }).stroke({ color: gp.highlight, width: 0.6, alpha: 0.7 });
+
+      } else if (mod.partKind === "thruster") {
+        // Bell-nozzle cone, grade material, grade exhaust
+        const nozzleX = mx - outX * R * 0.15, nozzleY = my - outY * R * 0.15;
+        const bell = R * 0.45;
+        // Nozzle bell
+        g.moveTo(nozzleX + perpX * bell * 0.5, nozzleY + perpY * bell * 0.5)
+         .lineTo(nozzleX + perpX * bell, nozzleY + perpY * bell - outY * R * 0.5)
+         .lineTo(nozzleX - perpX * bell, nozzleY - perpY * bell - outY * R * 0.5)
+         .lineTo(nozzleX - perpX * bell * 0.5, nozzleY - perpY * bell * 0.5)
+         .closePath().fill({ color: gp.surface, alpha: 0.90 });
+        // Nozzle rim
+        g.moveTo(nozzleX + perpX * bell, nozzleY + perpY * bell - outY * R * 0.5)
+         .lineTo(nozzleX - perpX * bell, nozzleY - perpY * bell - outY * R * 0.5)
+         .stroke({ color: gp.highlight, width: 1.0, alpha: 0.9 });
+        // Exhaust jet (outward from back)
+        g.circle(nozzleX - outX * R * 0.35, nozzleY - outY * R * 0.35, R * 0.28)
+         .fill({ color: gp.effect, alpha: 0.35 });
+        g.circle(nozzleX - outX * R * 0.35, nozzleY - outY * R * 0.35, R * 0.14)
+         .fill({ color: gp.effect, alpha: 0.70 });
+        g.circle(nozzleX - outX * R * 0.35, nozzleY - outY * R * 0.35, R * 0.055)
+         .fill({ color: 0xffffff, alpha: 0.9 });
+        // Outer glow from faction
+        g.circle(nozzleX, nozzleY, R * 0.48).stroke({ color: p.engine.glow, width: 0.5, alpha: 0.55 });
+
+      } else if (mod.partKind === "ion-engine") {
+        // Grid accelerator + narrow ion plume
+        // Acceleration grids (3 bars)
+        for (let gi = 0; gi < 3; gi++) {
+          const gOff = (gi - 1) * R * 0.30;
+          const gBack = R * (-0.1 - gi * 0.22);
+          const gx = mx + outX * gBack + perpX * gOff;
+          const gy = my + outY * gBack + perpY * gOff;
+          g.moveTo(gx + perpX * R * 0.42, gy + perpY * R * 0.42)
+           .lineTo(gx - perpX * R * 0.42, gy - perpY * R * 0.42)
+           .stroke({ color: gp.surface, width: 1.0, alpha: 0.85 });
+          // Grid gaps
+          for (let ggi = -1; ggi <= 1; ggi++) {
+            g.circle(gx + perpX * ggi * R * 0.2, gy + perpY * ggi * R * 0.2, R * 0.04)
+             .fill({ color: gp.effect, alpha: 0.6 });
+          }
+        }
+        // Narrow ion plume
+        const plumeBack = R * 0.9;
+        g.moveTo(mx - outX * R * 0.1 + perpX * R * 0.12, my - outY * R * 0.1 + perpY * R * 0.12)
+         .lineTo(mx - outX * plumeBack, my - outY * plumeBack)
+         .lineTo(mx - outX * R * 0.1 - perpX * R * 0.12, my - outY * R * 0.1 - perpY * R * 0.12)
+         .stroke({ color: gp.effect, width: 0.8, alpha: 0.45 });
+        g.circle(mx - outX * plumeBack, my - outY * plumeBack, R * 0.12)
+         .fill({ color: gp.effect, alpha: 0.55 });
+        g.circle(mx - outX * plumeBack * 0.5, my - outY * plumeBack * 0.5, R * 0.06)
+         .fill({ color: 0xffffff, alpha: 0.7 });
+
+      } else if (mod.partKind === "warp-nacelle") {
+        // Dimensional field ring coils around central spine
+        const spineLen = R * 0.8;
+        // Central spine
+        g.moveTo(mx - outX * spineLen * 0.4, my - outY * spineLen * 0.4)
+         .lineTo(mx + outX * spineLen * 0.4, my + outY * spineLen * 0.4)
+         .stroke({ color: gp.surface, width: 1.2, alpha: 0.9 });
+        // Two ring coils
+        for (let ri = 0; ri < 2; ri++) {
+          const rOff = (ri - 0.5) * R * 0.35;
+          const rx = mx + perpX * rOff, ry = my + perpY * rOff;
+          g.circle(rx, ry, R * 0.32).stroke({ color: gp.highlight, width: 1.0, alpha: 0.80 });
+          g.circle(rx, ry, R * 0.18).fill({ color: gp.effect, alpha: 0.30 });
+          g.circle(rx, ry, R * 0.09).fill({ color: gp.effect, alpha: 0.65 });
+        }
+        // Warp field glow between coils
+        g.circle(mx, my, R * 0.14).fill({ color: gp.glow, alpha: 0.55 });
+        g.circle(mx, my, R * 0.06).fill({ color: 0xffffff, alpha: 0.8 });
+
+      } else if (mod.partKind === "gravity-drive") {
+        // Concentric rings collapsing to singularity
+        for (let ri = 3; ri >= 1; ri--) {
+          const rr = R * ri * 0.20;
+          g.circle(mx, my, rr).stroke({ color: gp.highlight, width: 0.8, alpha: 0.4 + ri * 0.15 });
+        }
+        g.circle(mx, my, R * 0.22).fill({ color: gp.glow, alpha: 0.40 });
+        g.circle(mx, my, R * 0.12).fill({ color: gp.effect, alpha: 0.70 });
+        g.circle(mx, my, R * 0.05).fill({ color: 0xffffff, alpha: 1.0 });
+        // Gravity distortion spokes
+        for (let si = 0; si < 4; si++) {
+          const sa = (si / 4) * Math.PI * 2;
+          g.moveTo(mx + Math.cos(sa) * R * 0.22, my + Math.sin(sa) * R * 0.22)
+           .lineTo(mx + Math.cos(sa) * R * 0.65, my + Math.sin(sa) * R * 0.65)
+           .stroke({ color: gp.effect, width: 0.6, alpha: 0.45 });
+        }
+        // Outer structure ring
+        g.circle(mx, my, R * 0.70).stroke({ color: gp.surface, width: 1.0, alpha: 0.65 });
+
+      } else if (mod.partKind === "shield") {
+        // Hemispherical dome projector — faction lens base, grade dome energy
+        const projX = mx + outX * R * 0.35, projY = my + outY * R * 0.35;
+        // Projector node
+        g.circle(projX, projY, R * 0.26).fill({ color: gp.surface, alpha: 0.9 });
+        g.circle(projX, projY, R * 0.14).fill({ color: p.sensors.lens, alpha: 0.85 });
+        g.circle(projX, projY, R * 0.06).fill({ color: 0xffffff, alpha: 1.0 });
+        // Dome arc
+        const dAng = Math.atan2(outY, outX);
+        g.moveTo(projX + Math.cos(dAng - 1.1) * R * 0.65, projY + Math.sin(dAng - 1.1) * R * 0.65)
+         .arc(projX, projY, R * 0.65, dAng - 1.1, dAng + 1.1)
+         .stroke({ color: gp.effect, width: 1.2, alpha: 0.60 });
+        // Energy filament lines
+        for (let fi = -1; fi <= 1; fi++) {
+          const fa = dAng + fi * 0.55;
+          g.moveTo(projX, projY)
+           .lineTo(projX + Math.cos(fa) * R * 0.60, projY + Math.sin(fa) * R * 0.60)
+           .stroke({ color: gp.effect, width: 0.5, alpha: 0.35 });
+        }
+
+      } else if (mod.partKind === "armor") {
+        // Overlapping angled plates + bolt detail — grade surface
+        const plates = [
+          { ox: outX * R * 0.15, oy: outY * R * 0.15, w: R * 0.5, h: R * 0.3 },
+          { ox: -outX * R * 0.1 + perpX * R * 0.22, oy: -outY * R * 0.1 + perpY * R * 0.22, w: R * 0.4, h: R * 0.25 },
+          { ox: -outX * R * 0.1 - perpX * R * 0.22, oy: -outY * R * 0.1 - perpY * R * 0.22, w: R * 0.4, h: R * 0.25 },
+        ];
+        for (const pl of plates) {
+          const px = mx + pl.ox, py = my + pl.oy;
+          g.moveTo(px - outX * pl.w + perpX * pl.h, py - outY * pl.w + perpY * pl.h)
+           .lineTo(px + outX * pl.w + perpX * pl.h, py + outY * pl.w + perpY * pl.h)
+           .lineTo(px + outX * pl.w - perpX * pl.h, py + outY * pl.w - perpY * pl.h)
+           .lineTo(px - outX * pl.w - perpX * pl.h, py - outY * pl.w - perpY * pl.h)
+           .closePath().fill({ color: gp.surface, alpha: 0.85 })
+           .stroke({ color: gp.highlight, width: 0.6, alpha: 0.75 });
+          // Rivets
+          for (let ri = -1; ri <= 1; ri += 2) {
+            g.circle(px + perpX * pl.h * 0.7 * ri, py + perpY * pl.h * 0.7 * ri, R * 0.05)
+             .fill({ color: gp.highlight, alpha: 0.9 });
+          }
+        }
+
+      } else if (mod.partKind === "cloak") {
+        // Phase emitter — shimmer wave rings at low alpha
+        const cloakX = mx + outX * R * 0.3, cloakY = my + outY * R * 0.3;
+        g.circle(cloakX, cloakY, R * 0.28).fill({ color: gp.surface, alpha: 0.7 });
+        g.circle(cloakX, cloakY, R * 0.14).fill({ color: gp.effect, alpha: 0.5 });
+        g.circle(cloakX, cloakY, R * 0.06).fill({ color: 0xffffff, alpha: 0.65 });
+        for (let si = 1; si <= 3; si++) {
+          g.circle(cloakX, cloakY, R * si * 0.28)
+           .stroke({ color: gp.effect, width: 0.6, alpha: 0.30 - si * 0.06 });
+        }
+        // Phase shimmer dots (irregular pattern)
+        const shimAngles = [0.3, 1.1, 2.0, 3.3, 4.5, 5.2];
+        for (const sa of shimAngles) {
+          const sdist = R * (0.42 + (sa % 0.5) * 0.3);
+          g.circle(mx + Math.cos(sa) * sdist, my + Math.sin(sa) * sdist, R * 0.04)
+           .fill({ color: gp.effect, alpha: 0.30 });
+        }
+
+      } else if (mod.partKind === "warp-stabilizer") {
+        // 3 cross-rods with field indicator globes at tips
+        const stbAng = Math.atan2(outY, outX);
+        for (let wi = 0; wi < 3; wi++) {
+          const wa = stbAng + (wi / 3) * Math.PI * 2;
+          const rodLen = R * 0.68;
+          const tipX = mx + Math.cos(wa) * rodLen, tipY = my + Math.sin(wa) * rodLen;
+          g.moveTo(mx, my).lineTo(tipX, tipY)
+           .stroke({ color: gp.surface, width: 1.1, alpha: 0.85 });
+          g.circle(tipX, tipY, R * 0.14).fill({ color: gp.effect, alpha: 0.70 });
+          g.circle(tipX, tipY, R * 0.06).fill({ color: 0xffffff, alpha: 0.9 });
+        }
+        // Central hub
+        g.circle(mx, my, R * 0.18).fill({ color: gp.surface, alpha: 0.9 })
+         .stroke({ color: gp.highlight, width: 0.7, alpha: 0.8 });
+
+      } else if (mod.partKind === "reactor") {
+        // Pulsing power rings — faction ring, grade core
+        g.circle(mx, my, R * 0.50).fill({ color: gp.surface, alpha: 0.80 });
+        g.circle(mx, my, R * 0.50).stroke({ color: p.engine.glow, width: 0.7, alpha: 0.7 });
+        g.circle(mx, my, R * 0.30).fill({ color: gp.highlight, alpha: 0.35 });
+        g.circle(mx, my, R * 0.14).fill({ color: gp.effect, alpha: 0.90 });
         g.circle(mx, my, R * 0.055).fill({ color: 0xffffff, alpha: 0.9 });
-        // Power conduit lines to each side midpoint
         for (let i = 0; i < N; i++) {
           const s = pts[i]!, e = pts[(i + 1) % N]!;
           const smx = (s.x + e.x) / 2, smy = (s.y + e.y) / 2;
-          g.moveTo(mx, my).lineTo(smx, smy).stroke({ color: 0x886600, width: 0.5, alpha: 0.5 });
-          g.circle(smx, smy, R * 0.05).fill({ color: 0xcc8800, alpha: 0.6 });
+          g.moveTo(mx, my).lineTo(smx, smy).stroke({ color: p.engine.glow, width: 0.5, alpha: 0.5 });
+          g.circle(smx, smy, R * 0.05).fill({ color: gp.effect, alpha: 0.55 });
         }
 
-      } else if (mod.moduleType === "structure") {
-        // Girder cross-bracing pattern
+      } else if (mod.partKind === "crew-quarters") {
+        // Cylindrical hab module with porthole windows
+        g.circle(mx, my, R * 0.52).fill({ color: gp.surface, alpha: 0.75 });
+        g.circle(mx, my, R * 0.52).stroke({ color: p.hull.edge, width: 0.7, alpha: 0.7 });
+        // Porthole windows (faction light color)
+        for (let wi = 0; wi < 3; wi++) {
+          const wa = (wi / 3) * Math.PI * 2;
+          const wx = mx + Math.cos(wa) * R * 0.32, wy = my + Math.sin(wa) * R * 0.32;
+          g.circle(wx, wy, R * 0.10).fill({ color: 0x080c14, alpha: 0.9 });
+          g.circle(wx, wy, R * 0.10).stroke({ color: p.lights, width: 0.6, alpha: 0.8 });
+          g.circle(wx, wy, R * 0.04).fill({ color: p.lights, alpha: 0.7 });
+        }
+        // Structural ring
+        g.circle(mx, my, R * 0.18).fill({ color: gp.highlight, alpha: 0.3 });
+
+      } else if (mod.partKind === "frame") {
+        // Girder cross-bracing — grade surface for braces
         for (let i = 0; i < N; i++) {
           for (let j = i + 2; j < N - (i === 0 ? 1 : 0); j++) {
             g.moveTo(pts[i]!.x, pts[i]!.y)
              .lineTo(pts[j]!.x, pts[j]!.y)
-             .stroke({ color: 0x445566, width: 0.55, alpha: 0.6 });
+             .stroke({ color: gp.surface, width: 0.55, alpha: 0.65 });
           }
         }
-        // Corner bolt nodes
-        for (const p of pts) {
-          const bx = mx + (p.x - mx) * 0.75, by = my + (p.y - my) * 0.75;
-          g.circle(bx, by, R * 0.07).fill({ color: 0x667788, alpha: 0.75 });
+        for (const pt of pts) {
+          const bx = mx + (pt.x - mx) * 0.75, by = my + (pt.y - my) * 0.75;
+          g.circle(bx, by, R * 0.07).fill({ color: gp.highlight, alpha: 0.80 });
         }
-        // Center junction node
-        g.circle(mx, my, R * 0.12).fill({ color: 0x334455, alpha: 0.8 })
-         .stroke({ color: 0x556677, width: 0.5, alpha: 0.7 });
+        g.circle(mx, my, R * 0.12).fill({ color: gp.surface, alpha: 0.85 })
+         .stroke({ color: gp.highlight, width: 0.5, alpha: 0.7 });
 
-      } else if (mod.moduleType === "converter") {
+      } else if (mod.partKind === "converter-unit") {
         // Energy flow channel with directional arrow
         const flowLen = R * 0.6;
         g.moveTo(mx - outX * flowLen, my - outY * flowLen)
          .lineTo(mx + outX * flowLen, my + outY * flowLen)
          .stroke({ color: 0x882299, width: 1.1, alpha: 0.75 });
-        // Arrowhead
         const aX = mx + outX * flowLen * 0.85, aY = my + outY * flowLen * 0.85;
         g.moveTo(aX, aY)
          .lineTo(aX - outX * R * 0.22 + perpX * R * 0.14, aY - outY * R * 0.22 + perpY * R * 0.14)
          .lineTo(aX - outX * R * 0.22 - perpX * R * 0.14, aY - outY * R * 0.22 - perpY * R * 0.14)
-         .closePath().fill({ color: 0xcc44ff, alpha: 0.85 });
-        // Input glow (source)
-        g.circle(mx - outX * flowLen, my - outY * flowLen, R * 0.14)
-         .fill({ color: 0x6600cc, alpha: 0.7 });
-        // Output glow (destination)
-        g.circle(mx + outX * flowLen, my + outY * flowLen, R * 0.14)
-         .fill({ color: 0xee00aa, alpha: 0.7 });
+         .closePath().fill({ color: gp.effect, alpha: 0.85 });
+        g.circle(mx - outX * flowLen, my - outY * flowLen, R * 0.14).fill({ color: 0x6600cc, alpha: 0.7 });
+        g.circle(mx + outX * flowLen, my + outY * flowLen, R * 0.14).fill({ color: gp.effect, alpha: 0.7 });
+
+      } else if (mod.partKind === "factory-bay") {
+        // Industrial fabrication bay — scaffold grid + crane arm
+        for (let gi = -1; gi <= 1; gi++) {
+          const gx = mx + perpX * R * gi * 0.4, gy = my + perpY * R * gi * 0.4;
+          g.moveTo(gx - outX * R * 0.6, gy - outY * R * 0.6)
+           .lineTo(gx + outX * R * 0.6, gy + outY * R * 0.6)
+           .stroke({ color: 0x556655, width: 0.6, alpha: 0.7 });
+        }
+        for (let gi = -1; gi <= 1; gi++) {
+          const gx = mx + outX * R * gi * 0.4, gy = my + outY * R * gi * 0.4;
+          g.moveTo(gx - perpX * R * 0.6, gy - perpY * R * 0.6)
+           .lineTo(gx + perpX * R * 0.6, gy + perpY * R * 0.6)
+           .stroke({ color: 0x556655, width: 0.6, alpha: 0.7 });
+        }
+        const craneX = mx + outX * R * 0.7, craneY = my + outY * R * 0.7;
+        g.moveTo(mx, my).lineTo(craneX, craneY).stroke({ color: 0xaabb99, width: 1.2, alpha: 0.85 });
+        g.moveTo(craneX - perpX * R * 0.22, craneY - perpY * R * 0.22)
+         .lineTo(craneX + perpX * R * 0.22, craneY + perpY * R * 0.22)
+         .stroke({ color: 0x99bb88, width: 1.0, alpha: 0.8 });
+        g.circle(craneX, craneY, R * 0.12).fill({ color: 0xffaa22, alpha: 0.85 });
+        g.circle(craneX, craneY, R * 0.06).fill({ color: 0xffffff, alpha: 0.95 });
+        g.circle(mx, my, R * 0.22).fill({ color: 0x334433, alpha: 0.9 })
+         .stroke({ color: 0x88bb66, width: 0.6, alpha: 0.7 });
+        g.circle(mx, my, R * 0.10).fill({ color: gp.effect, alpha: 0.6 });
       }
     }
   }
@@ -4369,6 +4942,8 @@ export class GameRenderer {
     g: Graphics,
     sv: Array<{ x: number; y: number }>,
     moduleType: string,
+    partKind: string,
+    grade: number,
     shipScrX: number,
     shipScrY: number,
     alphaMult: number,
@@ -4377,6 +4952,7 @@ export class GameRenderer {
     const N = sv.length;
     if (N < 3) return;
     const a = (base: number) => Math.min(1, base * alphaMult);
+    const gp = getGradeColors(grade);
 
     const smx = sv.reduce((s, p) => s + p.x, 0) / N;
     const smy = sv.reduce((s, p) => s + p.y, 0) / N;
@@ -4387,13 +4963,12 @@ export class GameRenderer {
     const sOutY = odist > 1 ? ody / odist : 0;
     const sPerpX = -sOutY, sPerpY = sOutX;
 
-    const hull: Record<string, number> = {
+    const hullByType: Record<string, number> = {
       core: 0x0b1825, weapon: 0x170e08, external: 0x060f1a,
-      internal: 0x0c1005, structure: 0x0d1218, converter: 0x0d0818,
+      internal: 0x0c1005, structure: 0x0d1218, converter: 0x0d0818, factory: 0x0c1005,
     };
 
-    // Hull polygon
-    const hc = hull[moduleType] ?? 0x0d1218;
+    const hc = hullByType[moduleType] ?? 0x0d1218;
     g.moveTo(sv[0]!.x, sv[0]!.y);
     for (let i = 1; i < N; i++) g.lineTo(sv[i]!.x, sv[i]!.y);
     g.closePath().fill({ color: hc, alpha: a(0.92) });
@@ -4403,12 +4978,12 @@ export class GameRenderer {
       g.closePath().stroke({ color: 0x3a5570, width: 1.2, alpha: a(0.9) });
     }
 
-    if (moduleType === "core") {
+    if (partKind === "core") {
       g.circle(smx, smy, sR * 0.62).stroke({ color: 0x1155cc, width: 1.2, alpha: a(0.75) });
-      g.circle(smx, smy, sR * 0.40).fill({ color: 0x071840, alpha: a(0.8) });
+      g.circle(smx, smy, sR * 0.40).fill({ color: gp.surface, alpha: a(0.8) });
       g.circle(smx, smy, sR * 0.40).stroke({ color: 0x2266ee, width: 1.0, alpha: a(0.65) });
-      g.circle(smx, smy, sR * 0.20).fill({ color: 0x1144bb, alpha: a(0.9) });
-      g.circle(smx, smy, sR * 0.08).fill({ color: 0x66aaff, alpha: a(1) });
+      g.circle(smx, smy, sR * 0.22).fill({ color: gp.highlight, alpha: a(0.35) });
+      g.circle(smx, smy, sR * 0.08).fill({ color: gp.effect, alpha: a(1) });
       g.circle(smx, smy, sR * 0.03).fill({ color: 0xffffff, alpha: a(1) });
       for (const p of sv) {
         const mx2 = (smx + p.x) * 0.5, my2 = (smy + p.y) * 0.5;
@@ -4416,83 +4991,304 @@ export class GameRenderer {
         g.circle(mx2, my2, sR * 0.04).fill({ color: 0x3377cc, alpha: a(0.65) });
       }
 
-    } else if (moduleType === "weapon") {
-      const barrelBase = sR * 0.15, barrelTip = sR * 1.15, halfW = sR * 0.22;
-      const bx0 = smx + sOutX * barrelBase, by0 = smy + sOutY * barrelBase;
-      const bxtip = smx + sOutX * barrelTip, bytip = smy + sOutY * barrelTip;
-      g.moveTo(bx0 + sPerpX * halfW,        by0 + sPerpY * halfW)
-       .lineTo(bxtip + sPerpX * halfW * 0.5, bytip + sPerpY * halfW * 0.5)
-       .lineTo(bxtip - sPerpX * halfW * 0.5, bytip - sPerpY * halfW * 0.5)
-       .lineTo(bx0 - sPerpX * halfW,         by0 - sPerpY * halfW)
-       .closePath().fill({ color: 0x223344, alpha: a(0.95) });
-      g.moveTo(bx0 + sPerpX * halfW, by0 + sPerpY * halfW)
-       .lineTo(bxtip + sPerpX * halfW * 0.5, bytip + sPerpY * halfW * 0.5)
-       .stroke({ color: 0x8899aa, width: 1.0, alpha: a(0.8) });
+    } else if (partKind === "cannon") {
+      const bBase = sR * 0.15, bTip = sR * 1.15, hw = sR * 0.22;
+      const bx0 = smx + sOutX * bBase, by0 = smy + sOutY * bBase;
+      const bxtip = smx + sOutX * bTip, bytip = smy + sOutY * bTip;
+      g.moveTo(bx0 + sPerpX * hw,       by0 + sPerpY * hw)
+       .lineTo(bxtip + sPerpX * hw * 0.5, bytip + sPerpY * hw * 0.5)
+       .lineTo(bxtip - sPerpX * hw * 0.5, bytip - sPerpY * hw * 0.5)
+       .lineTo(bx0 - sPerpX * hw,        by0 - sPerpY * hw)
+       .closePath().fill({ color: gp.surface, alpha: a(0.95) });
+      g.moveTo(bx0 + sPerpX * hw, by0 + sPerpY * hw)
+       .lineTo(bxtip + sPerpX * hw * 0.5, bytip + sPerpY * hw * 0.5)
+       .stroke({ color: gp.highlight, width: 1.0, alpha: a(0.8) });
       for (let ri = 0; ri < 3; ri++) {
         const t = 0.3 + ri * 0.28;
-        const rx = smx + sOutX * sR * (0.15 + t * 1.0);
-        const ry = smy + sOutY * sR * (0.15 + t * 1.0);
-        const rw = halfW * (1.1 - ri * 0.1);
-        g.moveTo(rx + sPerpX * rw, ry + sPerpY * rw)
-         .lineTo(rx - sPerpX * rw, ry - sPerpY * rw)
-         .stroke({ color: 0x445566, width: 1.2, alpha: a(0.85) });
+        const rx = smx + sOutX * sR * (0.15 + t), ry = smy + sOutY * sR * (0.15 + t);
+        const rw = hw * (1.1 - ri * 0.1);
+        g.moveTo(rx + sPerpX * rw, ry + sPerpY * rw).lineTo(rx - sPerpX * rw, ry - sPerpY * rw)
+         .stroke({ color: gp.highlight, width: 1.2, alpha: a(0.80) });
       }
-      g.circle(bxtip, bytip, sR * 0.22).fill({ color: 0xff3300, alpha: a(0.20) });
-      g.circle(bxtip, bytip, sR * 0.12).fill({ color: 0xff6600, alpha: a(0.60) });
-      g.circle(bxtip, bytip, sR * 0.055).fill({ color: 0xffcc44, alpha: a(0.92) });
+      g.circle(bxtip, bytip, sR * 0.22).fill({ color: gp.glow, alpha: a(0.22) });
+      g.circle(bxtip, bytip, sR * 0.12).fill({ color: gp.effect, alpha: a(0.65) });
+      g.circle(bxtip, bytip, sR * 0.055).fill({ color: gp.effect, alpha: a(0.92) });
       g.circle(bxtip, bytip, sR * 0.022).fill({ color: 0xffffff, alpha: a(1) });
       g.circle(smx - sOutX * sR * 0.18, smy - sOutY * sR * 0.18, sR * 0.25)
-       .fill({ color: 0x1a2a3a, alpha: a(0.9) })
-       .stroke({ color: 0x445566, width: 0.8, alpha: a(0.7) });
+       .fill({ color: gp.surface, alpha: a(0.9) }).stroke({ color: 0x445566, width: 0.8, alpha: a(0.7) });
 
-    } else if (moduleType === "external") {
-      const emitX = smx + sOutX * sR * 0.55, emitY = smy + sOutY * sR * 0.55;
-      g.moveTo(smx - sOutX * sR * 0.1, smy - sOutY * sR * 0.1)
-       .lineTo(emitX, emitY)
-       .stroke({ color: 0x335566, width: 1.2, alpha: a(0.75) });
-      g.circle(emitX, emitY, sR * 0.35).fill({ color: 0x0a1e30, alpha: a(0.92) });
-      g.circle(emitX, emitY, sR * 0.35).stroke({ color: 0x0099cc, width: 1.2, alpha: a(0.88) });
-      g.circle(emitX, emitY, sR * 0.18).fill({ color: 0x004466, alpha: a(0.9) });
-      g.circle(emitX, emitY, sR * 0.09).fill({ color: 0x00bbff, alpha: a(0.95) });
-      g.circle(emitX, emitY, sR * 0.035).fill({ color: 0xffffff, alpha: a(1) });
-      for (let ai = -1; ai <= 1; ai++) {
-        const ang = Math.atan2(sOutY, sOutX) + ai * 0.45;
-        g.moveTo(emitX, emitY)
-         .lineTo(emitX + Math.cos(ang) * sR * 0.55, emitY + Math.sin(ang) * sR * 0.55)
-         .stroke({ color: 0x0099ff, width: 0.8, alpha: a(ai === 0 ? 0.6 : 0.35) });
+    } else if (partKind === "laser") {
+      const hw = sR * 0.09, spineTip = sR * 1.25, spineBase = sR * 0.15;
+      const sx0 = smx + sOutX * spineBase, sy0 = smy + sOutY * spineBase;
+      const sxtip = smx + sOutX * spineTip, sytip = smy + sOutY * spineTip;
+      g.moveTo(sx0 + sPerpX * hw, sy0 + sPerpY * hw)
+       .lineTo(sxtip + sPerpX * hw * 0.3, sytip + sPerpY * hw * 0.3)
+       .lineTo(sxtip - sPerpX * hw * 0.3, sytip - sPerpY * hw * 0.3)
+       .lineTo(sx0 - sPerpX * hw, sy0 - sPerpY * hw)
+       .closePath().fill({ color: gp.surface, alpha: a(0.95) });
+      g.moveTo(sx0 + sPerpX * hw, sy0 + sPerpY * hw)
+       .lineTo(sxtip + sPerpX * hw * 0.3, sytip + sPerpY * hw * 0.3)
+       .stroke({ color: gp.highlight, width: 0.8, alpha: a(0.9) });
+      g.circle(sxtip, sytip, sR * 0.16).fill({ color: gp.effect, alpha: a(0.38) });
+      g.circle(sxtip, sytip, sR * 0.10).fill({ color: gp.effect, alpha: a(0.82) });
+      g.circle(sxtip, sytip, sR * 0.04).fill({ color: 0xffffff, alpha: a(1) });
+      g.moveTo(sxtip, sytip).lineTo(sxtip + sOutX * sR * 0.5, sytip + sOutY * sR * 0.5)
+       .stroke({ color: gp.effect, width: 0.8, alpha: a(0.5) });
+      g.circle(smx - sOutX * sR * 0.1, smy - sOutY * sR * 0.1, sR * 0.22)
+       .fill({ color: gp.surface, alpha: a(0.82) }).stroke({ color: gp.highlight, width: 0.5, alpha: a(0.6) });
+
+    } else if (partKind === "torpedo") {
+      for (let ti = -1; ti <= 1; ti++) {
+        const tx2 = smx + sOutX * sR * 0.55 + sPerpX * ti * sR * 0.28;
+        const ty2 = smy + sOutY * sR * 0.55 + sPerpY * ti * sR * 0.28;
+        g.circle(tx2, ty2, sR * 0.14).fill({ color: 0x050505, alpha: a(0.95) });
+        g.circle(tx2, ty2, sR * 0.14).stroke({ color: gp.surface, width: 0.9, alpha: a(0.9) });
+        g.circle(tx2, ty2, sR * 0.07).fill({ color: gp.effect, alpha: a(0.55) });
       }
-      g.moveTo(smx + sPerpX * sR * 0.4, smy + sPerpY * sR * 0.4)
-       .lineTo(smx - sPerpX * sR * 0.4, smy - sPerpY * sR * 0.4)
-       .stroke({ color: 0x224455, width: 0.9, alpha: a(0.65) });
+      g.moveTo(smx + sOutX * sR * 0.1 - sPerpX * sR * 0.45, smy + sOutY * sR * 0.1 - sPerpY * sR * 0.45)
+       .lineTo(smx + sOutX * sR * 0.8 - sPerpX * sR * 0.45, smy + sOutY * sR * 0.8 - sPerpY * sR * 0.45)
+       .lineTo(smx + sOutX * sR * 0.8 + sPerpX * sR * 0.45, smy + sOutY * sR * 0.8 + sPerpY * sR * 0.45)
+       .lineTo(smx + sOutX * sR * 0.1 + sPerpX * sR * 0.45, smy + sOutY * sR * 0.1 + sPerpY * sR * 0.45)
+       .closePath().stroke({ color: gp.surface, width: 1.0, alpha: a(0.7) });
 
-    } else if (moduleType === "internal") {
-      g.circle(smx, smy, sR * 0.50).fill({ color: 0x1a1000, alpha: a(0.85) });
+    } else if (partKind === "plasma") {
+      const globeX = smx + sOutX * sR * 0.55, globeY = smy + sOutY * sR * 0.55;
+      g.moveTo(smx - sOutX * sR * 0.1, smy - sOutY * sR * 0.1).lineTo(globeX, globeY)
+       .stroke({ color: gp.surface, width: 1.0, alpha: a(0.8) });
+      for (let ci = 0; ci < 3; ci++) {
+        const ca = Math.atan2(sOutY, sOutX) + (ci - 1) * 0.55;
+        g.moveTo(globeX - Math.cos(ca) * sR * 0.40, globeY - Math.sin(ca) * sR * 0.40)
+         .lineTo(globeX + Math.cos(ca) * sR * 0.40, globeY + Math.sin(ca) * sR * 0.40)
+         .stroke({ color: gp.highlight, width: 1.2, alpha: a(0.75) });
+      }
+      g.circle(globeX, globeY, sR * 0.34).fill({ color: gp.glow, alpha: a(0.25) });
+      g.circle(globeX, globeY, sR * 0.22).fill({ color: gp.effect, alpha: a(0.55) });
+      g.circle(globeX, globeY, sR * 0.10).fill({ color: 0xffffff, alpha: a(0.9) });
+
+    } else if (partKind === "radar") {
+      const dishX = smx + sOutX * sR * 0.50, dishY = smy + sOutY * sR * 0.50;
+      g.moveTo(smx - sOutX * sR * 0.1, smy - sOutY * sR * 0.1).lineTo(dishX, dishY)
+       .stroke({ color: gp.surface, width: 1.0, alpha: a(0.75) });
+      const dishAng = Math.atan2(sOutY, sOutX), da = 0.9;
+      g.moveTo(dishX + Math.cos(dishAng - da) * sR * 0.42, dishY + Math.sin(dishAng - da) * sR * 0.42)
+       .arc(dishX, dishY, sR * 0.42, dishAng - da, dishAng + da)
+       .stroke({ color: gp.highlight, width: 1.3, alpha: a(0.88) });
+      g.moveTo(dishX + Math.cos(dishAng - da) * sR * 0.42, dishY + Math.sin(dishAng - da) * sR * 0.42)
+       .lineTo(dishX + Math.cos(dishAng + da) * sR * 0.42, dishY + Math.sin(dishAng + da) * sR * 0.42)
+       .stroke({ color: gp.surface, width: 0.7, alpha: a(0.6) });
+      for (let ai = 1; ai <= 2; ai++) {
+        const sr2 = sR * (0.55 + ai * 0.2);
+        g.moveTo(dishX + Math.cos(dishAng - 0.35) * sr2, dishY + Math.sin(dishAng - 0.35) * sr2)
+         .arc(dishX, dishY, sr2, dishAng - 0.35, dishAng + 0.35)
+         .stroke({ color: 0x0099ff, width: 0.6, alpha: a(0.45 - ai * 0.1) });
+      }
+      g.circle(dishX, dishY, sR * 0.06).fill({ color: 0x00bbff, alpha: a(0.9) });
+
+    } else if (partKind === "lidar") {
+      const baseAng = Math.atan2(sOutY, sOutX);
+      for (let li = -2; li <= 2; li++) {
+        const la = baseAng + li * 0.22;
+        const tipDist = sR * (1.0 - Math.abs(li) * 0.08);
+        const lx = smx + Math.cos(la) * tipDist, ly = smy + Math.sin(la) * tipDist;
+        g.moveTo(smx + sOutX * sR * 0.12, smy + sOutY * sR * 0.12).lineTo(lx, ly)
+         .stroke({ color: gp.surface, width: 0.9, alpha: a(0.8) });
+        g.circle(lx, ly, sR * 0.06).fill({ color: gp.effect, alpha: a(li === 0 ? 0.9 : 0.6) });
+      }
+      g.circle(smx + sOutX * sR * 0.12, smy + sOutY * sR * 0.12, sR * 0.15)
+       .fill({ color: gp.surface, alpha: a(0.85) }).stroke({ color: 0x3a5570, width: 0.5, alpha: a(0.7) });
+
+    } else if (partKind === "scrambler") {
+      const ant = sR * 0.75;
+      for (let ai = 0; ai < 2; ai++) {
+        const aa = Math.atan2(sOutY, sOutX) + ai * 1.5708;
+        g.moveTo(smx - Math.cos(aa) * ant, smy - Math.sin(aa) * ant)
+         .lineTo(smx + Math.cos(aa) * ant, smy + Math.sin(aa) * ant)
+         .stroke({ color: gp.surface, width: 1.2, alpha: a(0.85) });
+        g.circle(smx + Math.cos(aa) * ant, smy + Math.sin(aa) * ant, sR * 0.08)
+         .fill({ color: gp.highlight, alpha: a(0.9) });
+        g.circle(smx - Math.cos(aa) * ant, smy - Math.sin(aa) * ant, sR * 0.08)
+         .fill({ color: gp.highlight, alpha: a(0.9) });
+      }
+      for (let ri = 1; ri <= 2; ri++)
+        g.circle(smx, smy, sR * ri * 0.38).stroke({ color: gp.effect, width: 0.7, alpha: a(0.4 - ri * 0.1) });
+      g.circle(smx, smy, sR * 0.10).fill({ color: gp.effect, alpha: a(0.8) });
+
+    } else if (partKind === "webber") {
+      const wbAng = Math.atan2(sOutY, sOutX);
+      for (let wi = 0; wi < 5; wi++) {
+        const wa = wbAng + (wi - 2) * 0.42;
+        const wLen = sR * (0.85 + (wi % 2) * 0.15);
+        const ctrlX = smx + Math.cos(wa + 0.5) * sR * 0.6;
+        const ctrlY = smy + Math.sin(wa + 0.5) * sR * 0.6;
+        g.moveTo(smx + sOutX * sR * 0.1, smy + sOutY * sR * 0.1)
+         .quadraticCurveTo(ctrlX, ctrlY, smx + Math.cos(wa) * wLen, smy + Math.sin(wa) * wLen)
+         .stroke({ color: gp.effect, width: 0.9, alpha: a(0.65) });
+        g.circle(smx + Math.cos(wa) * wLen, smy + Math.sin(wa) * wLen, sR * 0.07)
+         .fill({ color: gp.effect, alpha: a(0.8) });
+      }
+      g.circle(smx + sOutX * sR * 0.1, smy + sOutY * sR * 0.1, sR * 0.18)
+       .fill({ color: gp.surface, alpha: a(0.85) }).stroke({ color: gp.highlight, width: 0.6, alpha: a(0.7) });
+
+    } else if (partKind === "thruster") {
+      const nozzleX = smx - sOutX * sR * 0.15, nozzleY = smy - sOutY * sR * 0.15, bell = sR * 0.45;
+      g.moveTo(nozzleX + sPerpX * bell * 0.5, nozzleY + sPerpY * bell * 0.5)
+       .lineTo(nozzleX + sPerpX * bell - sOutX * sR * 0.45, nozzleY + sPerpY * bell - sOutY * sR * 0.45)
+       .lineTo(nozzleX - sPerpX * bell - sOutX * sR * 0.45, nozzleY - sPerpY * bell - sOutY * sR * 0.45)
+       .lineTo(nozzleX - sPerpX * bell * 0.5, nozzleY - sPerpY * bell * 0.5)
+       .closePath().fill({ color: gp.surface, alpha: a(0.90) });
+      g.moveTo(nozzleX + sPerpX * bell - sOutX * sR * 0.45, nozzleY + sPerpY * bell - sOutY * sR * 0.45)
+       .lineTo(nozzleX - sPerpX * bell - sOutX * sR * 0.45, nozzleY - sPerpY * bell - sOutY * sR * 0.45)
+       .stroke({ color: gp.highlight, width: 1.0, alpha: a(0.9) });
+      const exX = nozzleX - sOutX * sR * 0.55, exY = nozzleY - sOutY * sR * 0.55;
+      g.circle(exX, exY, sR * 0.28).fill({ color: gp.effect, alpha: a(0.35) });
+      g.circle(exX, exY, sR * 0.14).fill({ color: gp.effect, alpha: a(0.70) });
+      g.circle(exX, exY, sR * 0.055).fill({ color: 0xffffff, alpha: a(0.9) });
+
+    } else if (partKind === "ion-engine") {
+      for (let gi = 0; gi < 3; gi++) {
+        const gBack = sR * (-0.1 - gi * 0.22);
+        const gx = smx + sOutX * gBack, gy = smy + sOutY * gBack;
+        g.moveTo(gx + sPerpX * sR * 0.42, gy + sPerpY * sR * 0.42)
+         .lineTo(gx - sPerpX * sR * 0.42, gy - sPerpY * sR * 0.42)
+         .stroke({ color: gp.surface, width: 1.1, alpha: a(0.85) });
+        for (let ggi = -1; ggi <= 1; ggi++)
+          g.circle(gx + sPerpX * ggi * sR * 0.2, gy + sPerpY * ggi * sR * 0.2, sR * 0.04)
+           .fill({ color: gp.effect, alpha: a(0.6) });
+      }
+      const pBack = sR * 0.9;
+      g.moveTo(smx - sOutX * sR * 0.1 + sPerpX * sR * 0.12, smy - sOutY * sR * 0.1 + sPerpY * sR * 0.12)
+       .lineTo(smx - sOutX * pBack, smy - sOutY * pBack)
+       .lineTo(smx - sOutX * sR * 0.1 - sPerpX * sR * 0.12, smy - sOutY * sR * 0.1 - sPerpY * sR * 0.12)
+       .stroke({ color: gp.effect, width: 0.9, alpha: a(0.45) });
+      g.circle(smx - sOutX * pBack, smy - sOutY * pBack, sR * 0.12).fill({ color: gp.effect, alpha: a(0.55) });
+
+    } else if (partKind === "warp-nacelle") {
+      g.moveTo(smx - sOutX * sR * 0.32, smy - sOutY * sR * 0.32)
+       .lineTo(smx + sOutX * sR * 0.32, smy + sOutY * sR * 0.32)
+       .stroke({ color: gp.surface, width: 1.3, alpha: a(0.9) });
+      for (let ri = 0; ri < 2; ri++) {
+        const rOff = (ri - 0.5) * sR * 0.35;
+        const rx = smx + sPerpX * rOff, ry = smy + sPerpY * rOff;
+        g.circle(rx, ry, sR * 0.32).stroke({ color: gp.highlight, width: 1.1, alpha: a(0.80) });
+        g.circle(rx, ry, sR * 0.18).fill({ color: gp.effect, alpha: a(0.30) });
+        g.circle(rx, ry, sR * 0.09).fill({ color: gp.effect, alpha: a(0.65) });
+      }
+      g.circle(smx, smy, sR * 0.14).fill({ color: gp.glow, alpha: a(0.55) });
+      g.circle(smx, smy, sR * 0.06).fill({ color: 0xffffff, alpha: a(0.8) });
+
+    } else if (partKind === "gravity-drive") {
+      for (let ri = 3; ri >= 1; ri--)
+        g.circle(smx, smy, sR * ri * 0.20).stroke({ color: gp.highlight, width: 0.9, alpha: a(0.35 + ri * 0.15) });
+      g.circle(smx, smy, sR * 0.22).fill({ color: gp.glow, alpha: a(0.40) });
+      g.circle(smx, smy, sR * 0.12).fill({ color: gp.effect, alpha: a(0.75) });
+      g.circle(smx, smy, sR * 0.05).fill({ color: 0xffffff, alpha: a(1) });
+      for (let si = 0; si < 4; si++) {
+        const sa = (si / 4) * Math.PI * 2;
+        g.moveTo(smx + Math.cos(sa) * sR * 0.22, smy + Math.sin(sa) * sR * 0.22)
+         .lineTo(smx + Math.cos(sa) * sR * 0.65, smy + Math.sin(sa) * sR * 0.65)
+         .stroke({ color: gp.effect, width: 0.7, alpha: a(0.45) });
+      }
+      g.circle(smx, smy, sR * 0.70).stroke({ color: gp.surface, width: 1.1, alpha: a(0.65) });
+
+    } else if (partKind === "shield") {
+      const projX = smx + sOutX * sR * 0.35, projY = smy + sOutY * sR * 0.35;
+      g.circle(projX, projY, sR * 0.26).fill({ color: gp.surface, alpha: a(0.9) });
+      g.circle(projX, projY, sR * 0.14).fill({ color: 0x00bbff, alpha: a(0.85) });
+      g.circle(projX, projY, sR * 0.06).fill({ color: 0xffffff, alpha: a(1) });
+      const dAng = Math.atan2(sOutY, sOutX);
+      g.moveTo(projX + Math.cos(dAng - 1.1) * sR * 0.65, projY + Math.sin(dAng - 1.1) * sR * 0.65)
+       .arc(projX, projY, sR * 0.65, dAng - 1.1, dAng + 1.1)
+       .stroke({ color: gp.effect, width: 1.3, alpha: a(0.60) });
+      for (let fi = -1; fi <= 1; fi++) {
+        const fa = dAng + fi * 0.55;
+        g.moveTo(projX, projY)
+         .lineTo(projX + Math.cos(fa) * sR * 0.60, projY + Math.sin(fa) * sR * 0.60)
+         .stroke({ color: gp.effect, width: 0.5, alpha: a(0.35) });
+      }
+
+    } else if (partKind === "armor") {
+      const plates = [
+        { ox: sOutX * sR * 0.15, oy: sOutY * sR * 0.15, w: sR * 0.5, h: sR * 0.3 },
+        { ox: -sOutX * sR * 0.1 + sPerpX * sR * 0.22, oy: -sOutY * sR * 0.1 + sPerpY * sR * 0.22, w: sR * 0.4, h: sR * 0.25 },
+        { ox: -sOutX * sR * 0.1 - sPerpX * sR * 0.22, oy: -sOutY * sR * 0.1 - sPerpY * sR * 0.22, w: sR * 0.4, h: sR * 0.25 },
+      ];
+      for (const pl of plates) {
+        const px = smx + pl.ox, py = smy + pl.oy;
+        g.moveTo(px - sOutX * pl.w + sPerpX * pl.h, py - sOutY * pl.w + sPerpY * pl.h)
+         .lineTo(px + sOutX * pl.w + sPerpX * pl.h, py + sOutY * pl.w + sPerpY * pl.h)
+         .lineTo(px + sOutX * pl.w - sPerpX * pl.h, py + sOutY * pl.w - sPerpY * pl.h)
+         .lineTo(px - sOutX * pl.w - sPerpX * pl.h, py - sOutY * pl.w - sPerpY * pl.h)
+         .closePath().fill({ color: gp.surface, alpha: a(0.85) })
+         .stroke({ color: gp.highlight, width: 0.7, alpha: a(0.75) });
+        for (let ri = -1; ri <= 1; ri += 2)
+          g.circle(px + sPerpX * pl.h * 0.7 * ri, py + sPerpY * pl.h * 0.7 * ri, sR * 0.05)
+           .fill({ color: gp.highlight, alpha: a(0.9) });
+      }
+
+    } else if (partKind === "cloak") {
+      const cloakX = smx + sOutX * sR * 0.3, cloakY = smy + sOutY * sR * 0.3;
+      g.circle(cloakX, cloakY, sR * 0.28).fill({ color: gp.surface, alpha: a(0.7) });
+      g.circle(cloakX, cloakY, sR * 0.14).fill({ color: gp.effect, alpha: a(0.5) });
+      g.circle(cloakX, cloakY, sR * 0.06).fill({ color: 0xffffff, alpha: a(0.65) });
+      for (let si = 1; si <= 3; si++)
+        g.circle(cloakX, cloakY, sR * si * 0.28).stroke({ color: gp.effect, width: 0.7, alpha: a(0.30 - si * 0.06) });
+      for (const sa of [0.3, 1.1, 2.0, 3.3, 4.5, 5.2])
+        g.circle(smx + Math.cos(sa) * sR * (0.42 + (sa % 0.5) * 0.3), smy + Math.sin(sa) * sR * (0.42 + (sa % 0.5) * 0.3), sR * 0.04)
+         .fill({ color: gp.effect, alpha: a(0.3) });
+
+    } else if (partKind === "warp-stabilizer") {
+      const stbAng = Math.atan2(sOutY, sOutX);
+      for (let wi = 0; wi < 3; wi++) {
+        const wa = stbAng + (wi / 3) * Math.PI * 2;
+        const rodLen = sR * 0.68;
+        const tipX = smx + Math.cos(wa) * rodLen, tipY = smy + Math.sin(wa) * rodLen;
+        g.moveTo(smx, smy).lineTo(tipX, tipY).stroke({ color: gp.surface, width: 1.2, alpha: a(0.85) });
+        g.circle(tipX, tipY, sR * 0.14).fill({ color: gp.effect, alpha: a(0.70) });
+        g.circle(tipX, tipY, sR * 0.06).fill({ color: 0xffffff, alpha: a(0.9) });
+      }
+      g.circle(smx, smy, sR * 0.18).fill({ color: gp.surface, alpha: a(0.9) })
+       .stroke({ color: gp.highlight, width: 0.7, alpha: a(0.8) });
+
+    } else if (partKind === "reactor") {
+      g.circle(smx, smy, sR * 0.50).fill({ color: gp.surface, alpha: a(0.85) });
       g.circle(smx, smy, sR * 0.50).stroke({ color: 0x996600, width: 1.0, alpha: a(0.72) });
-      g.circle(smx, smy, sR * 0.28).fill({ color: 0x5a3000, alpha: a(0.9) });
-      g.circle(smx, smy, sR * 0.14).fill({ color: 0xffaa00, alpha: a(0.92) });
+      g.circle(smx, smy, sR * 0.28).fill({ color: gp.highlight, alpha: a(0.3) });
+      g.circle(smx, smy, sR * 0.14).fill({ color: gp.effect, alpha: a(0.92) });
       g.circle(smx, smy, sR * 0.055).fill({ color: 0xffffff, alpha: a(0.9) });
       for (let i = 0; i < N; i++) {
         const s2 = sv[i]!, e2 = sv[(i + 1) % N]!;
         const smx2 = (s2.x + e2.x) / 2, smy2 = (s2.y + e2.y) / 2;
         g.moveTo(smx, smy).lineTo(smx2, smy2).stroke({ color: 0x886600, width: 0.8, alpha: a(0.55) });
-        g.circle(smx2, smy2, sR * 0.05).fill({ color: 0xcc8800, alpha: a(0.65) });
+        g.circle(smx2, smy2, sR * 0.05).fill({ color: gp.effect, alpha: a(0.65) });
       }
 
-    } else if (moduleType === "structure") {
+    } else if (partKind === "crew-quarters") {
+      g.circle(smx, smy, sR * 0.52).fill({ color: gp.surface, alpha: a(0.75) });
+      g.circle(smx, smy, sR * 0.52).stroke({ color: 0x3a5570, width: 0.8, alpha: a(0.7) });
+      for (let wi = 0; wi < 3; wi++) {
+        const wa = (wi / 3) * Math.PI * 2;
+        const wx = smx + Math.cos(wa) * sR * 0.32, wy = smy + Math.sin(wa) * sR * 0.32;
+        g.circle(wx, wy, sR * 0.10).fill({ color: 0x080c14, alpha: a(0.9) });
+        g.circle(wx, wy, sR * 0.10).stroke({ color: 0x4499cc, width: 0.7, alpha: a(0.8) });
+        g.circle(wx, wy, sR * 0.04).fill({ color: 0x4499cc, alpha: a(0.7) });
+      }
+      g.circle(smx, smy, sR * 0.18).fill({ color: gp.highlight, alpha: a(0.3) });
+
+    } else if (partKind === "frame") {
       for (let i = 0; i < N; i++) {
         for (let j = i + 2; j < N - (i === 0 ? 1 : 0); j++) {
           g.moveTo(sv[i]!.x, sv[i]!.y).lineTo(sv[j]!.x, sv[j]!.y)
-           .stroke({ color: 0x445566, width: 0.9, alpha: a(0.65) });
+           .stroke({ color: gp.surface, width: 0.9, alpha: a(0.65) });
         }
       }
       for (const p of sv) {
         const bx2 = smx + (p.x - smx) * 0.75, by2 = smy + (p.y - smy) * 0.75;
-        g.circle(bx2, by2, sR * 0.07).fill({ color: 0x667788, alpha: a(0.8) });
+        g.circle(bx2, by2, sR * 0.07).fill({ color: gp.highlight, alpha: a(0.80) });
       }
-      g.circle(smx, smy, sR * 0.12).fill({ color: 0x334455, alpha: a(0.85) })
-       .stroke({ color: 0x556677, width: 0.8, alpha: a(0.75) });
+      g.circle(smx, smy, sR * 0.12).fill({ color: gp.surface, alpha: a(0.85) })
+       .stroke({ color: gp.highlight, width: 0.8, alpha: a(0.75) });
 
-    } else { // converter
+    } else if (partKind === "converter-unit") {
       const flowLen = sR * 0.6;
       g.moveTo(smx - sOutX * flowLen, smy - sOutY * flowLen)
        .lineTo(smx + sOutX * flowLen, smy + sOutY * flowLen)
@@ -4501,11 +5297,33 @@ export class GameRenderer {
       g.moveTo(aX, aY)
        .lineTo(aX - sOutX * sR * 0.22 + sPerpX * sR * 0.15, aY - sOutY * sR * 0.22 + sPerpY * sR * 0.15)
        .lineTo(aX - sOutX * sR * 0.22 - sPerpX * sR * 0.15, aY - sOutY * sR * 0.22 - sPerpY * sR * 0.15)
-       .closePath().fill({ color: 0xcc44ff, alpha: a(0.88) });
-      g.circle(smx - sOutX * flowLen, smy - sOutY * flowLen, sR * 0.14)
-       .fill({ color: 0x6600cc, alpha: a(0.72) });
-      g.circle(smx + sOutX * flowLen, smy + sOutY * flowLen, sR * 0.14)
-       .fill({ color: 0xee00aa, alpha: a(0.72) });
+       .closePath().fill({ color: gp.effect, alpha: a(0.88) });
+      g.circle(smx - sOutX * flowLen, smy - sOutY * flowLen, sR * 0.14).fill({ color: 0x6600cc, alpha: a(0.72) });
+      g.circle(smx + sOutX * flowLen, smy + sOutY * flowLen, sR * 0.14).fill({ color: gp.effect, alpha: a(0.72) });
+
+    } else { // factory-bay
+      for (let gi = -1; gi <= 1; gi++) {
+        const gx = smx + sPerpX * sR * gi * 0.4, gy = smy + sPerpY * sR * gi * 0.4;
+        g.moveTo(gx - sOutX * sR * 0.6, gy - sOutY * sR * 0.6)
+         .lineTo(gx + sOutX * sR * 0.6, gy + sOutY * sR * 0.6)
+         .stroke({ color: 0x556655, width: 0.6, alpha: a(0.7) });
+      }
+      for (let gi = -1; gi <= 1; gi++) {
+        const gx = smx + sOutX * sR * gi * 0.4, gy = smy + sOutY * sR * gi * 0.4;
+        g.moveTo(gx - sPerpX * sR * 0.6, gy - sPerpY * sR * 0.6)
+         .lineTo(gx + sPerpX * sR * 0.6, gy + sPerpY * sR * 0.6)
+         .stroke({ color: 0x556655, width: 0.6, alpha: a(0.7) });
+      }
+      const craneX2 = smx + sOutX * sR * 0.7, craneY2 = smy + sOutY * sR * 0.7;
+      g.moveTo(smx, smy).lineTo(craneX2, craneY2).stroke({ color: 0xaabb99, width: 1.3, alpha: a(0.85) });
+      g.moveTo(craneX2 - sPerpX * sR * 0.22, craneY2 - sPerpY * sR * 0.22)
+       .lineTo(craneX2 + sPerpX * sR * 0.22, craneY2 + sPerpY * sR * 0.22)
+       .stroke({ color: 0x99bb88, width: 1.0, alpha: a(0.8) });
+      g.circle(craneX2, craneY2, sR * 0.12).fill({ color: 0xffaa22, alpha: a(0.85) });
+      g.circle(craneX2, craneY2, sR * 0.06).fill({ color: 0xffffff, alpha: a(0.95) });
+      g.circle(smx, smy, sR * 0.22).fill({ color: 0x334433, alpha: a(0.9) })
+       .stroke({ color: 0x88bb66, width: 0.6, alpha: a(0.7) });
+      g.circle(smx, smy, sR * 0.10).fill({ color: gp.effect, alpha: a(0.6) });
     }
   }
 
@@ -4547,7 +5365,7 @@ export class GameRenderer {
       const verts = mod.vertices;
       if (verts.length < 3) continue;
       const sv = verts.map(v => ({ x: w2sx(v.x), y: w2sy(v.y) }));
-      this.drawBuilderModuleDetail(g, sv, mod.moduleType, shipScrX, shipScrY, 1.0, false);
+      this.drawBuilderModuleDetail(g, sv, mod.moduleType, mod.partKind, mod.grade, shipScrX, shipScrY, 1.0, false);
     }
 
     // ── Snap point markers ──────────────────────────────────────────────────
@@ -4562,10 +5380,10 @@ export class GameRenderer {
 
     // ── Ghost module — same detailed visuals, partially transparent ──────────
     if (data.ghost) {
-      const { vertices: gv, moduleType, isSnapped } = data.ghost;
+      const { vertices: gv, moduleType, partKind: ghostKind, grade: ghostGrade, isSnapped } = data.ghost;
       if (gv.length >= 3) {
         const gsv = gv.map(v => ({ x: w2sx(v.x), y: w2sy(v.y) }));
-        this.drawBuilderModuleDetail(g, gsv, moduleType, shipScrX, shipScrY,
+        this.drawBuilderModuleDetail(g, gsv, moduleType, ghostKind, ghostGrade, shipScrX, shipScrY,
           isSnapped ? 0.55 : 0.30, true);
         // Snap-state outline on top
         g.moveTo(gsv[0]!.x, gsv[0]!.y);
@@ -4578,12 +5396,19 @@ export class GameRenderer {
     // ── Right panel ─────────────────────────────────────────────────────────
     const rx = SPLIT + 12;
 
-    // Ship name header + SAVE button
+    // Ship name header + SAVE + NEW buttons
     g.rect(SPLIT + 4, 4, W - SPLIT - 8, 36).fill({ color: 0x112233, alpha: 0.8 });
     g.rect(SPLIT + 4, 4, W - SPLIT - 8, 36).stroke({ color: 0x2a466b, width: 1 });
     // SAVE button (right side of header)
     g.rect(W - 84, 8, 76, 28).fill({ color: 0x005522, alpha: 0.9 });
     g.rect(W - 84, 8, 76, 28).stroke({ color: 0x00cc66, width: 1 });
+    // NEW button (just left of SAVE)
+    g.rect(W - 84 - 4 - 58, 8, 58, 28).fill({ color: 0x002244, alpha: 0.9 });
+    g.rect(W - 84 - 4 - 58, 8, 58, 28).stroke({ color: 0x2266aa, width: 1 });
+    // Rename hint: ship name zone shows subtle underline to indicate clickability
+    if (!data.renameMode) {
+      g.rect(SPLIT + 20, 36, W - 84 - 4 - 58 - SPLIT - 24, 1).fill({ color: 0x334455, alpha: 0.6 });
+    }
 
     // Budget bars
     const bx = rx;
@@ -4695,8 +5520,17 @@ export class GameRenderer {
     }
 
     // ── Title (ship name) ────────────────────────────────────────────────────
-    this.solarBuilderTitleText.text = data.shipName.toUpperCase();
-    this.solarBuilderTitleText.x = SPLIT + (W - SPLIT) / 2;
+    if (data.renameMode) {
+      // Show rename buffer with blinking cursor
+      const cursor = Math.floor(Date.now() / 500) % 2 === 0 ? "_" : " ";
+      this.solarBuilderTitleText.text = (data.renameBuf + cursor).toUpperCase();
+      this.solarBuilderTitleText.style.fill = 0xffdd88;
+    } else {
+      this.solarBuilderTitleText.text = data.shipName.toUpperCase();
+      this.solarBuilderTitleText.style.fill = 0xaaddff;
+    }
+    // Center title in name zone (left of NEW button at W-84-4-58=1134)
+    this.solarBuilderTitleText.x = (SPLIT + 20 + (W - 84 - 4 - 58)) / 2;
     this.solarBuilderTitleText.y = 22;
     this.solarBuilderTitleText.visible = true;
 
@@ -4718,8 +5552,8 @@ export class GameRenderer {
       t.visible = true;
     }
 
-    // ── SAVE button label ──────────────────────────────────────────────────────
-    this.ensureTextPool(this.solarBuilderBudgetLabels, budgetLabelDefs.length + 2, 11);
+    // ── SAVE + NEW button labels ───────────────────────────────────────────────
+    this.ensureTextPool(this.solarBuilderBudgetLabels, budgetLabelDefs.length + 3, 11);
     {
       const tSave = this.solarBuilderBudgetLabels[budgetLabelDefs.length + 1]!;
       tSave.text = "SAVE";
@@ -4729,6 +5563,16 @@ export class GameRenderer {
       tSave.style.fill = 0x00ff88;
       tSave.style.fontSize = 12;
       tSave.visible = true;
+    }
+    {
+      const tNew = this.solarBuilderBudgetLabels[budgetLabelDefs.length + 2]!;
+      tNew.text = "NEW";
+      tNew.x = W - 84 - 4 - 58 + 29;
+      tNew.y = 22;
+      tNew.anchor.set(0.5, 0.5);
+      tNew.style.fill = 0x66aaff;
+      tNew.style.fontSize = 12;
+      tNew.visible = true;
     }
 
     // ── Core-sides label (centre of toggle strip) ─────────────────────────────
@@ -4806,6 +5650,108 @@ export class GameRenderer {
       }
     }
     for (let i = data.palette.length * TEXTS_PER_ROW; i < this.solarBuilderPaletteLabels.length; i++) {
+      this.solarBuilderPaletteLabels[i]!.visible = false;
+    }
+
+    // ── Core picker overlay ───────────────────────────────────────────────────
+    if (data.corePicker) {
+      this.drawBuilderCorePicker(g, data);
+    }
+
+    // ── Rename mode overlay ───────────────────────────────────────────────────
+    if (data.renameMode) {
+      // Highlight the name zone with a border
+      g.rect(SPLIT + 20, 5, W - 84 - 4 - 58 - SPLIT - 24, 32).stroke({ color: 0xffdd88, width: 1.5, alpha: 0.8 });
+    }
+  }
+
+  private drawBuilderCorePicker(
+    g: import("pixi.js").Graphics,
+    data: SolarShipBuilderRenderData,
+  ): void {
+    const picker = data.corePicker!;
+    const H = this.height;
+    const SPLIT = 800;
+
+    // Dim left panel
+    g.rect(0, 0, SPLIT, H).fill({ color: 0x000000, alpha: 0.75 });
+
+    // Title bar
+    g.rect(0, 0, SPLIT, 60).fill({ color: 0x0a1a30, alpha: 0.97 });
+    g.rect(0, 58, SPLIT, 2).fill({ color: 0x2a466b, alpha: 1 });
+
+    const ROW_H = 60;
+    const LIST_Y = 120;
+
+    // Hint header
+    g.rect(0, 62, SPLIT, 56).fill({ color: 0x081420, alpha: 0.95 });
+    g.rect(0, 116, SPLIT, 2).fill({ color: 0x1a3350, alpha: 0.8 });
+
+    for (let i = 0; i < picker.length; i++) {
+      const item = picker[i]!;
+      const ty = LIST_Y + i * ROW_H;
+      if (ty + ROW_H > H - 20) break;
+      const hasStock = item.quantity > 0;
+      const rowBg = hasStock ? (i % 2 === 0 ? 0x0e2040 : 0x081428) : 0x080c14;
+      g.rect(0, ty, SPLIT, ROW_H - 1).fill({ color: rowBg, alpha: 0.95 });
+      if (hasStock) {
+        g.rect(0, ty, 3, ROW_H - 1).fill({ color: 0x2266aa, alpha: 0.9 });
+      }
+      g.rect(0, ty + ROW_H - 1, SPLIT, 1).fill({ color: 0x1a2a40, alpha: 0.7 });
+    }
+
+    // Hint at bottom
+    g.rect(0, H - 40, SPLIT, 40).fill({ color: 0x050e1a, alpha: 0.95 });
+    g.rect(0, H - 40, SPLIT, 1).fill({ color: 0x1a2a40, alpha: 0.7 });
+
+    // Text labels — reuse palette label pool
+    const needed = picker.length + 4; // rows + title + subtitle + hint + col header
+    this.ensureTextPool(this.solarBuilderPaletteLabels, needed, 12);
+
+    // Title
+    const tTitle = this.solarBuilderPaletteLabels[0]!;
+    tTitle.text = "SELECT A CORE";
+    tTitle.x = SPLIT / 2; tTitle.y = 30;
+    tTitle.anchor.set(0.5, 0.5);
+    tTitle.style.fill = 0xaaddff;
+    tTitle.style.fontSize = 16;
+    tTitle.visible = true;
+
+    // Column header
+    const tHdr = this.solarBuilderPaletteLabels[1]!;
+    tHdr.text = "NAME                     H    M    L    QTY";
+    tHdr.x = 20; tHdr.y = 89;
+    tHdr.anchor.set(0, 0.5);
+    tHdr.style.fill = 0x446688;
+    tHdr.style.fontSize = 10;
+    tHdr.visible = true;
+
+    // Hint
+    const tHint = this.solarBuilderPaletteLabels[2]!;
+    tHint.text = "CLICK TO SELECT   |   ESC CANCEL";
+    tHint.x = SPLIT / 2; tHint.y = H - 20;
+    tHint.anchor.set(0.5, 0.5);
+    tHint.style.fill = 0x446688;
+    tHint.style.fontSize = 11;
+    tHint.visible = true;
+
+    const LABEL_OFFSET = 3;
+    for (let i = 0; i < picker.length; i++) {
+      const item = picker[i]!;
+      const ty = LIST_Y + i * ROW_H;
+      if (ty + ROW_H > H - 20) break;
+      const hasStock = item.quantity > 0;
+      const tRow = this.solarBuilderPaletteLabels[LABEL_OFFSET + i]!;
+      const slots = `${String(item.weaponPoints).padStart(2, " ")}H  ${String(item.externalPoints).padStart(2, " ")}M  ${String(item.internalPoints).padStart(2, " ")}L`;
+      tRow.text = `${item.name.toUpperCase().padEnd(30, " ")}${slots}    ×${item.quantity}`;
+      tRow.x = 20; tRow.y = ty + ROW_H / 2;
+      tRow.anchor.set(0, 0.5);
+      tRow.style.fill = hasStock ? 0xaaccee : 0x3a5570;
+      tRow.style.fontSize = 12;
+      tRow.visible = true;
+    }
+    // Hide any remaining labels past what we just rendered
+    for (let i = LABEL_OFFSET + picker.length; i < this.solarBuilderPaletteLabels.length; i++) {
       this.solarBuilderPaletteLabels[i]!.visible = false;
     }
   }

@@ -15,6 +15,8 @@ import type {
   SolarModuleDefinition,
   CoreDefinition,
   ShipClass,
+  PartKind,
+  PolygonShape,
 } from "../../types/solarShipBuilder";
 
 // ── Class side lengths ────────────────────────────────────────────────────────
@@ -23,7 +25,78 @@ const SIDE_PX: Record<ShipClass, number> = {
   1: 60, 2: 80, 3: 110, 4: 145, 5: 185, 6: 225, 7: 225, 8: 270, 9: 270,
 };
 
+// ── Visual vertex templates ───────────────────────────────────────────────────
+// Unit coords where 1.0 = sideLengthPx. +Y = toward parent (attachment side).
+// Applied only to leaf modules (attachmentSideIndices: []).
+
+type Verts = PolygonShape["verts"];
+
+const WEAPON_VERTS: Partial<Record<PartKind, Verts>> = {
+  // Gun barrel: wide mount at +Y, narrow barrel tip at -Y
+  cannon: [
+    [-0.15, -0.65], [0.15, -0.65],
+    [0.15, -0.10], [0.40, -0.10],
+    [0.40,  0.55], [-0.40, 0.55],
+    [-0.40, -0.10], [-0.15, -0.10],
+  ],
+  // Laser spine: narrow pointed tip at -Y, wider base at +Y
+  laser: [
+    [0, -0.80],
+    [0.20, -0.40], [0.35, 0.20],
+    [0.35, 0.55], [-0.35, 0.55],
+    [-0.35, 0.20], [-0.20, -0.40],
+  ],
+  // Torpedo tube: cylindrical body, wider at base
+  torpedo: [
+    [-0.25, -0.65], [0.25, -0.65],
+    [0.35, -0.10], [0.35, 0.55],
+    [-0.35, 0.55], [-0.35, -0.10],
+  ],
+};
+
+const THRUSTER_VERTS: Verts = [
+  // Bell nozzle (T-shape): wide output at -Y, narrow mount at +Y
+  [-0.60, -0.45], [0.60, -0.45],
+  [0.60,  0.10], [0.22,  0.10],
+  [0.22,  0.55], [-0.22, 0.55],
+  [-0.22,  0.10], [-0.60, 0.10],
+];
+
+const EXTERNAL_VERTS: Partial<Record<PartKind, Verts>> = {
+  // Dome shield: curved top at -Y, flat mount at +Y
+  shield: [
+    [-0.60,  0.30], [0.60,  0.30],
+    [0.72,   0.00], [0.50, -0.45],
+    [0,     -0.70], [-0.50, -0.45],
+    [-0.72,  0.00],
+  ],
+  // Radar dish: wide flat dish at -Y, narrow stem at +Y
+  radar: [
+    [-0.70, -0.25], [0.70, -0.25],
+    [0.70,   0.10], [0.25,  0.10],
+    [0.25,   0.60], [-0.25, 0.60],
+    [-0.25,  0.10], [-0.70, 0.10],
+  ],
+  lidar: [
+    [-0.70, -0.25], [0.70, -0.25],
+    [0.70,   0.10], [0.25,  0.10],
+    [0.25,   0.60], [-0.25, 0.60],
+    [-0.25,  0.10], [-0.70, 0.10],
+  ],
+  thruster:       THRUSTER_VERTS,
+  "ion-engine":   THRUSTER_VERTS,
+  "warp-nacelle": THRUSTER_VERTS,
+  "gravity-drive": THRUSTER_VERTS,
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// Base scanner ranges per ship class (km).  Ships without a dedicated sensor
+// module fall back to this built-in antenna range.
+const CORE_SENSOR_RANGE_KM: Record<ShipClass, number> = {
+  1: 150, 2: 200, 3: 280, 4: 380, 5: 500,
+  6: 660, 7: 850, 8: 1_100, 9: 1_400,
+};
 
 function core(
   id: string,
@@ -39,11 +112,12 @@ function core(
     id,
     name: `${cls === 1 ? "Frigate" : cls === 2 ? "Destroyer" : cls === 3 ? "Cruiser" : `Class-${cls}`} Core — ${variant.charAt(0).toUpperCase() + variant.slice(1)}`,
     type: "core",
+    partKind: "core",
     sizeClass: cls,
     variant,
     shape: { sides: 6, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: null },
     budgetCost: 0,
-    stats: { hp },
+    stats: { hp, sensorRangeKm: CORE_SENSOR_RANGE_KM[cls] },
     weaponPoints: wp,
     externalPoints: ep,
     internalPoints: ip,
@@ -56,16 +130,17 @@ function core(
 function weapon(
   id: string,
   cls: ShipClass,
+  kind: PartKind,
   name: string,
   sides: number,
   damage: number,
   rateHz: number,
   cost: number,
 ): SolarModuleDefinition {
+  const verts = WEAPON_VERTS[kind];
   return {
-    id, name, type: "weapon", sizeClass: cls,
-    // Weapons are leaf nodes — nothing can attach to them (no barrel children)
-    shape: { sides, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: [] },
+    id, name, type: "weapon", partKind: kind, sizeClass: cls,
+    shape: { sides, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: [], ...(verts ? { verts } : {}) },
     budgetCost: 1,
     stats: { damagePerShot: damage, fireRateHz: rateHz },
     shopCost: cost,
@@ -75,15 +150,16 @@ function weapon(
 function external(
   id: string,
   cls: ShipClass,
+  kind: PartKind,
   name: string,
   sides: number,
   stats: SolarModuleDefinition["stats"],
   cost: number,
 ): SolarModuleDefinition {
+  const verts = EXTERNAL_VERTS[kind];
   return {
-    id, name, type: "external", sizeClass: cls,
-    // External modules are leaf nodes — the emitter/sensor face cannot have children
-    shape: { sides, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: [] },
+    id, name, type: "external", partKind: kind, sizeClass: cls,
+    shape: { sides, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: [], ...(verts ? { verts } : {}) },
     budgetCost: 1,
     stats,
     shopCost: cost,
@@ -93,13 +169,14 @@ function external(
 function internal(
   id: string,
   cls: ShipClass,
+  kind: PartKind,
   name: string,
   sides: number,
   stats: SolarModuleDefinition["stats"],
   cost: number,
 ): SolarModuleDefinition {
   return {
-    id, name, type: "internal", sizeClass: cls,
+    id, name, type: "internal", partKind: kind, sizeClass: cls,
     shape: { sides, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: null },
     budgetCost: 1,
     stats,
@@ -115,7 +192,7 @@ function structure(
   cost: number,
 ): SolarModuleDefinition {
   return {
-    id, name, type: "structure", sizeClass: cls,
+    id, name, type: "structure", partKind: "frame", sizeClass: cls,
     shape: { sides, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: null },
     budgetCost: 0,
     stats: {},
@@ -124,6 +201,23 @@ function structure(
 }
 
 import type { ConverterSpec, SolarModuleType } from "../../types/solarShipBuilder";
+
+function factory(
+  id: string,
+  cls: ShipClass,
+  name: string,
+  sides: number,
+  maxClass: number,
+  cost: number,
+): SolarModuleDefinition {
+  return {
+    id, name, type: "factory", partKind: "factory-bay", sizeClass: cls,
+    shape: { sides, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: [] },
+    budgetCost: 1,
+    stats: { shipFactoryMaxClass: maxClass },
+    shopCost: cost,
+  };
+}
 
 function converter(
   id: string,
@@ -139,6 +233,7 @@ function converter(
     id,
     name: `${from.charAt(0).toUpperCase()}→${to.charAt(0).toUpperCase()} Converter Lv${lvl}`,
     type: "converter",
+    partKind: "converter-unit",
     sizeClass: cls,
     shape: { sides: 4, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: null },
     budgetCost: 0,
@@ -154,9 +249,14 @@ const ALL_MODULES: ReadonlyArray<SolarModuleDefinition> = [
 
   // ── Cores: class 1 (frigate) ───────────────────────────────────────────────
   //   armor: more HP / fewer slots    power: more slots / less HP    balanced: middle
-  core("core-c1-armor",    1, "armor",    2, 1, 1, 120, 1_000),
-  core("core-c1-power",    1, "power",    1, 2, 2,  60, 1_000),
-  core("core-c1-balanced", 1, "balanced", 2, 2, 2,  90, 1_200),
+  core("core-c1-armor",      1, "armor",      2, 1, 1, 120, 1_000),
+  core("core-c1-power",      1, "power",      1, 2, 2,  60, 1_000),
+  core("core-c1-balanced",   1, "balanced",   2, 2, 2,  90, 1_200),
+  // Named frigate hulls — H=weapon, M=external, L=internal
+  core("core-c1-pathfinder", 1, "pathfinder", 1, 2, 2,  70, 1_000), // 1H 2M 2L — utility scout
+  core("core-c1-raptor",     1, "raptor",     2, 2, 1,  85, 1_000), // 2H 2M 1L — combat interceptor
+  core("core-c1-wolfpack",   1, "wolfpack",   3, 3, 2, 100, 1_200), // 3H 3M 2L — strike frigate
+  core("core-c1-providence", 1, "providence", 2, 3, 3,  75, 1_200), // 2H 3M 3L — fleet support
 
   // ── Cores: class 2 (destroyer) ────────────────────────────────────────────
   core("core-c2-armor",    2, "armor",    3, 2, 2, 200, 3_500),
@@ -169,34 +269,34 @@ const ALL_MODULES: ReadonlyArray<SolarModuleDefinition> = [
   core("core-c3-balanced", 3, "balanced", 4, 4, 4, 280, 9_500),
 
   // ── Weapons: class 1 ──────────────────────────────────────────────────────
-  weapon("weapon-cannon-c1",  1, "Light Cannon",  3, 25, 0.8, 300),
-  weapon("weapon-laser-c1",   1, "Pulse Laser",   4, 10, 3.0, 400),
-  weapon("weapon-torpedo-c1", 1, "Mini Torpedo",  3, 60, 0.3, 500),
+  weapon("weapon-cannon-c1",  1, "cannon",  "Light Cannon",  3, 25, 0.8, 300),
+  weapon("weapon-laser-c1",   1, "laser",   "Pulse Laser",   4, 10, 3.0, 400),
+  weapon("weapon-torpedo-c1", 1, "torpedo", "Mini Torpedo",  3, 60, 0.3, 500),
 
   // ── Weapons: class 2 ──────────────────────────────────────────────────────
-  weapon("weapon-cannon-c2",  2, "Heavy Cannon",  3,  50, 0.8,   900),
-  weapon("weapon-laser-c2",   2, "Beam Laser",    4,  20, 3.0, 1_200),
-  weapon("weapon-torpedo-c2", 2, "Torpedo Bay",   3, 120, 0.3, 1_500),
+  weapon("weapon-cannon-c2",  2, "cannon",  "Heavy Cannon",  3,  50, 0.8,   900),
+  weapon("weapon-laser-c2",   2, "laser",   "Beam Laser",    4,  20, 3.0, 1_200),
+  weapon("weapon-torpedo-c2", 2, "torpedo", "Torpedo Bay",   3, 120, 0.3, 1_500),
 
   // ── External systems: class 1 ─────────────────────────────────────────────
-  external("ext-shield-c1",  1, "Shield Module",   4, { shieldCapacity: 80 },         350),
-  external("ext-sensor-c1",  1, "Sensor Array",    3, { sensorRangeKm: 500 },         250),
-  internal("ext-armor-c1",   1, "Armor Plate",     4, { armor: 20, hp: 40 },          200),
+  external("ext-shield-c1",  1, "shield", "Shield Module",   4, { shieldCapacity: 80 },         350),
+  external("ext-sensor-c1",  1, "radar",  "Sensor Array",    3, { sensorRangeKm: 500 },         250),
+  internal("ext-armor-c1",   1, "armor",  "Armor Plate",     4, { armor: 20, hp: 40 },          200),
 
   // ── External systems: class 2 ─────────────────────────────────────────────
-  external("ext-shield-c2",  2, "Heavy Shield",    4, { shieldCapacity: 160 },       1_050),
-  external("ext-sensor-c2",  2, "Long-Range Scan", 3, { sensorRangeKm: 1_200 },        750),
-  internal("ext-armor-c2",   2, "Reinforced Hull", 4, { armor: 40, hp: 80 },           600),
+  external("ext-shield-c2",  2, "shield", "Heavy Shield",    4, { shieldCapacity: 160 },       1_050),
+  external("ext-sensor-c2",  2, "radar",  "Long-Range Scan", 3, { sensorRangeKm: 1_200 },        750),
+  internal("ext-armor-c2",   2, "armor",  "Reinforced Hull", 4, { armor: 40, hp: 80 },           600),
 
   // ── Internal systems: class 1 ─────────────────────────────────────────────
-  external("int-engine-c1",  1, "Thruster",          3, { thrustMs2: 2_000 },          300),
-  internal("int-power-c1",   1, "Power Core",        4, { powerOutput: 100 },          300),
-  internal("int-crew-c1",    1, "Crew Quarters",     5, {},                            200),
+  external("int-engine-c1",  1, "thruster",  "Thruster",          3, { thrustMs2: 2_000 },          300),
+  internal("int-power-c1",   1, "reactor",   "Power Core",        4, { powerOutput: 100 },          300),
+  internal("int-crew-c1",    1, "crew-quarters", "Crew Quarters",  5, {},                            200),
 
   // ── Internal systems: class 2 ─────────────────────────────────────────────
-  external("int-engine-c2",  2, "Fusion Thruster",   3, { thrustMs2: 4_500 },          900),
-  internal("int-power-c2",   2, "Reactor Cell",      4, { powerOutput: 250 },          900),
-  internal("int-crew-c2",    2, "Officer Quarters",  5, {},                            600),
+  external("int-engine-c2",  2, "thruster",  "Fusion Thruster",   3, { thrustMs2: 4_500 },          900),
+  internal("int-power-c2",   2, "reactor",   "Reactor Cell",      4, { powerOutput: 250 },          900),
+  internal("int-crew-c2",    2, "crew-quarters", "Officer Quarters", 5, {},                          600),
 
   // ── Structure: class 1 ────────────────────────────────────────────────────
   structure("struct-tri-c1",  1, "Tri-Frame",   3,  50),
@@ -264,102 +364,102 @@ const ALL_MODULES: ReadonlyArray<SolarModuleDefinition> = [
   core("core-c9-balanced", 9, "balanced", 10, 9, 9, 2_400, 880_000),
 
   // ── Weapons: class 3 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c3",  3, "Auto-Cannon",    3,  80, 0.8,   2_500),
-  weapon("weapon-laser-c3",   3, "Strike Laser",   4,  35, 3.0,   3_000),
-  weapon("weapon-torpedo-c3", 3, "Heavy Torpedo",  3, 200, 0.3,   4_000),
+  weapon("weapon-cannon-c3",  3, "cannon",  "Auto-Cannon",    3,  80, 0.8,   2_500),
+  weapon("weapon-laser-c3",   3, "laser",   "Strike Laser",   4,  35, 3.0,   3_000),
+  weapon("weapon-torpedo-c3", 3, "torpedo", "Heavy Torpedo",  3, 200, 0.3,   4_000),
 
   // ── Weapons: class 4 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c4",  4, "Mass Driver",    3, 130, 0.8,   7_000),
-  weapon("weapon-laser-c4",   4, "Focused Beam",   4,  55, 3.0,   9_000),
-  weapon("weapon-torpedo-c4", 4, "Siege Torpedo",  3, 320, 0.3,  12_000),
+  weapon("weapon-cannon-c4",  4, "cannon",  "Mass Driver",    3, 130, 0.8,   7_000),
+  weapon("weapon-laser-c4",   4, "laser",   "Focused Beam",   4,  55, 3.0,   9_000),
+  weapon("weapon-torpedo-c4", 4, "torpedo", "Siege Torpedo",  3, 320, 0.3,  12_000),
 
   // ── Weapons: class 5 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c5",  5, "Railgun",        3, 200, 0.8,  18_000),
-  weapon("weapon-laser-c5",   5, "Beam Array",     4,  80, 3.0,  22_000),
-  weapon("weapon-torpedo-c5", 5, "Barrage Bay",    3, 500, 0.3,  30_000),
+  weapon("weapon-cannon-c5",  5, "cannon",  "Railgun",        3, 200, 0.8,  18_000),
+  weapon("weapon-laser-c5",   5, "laser",   "Beam Array",     4,  80, 3.0,  22_000),
+  weapon("weapon-torpedo-c5", 5, "torpedo", "Barrage Bay",    3, 500, 0.3,  30_000),
 
   // ── Weapons: class 6 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c6",  6, "Gauss Cannon",   3,   300, 0.8,  40_000),
-  weapon("weapon-laser-c6",   6, "Lance Array",    4,   120, 3.0,  50_000),
-  weapon("weapon-torpedo-c6", 6, "Siege Rack",     3,   750, 0.3,  65_000),
+  weapon("weapon-cannon-c6",  6, "cannon",  "Gauss Cannon",   3,   300, 0.8,  40_000),
+  weapon("weapon-laser-c6",   6, "laser",   "Lance Array",    4,   120, 3.0,  50_000),
+  weapon("weapon-torpedo-c6", 6, "torpedo", "Siege Rack",     3,   750, 0.3,  65_000),
 
   // ── Weapons: class 7 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c7",  7, "Macro Cannon",   3,   450, 0.8,  80_000),
-  weapon("weapon-laser-c7",   7, "Spinal Laser",   4,   180, 3.0, 100_000),
-  weapon("weapon-torpedo-c7", 7, "Broadside Bay",  3, 1_100, 0.3, 130_000),
+  weapon("weapon-cannon-c7",  7, "cannon",  "Macro Cannon",   3,   450, 0.8,  80_000),
+  weapon("weapon-laser-c7",   7, "laser",   "Spinal Laser",   4,   180, 3.0, 100_000),
+  weapon("weapon-torpedo-c7", 7, "torpedo", "Broadside Bay",  3, 1_100, 0.3, 130_000),
 
   // ── Weapons: class 8 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c8",  8, "Void Cannon",    3,   650, 0.8, 160_000),
-  weapon("weapon-laser-c8",   8, "Annihilator",    4,   260, 3.0, 200_000),
-  weapon("weapon-torpedo-c8", 8, "Doomsday Rack",  3, 1_600, 0.3, 260_000),
+  weapon("weapon-cannon-c8",  8, "cannon",  "Void Cannon",    3,   650, 0.8, 160_000),
+  weapon("weapon-laser-c8",   8, "laser",   "Annihilator",    4,   260, 3.0, 200_000),
+  weapon("weapon-torpedo-c8", 8, "torpedo", "Doomsday Rack",  3, 1_600, 0.3, 260_000),
 
   // ── Weapons: class 9 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c9",  9, "World-Breaker",  3, 1_000, 0.8, 320_000),
-  weapon("weapon-laser-c9",   9, "Titan Beam",     4,   400, 3.0, 400_000),
-  weapon("weapon-torpedo-c9", 9, "Armageddon Bay", 3, 2_500, 0.3, 520_000),
+  weapon("weapon-cannon-c9",  9, "cannon",  "World-Breaker",  3, 1_000, 0.8, 320_000),
+  weapon("weapon-laser-c9",   9, "laser",   "Titan Beam",     4,   400, 3.0, 400_000),
+  weapon("weapon-torpedo-c9", 9, "torpedo", "Armageddon Bay", 3, 2_500, 0.3, 520_000),
 
   // ── External systems: class 3 ────────────────────────────────────────────
-  external("ext-shield-c3",  3, "Battle Shield",     4, { shieldCapacity: 300 },          3_000),
-  external("ext-sensor-c3",  3, "Combat Array",      3, { sensorRangeKm: 2_500 },         2_000),
-  internal("ext-armor-c3",   3, "Battle Plate",      4, { armor: 70, hp: 150 },           2_500),
+  external("ext-shield-c3",  3, "shield", "Battle Shield",     4, { shieldCapacity: 300 },          3_000),
+  external("ext-sensor-c3",  3, "radar",  "Combat Array",      3, { sensorRangeKm: 2_500 },         2_000),
+  internal("ext-armor-c3",   3, "armor",  "Battle Plate",      4, { armor: 70, hp: 150 },           2_500),
 
   // ── External systems: class 4 ────────────────────────────────────────────
-  external("ext-shield-c4",  4, "Aegis Shield",      4, { shieldCapacity: 500 },          8_000),
-  external("ext-sensor-c4",  4, "Deep Scanner",      3, { sensorRangeKm: 5_000 },         5_500),
-  internal("ext-armor-c4",   4, "Laminate Plate",    4, { armor: 120, hp: 250 },          7_000),
+  external("ext-shield-c4",  4, "shield", "Aegis Shield",      4, { shieldCapacity: 500 },          8_000),
+  external("ext-sensor-c4",  4, "radar",  "Deep Scanner",      3, { sensorRangeKm: 5_000 },         5_500),
+  internal("ext-armor-c4",   4, "armor",  "Laminate Plate",    4, { armor: 120, hp: 250 },          7_000),
 
   // ── External systems: class 5 ────────────────────────────────────────────
-  external("ext-shield-c5",  5, "Barrier Array",     4, { shieldCapacity: 800 },         18_000),
-  external("ext-sensor-c5",  5, "Horizon Scanner",   3, { sensorRangeKm: 8_000 },        13_000),
-  internal("ext-armor-c5",   5, "Composite Hull",    4, { armor: 200, hp: 400 },         16_000),
+  external("ext-shield-c5",  5, "shield", "Barrier Array",     4, { shieldCapacity: 800 },         18_000),
+  external("ext-sensor-c5",  5, "radar",  "Horizon Scanner",   3, { sensorRangeKm: 8_000 },        13_000),
+  internal("ext-armor-c5",   5, "armor",  "Composite Hull",    4, { armor: 200, hp: 400 },         16_000),
 
   // ── External systems: class 6 ────────────────────────────────────────────
-  external("ext-shield-c6",  6, "Void Shield",       4, { shieldCapacity: 1_300 },       38_000),
-  external("ext-sensor-c6",  6, "Stellar Scanner",   3, { sensorRangeKm: 12_000 },       27_000),
-  internal("ext-armor-c6",   6, "Ablative Armor",    4, { armor: 330, hp: 650 },         34_000),
+  external("ext-shield-c6",  6, "shield", "Void Shield",       4, { shieldCapacity: 1_300 },       38_000),
+  external("ext-sensor-c6",  6, "radar",  "Stellar Scanner",   3, { sensorRangeKm: 12_000 },       27_000),
+  internal("ext-armor-c6",   6, "armor",  "Ablative Armor",    4, { armor: 330, hp: 650 },         34_000),
 
   // ── External systems: class 7 ────────────────────────────────────────────
-  external("ext-shield-c7",  7, "Fleet Shield",      4, { shieldCapacity: 2_000 },       75_000),
-  external("ext-sensor-c7",  7, "Sector Scanner",    3, { sensorRangeKm: 18_000 },       55_000),
-  internal("ext-armor-c7",   7, "Nano-Armor",        4, { armor: 500, hp: 1_000 },       68_000),
+  external("ext-shield-c7",  7, "shield", "Fleet Shield",      4, { shieldCapacity: 2_000 },       75_000),
+  external("ext-sensor-c7",  7, "radar",  "Sector Scanner",    3, { sensorRangeKm: 18_000 },       55_000),
+  internal("ext-armor-c7",   7, "armor",  "Nano-Armor",        4, { armor: 500, hp: 1_000 },       68_000),
 
   // ── External systems: class 8 ────────────────────────────────────────────
-  external("ext-shield-c8",  8, "Grand Barrier",     4, { shieldCapacity: 3_200 },      150_000),
-  external("ext-sensor-c8",  8, "Arc Scanner",       3, { sensorRangeKm: 25_000 },      110_000),
-  internal("ext-armor-c8",   8, "Chromite Armor",    4, { armor: 750, hp: 1_500 },      135_000),
+  external("ext-shield-c8",  8, "shield", "Grand Barrier",     4, { shieldCapacity: 3_200 },      150_000),
+  external("ext-sensor-c8",  8, "radar",  "Arc Scanner",       3, { sensorRangeKm: 25_000 },      110_000),
+  internal("ext-armor-c8",   8, "armor",  "Chromite Armor",    4, { armor: 750, hp: 1_500 },      135_000),
 
   // ── External systems: class 9 ────────────────────────────────────────────
-  external("ext-shield-c9",  9, "Titan Bulwark",     4, { shieldCapacity: 5_000 },      300_000),
-  external("ext-sensor-c9",  9, "Galaxy Scanner",    3, { sensorRangeKm: 40_000 },      220_000),
-  internal("ext-armor-c9",   9, "Impervium Plating", 4, { armor: 1_200, hp: 2_400 },    270_000),
+  external("ext-shield-c9",  9, "shield", "Titan Bulwark",     4, { shieldCapacity: 5_000 },      300_000),
+  external("ext-sensor-c9",  9, "radar",  "Galaxy Scanner",    3, { sensorRangeKm: 40_000 },      220_000),
+  internal("ext-armor-c9",   9, "armor",  "Impervium Plating", 4, { armor: 1_200, hp: 2_400 },    270_000),
 
   // ── Internal systems: class 3 ────────────────────────────────────────────
-  external("int-engine-c3",  3, "Ion Thruster",       3, { thrustMs2: 8_000 },            2_500),
-  internal("int-power-c3",   3, "Fusion Core",        4, { powerOutput: 500 },            2_500),
+  external("int-engine-c3",  3, "ion-engine",  "Ion Thruster",       3, { thrustMs2: 8_000 },            2_500),
+  internal("int-power-c3",   3, "reactor",     "Fusion Core",        4, { powerOutput: 500 },            2_500),
 
   // ── Internal systems: class 4 ────────────────────────────────────────────
-  external("int-engine-c4",  4, "Plasma Drive",       3, { thrustMs2: 14_000 },           7_500),
-  internal("int-power-c4",   4, "Fission Reactor",    4, { powerOutput: 900 },            7_500),
+  external("int-engine-c4",  4, "ion-engine",  "Plasma Drive",       3, { thrustMs2: 14_000 },           7_500),
+  internal("int-power-c4",   4, "reactor",     "Fission Reactor",    4, { powerOutput: 900 },            7_500),
 
   // ── Internal systems: class 5 ────────────────────────────────────────────
-  external("int-engine-c5",  5, "Warp Nacelle",       3, { thrustMs2: 22_000 },          18_000),
-  internal("int-power-c5",   5, "Quantum Cell",       4, { powerOutput: 1_500 },         18_000),
+  external("int-engine-c5",  5, "warp-nacelle", "Warp Nacelle",       3, { thrustMs2: 22_000 },          18_000),
+  internal("int-power-c5",   5, "reactor",      "Quantum Cell",       4, { powerOutput: 1_500 },         18_000),
 
   // ── Internal systems: class 6 ────────────────────────────────────────────
-  external("int-engine-c6",  6, "Gravity Drive",      3, { thrustMs2: 35_000 },          38_000),
-  internal("int-power-c6",   6, "Dark Reactor",       4, { powerOutput: 2_500 },         38_000),
+  external("int-engine-c6",  6, "gravity-drive", "Gravity Drive",      3, { thrustMs2: 35_000 },          38_000),
+  internal("int-power-c6",   6, "reactor",        "Dark Reactor",       4, { powerOutput: 2_500 },         38_000),
 
   // ── Internal systems: class 7 ────────────────────────────────────────────
-  external("int-engine-c7",  7, "Singularity Drive",  3, { thrustMs2: 55_000 },          75_000),
-  internal("int-power-c7",   7, "Vortex Reactor",     4, { powerOutput: 4_000 },         75_000),
+  external("int-engine-c7",  7, "gravity-drive", "Singularity Drive",  3, { thrustMs2: 55_000 },          75_000),
+  internal("int-power-c7",   7, "reactor",        "Vortex Reactor",     4, { powerOutput: 4_000 },         75_000),
 
   // ── Internal systems: class 8 ────────────────────────────────────────────
-  external("int-engine-c8",  8, "Titan Drive",        3, { thrustMs2: 80_000 },         150_000),
-  internal("int-power-c8",   8, "Neutron Core",       4, { powerOutput: 6_500 },        150_000),
+  external("int-engine-c8",  8, "gravity-drive", "Titan Drive",        3, { thrustMs2: 80_000 },         150_000),
+  internal("int-power-c8",   8, "reactor",        "Neutron Core",       4, { powerOutput: 6_500 },        150_000),
 
   // ── Internal systems: class 9 ────────────────────────────────────────────
-  external("int-engine-c9",  9, "Omega Drive",        3, { thrustMs2: 120_000 },        300_000),
-  internal("int-power-c9",   9, "Stellar Forge",      4, { powerOutput: 10_000 },       300_000),
+  external("int-engine-c9",  9, "gravity-drive", "Omega Drive",        3, { thrustMs2: 120_000 },        300_000),
+  internal("int-power-c9",   9, "reactor",        "Stellar Forge",      4, { powerOutput: 10_000 },       300_000),
 
   // ── Structure: class 3 ───────────────────────────────────────────────────
   structure("struct-tri-c3",  3, "Tri-Frame III",    3,    400),
@@ -395,6 +495,18 @@ const ALL_MODULES: ReadonlyArray<SolarModuleDefinition> = [
   structure("struct-tri-c9",  9, "Tri-Frame IX",    3, 25_600),
   structure("struct-quad-c9", 9, "Quad-Frame IX",   4, 38_400),
   structure("struct-hex-c9",  9, "Hex-Junction IX", 6, 57_600),
+
+  // ── Factory modules (capital-class and above, stations only) ─────────────
+  factory("int-factory-c4",  4, "Ship Foundry",   5, 4,  15_000),
+  factory("int-factory-c6",  6, "Fleet Foundry",  6, 6,  60_000),
+
+  // ── Shield recharger (internal, capital+) ─────────────────────────────────
+  internal("int-shield-regen-c4", 4, "shield", "Shield Regen Core",   4, { shieldRechargeRatePerSec: 50 },   10_000),
+  internal("int-shield-regen-c6", 6, "shield", "Barrier Regen Core",  4, { shieldRechargeRatePerSec: 100 },  45_000),
+
+  // ── Electronic warfare suite (internal, capital+) ─────────────────────────
+  internal("int-ew-c4", 4, "scrambler", "E-War Suite",    5, { specialEffect: "electronic-warfare" }, 12_000),
+  internal("int-ew-c6", 6, "scrambler", "E-War Platform", 5, { specialEffect: "electronic-warfare" }, 50_000),
 ];
 
 // ── Index ─────────────────────────────────────────────────────────────────────

@@ -43,10 +43,11 @@ import { computeShipStats } from "./parts/stats";
 import { layoutBlueprint, type Placement } from "./parts/geometry";
 import { canSnap } from "./parts/assembly";
 import { soundManager } from "../audio/SoundManager";
-import { getPirateBlueprint } from "./data/PirateBlueprintRegistry";
-import { getEarthBlueprint } from "./data/EarthBlueprintRegistry";
-import { getMarsBlueprint } from "./data/MarsBlueprintRegistry";
+import { getPirateBlueprint, PIRATE_BLUEPRINTS } from "./data/PirateBlueprintRegistry";
+import { getEarthBlueprint, EARTH_BLUEPRINTS } from "./data/EarthBlueprintRegistry";
+import { getMarsBlueprint, MARS_BLUEPRINTS } from "./data/MarsBlueprintRegistry";
 import { SolarStationRegistry, type StationFaction } from "./data/SolarStationRegistry";
+import { makePlayerStarterBlueprint } from "./data/MercenaryBlueprintRegistry";
 import type { SolarShipBlueprint, SavedBlueprintSummary } from "../types/solarShipBuilder";
 import { GeometryEngine } from "./shipbuilder/GeometryEngine";
 
@@ -64,11 +65,14 @@ interface SolarEnemyBase {
   maxShips: number;
   spawnRoster: ReadonlyArray<{ name: string; typeIdx: number; sizeClass: number }>;
   spawnRadiusKm: number;
+  defenseRadiusKm: number;
   turretRangeKm: number;
   turretDamage: number;
   turretCooldownMs: number;
   turretWeaponIdx: number;
   lastTurretFireMs: number;
+  sizeClass: number;
+  blueprintId: string;
 }
 
 interface SolarEnemyShip {
@@ -81,10 +85,16 @@ interface SolarEnemyShip {
   position: { x: number; y: number };
   velocity: { x: number; y: number };
   heading: number;
+  /** Desired heading set by AI; actual heading smoothly interpolates toward this. */
+  targetHeading: number;
   health: number;
   maxHealth: number;
   weapon0CooldownMs: number;
   weapon1CooldownMs: number;
+  /** Maximum detection range (km). Player/enemies beyond this are invisible to this ship. */
+  scannerRangeKm: number;
+  /** Set when this ship was hit from outside its scanner range; it will fly here to investigate. */
+  lastKnownThreatPos: { x: number; y: number } | null;
 }
 
 interface SolarEnemyProjectile {
@@ -125,17 +135,28 @@ interface SolarExplosion {
   scale: number;
 }
 
+/** Tunable constants for solar-system combat — edit here to balance, not inline. */
+const SOLAR_COMBAT_CONFIG = {
+  PROJECTILE_SPEED_KM_S: 600,
+  PLAYER_SENSOR_RANGE_KM: 200,
+  LASER_HIT_RADIUS_KM: 20,
+  PROJECTILE_HIT_RADIUS_KM: 10,
+  AUTO_FIRE_RANGE_KM: 120,
+  AUTO_FIRE_HALF_CONE_DEG: 45,
+  CLICK_DETECT_RADIUS_PX: 30,
+} as const;
+
 const SOLAR_ENEMY_TYPES = [
-  { name: "Scout",       color: 0xff5555, health:  60, speed: 14000 },
-  { name: "Interceptor", color: 0xff8822, health:  80, speed: 16000 },
-  { name: "Fighter",     color: 0xff2266, health: 100, speed: 11000 },
-  { name: "Gunship",     color: 0xcc2222, health: 180, speed:  7000 },
-  { name: "Destroyer",   color: 0x990033, health: 250, speed:  5500 },
-  { name: "Predator",    color: 0xff9900, health:  90, speed: 15000 },
-  { name: "Wraith",      color: 0xcc44ff, health:  70, speed: 18000 },
-  { name: "Titan",       color: 0xff3300, health: 400, speed:  4000 },
-  { name: "Spectre",     color: 0xff44aa, health:  80, speed: 17000 },
-  { name: "Ravager",     color: 0xffaa00, health: 130, speed: 10000 },
+  { name: "Scout",       color: 0xff5555, health:  60, speed: 14000, scannerRangeKm: 250 },
+  { name: "Interceptor", color: 0xff8822, health:  80, speed: 16000, scannerRangeKm: 220 },
+  { name: "Fighter",     color: 0xff2266, health: 100, speed: 11000, scannerRangeKm: 180 },
+  { name: "Gunship",     color: 0xcc2222, health: 180, speed:  7000, scannerRangeKm: 150 },
+  { name: "Destroyer",   color: 0x990033, health: 250, speed:  5500, scannerRangeKm: 170 },
+  { name: "Predator",    color: 0xff9900, health:  90, speed: 15000, scannerRangeKm: 210 },
+  { name: "Wraith",      color: 0xcc44ff, health:  70, speed: 18000, scannerRangeKm: 300 },
+  { name: "Titan",       color: 0xff3300, health: 400, speed:  4000, scannerRangeKm: 130 },
+  { name: "Spectre",     color: 0xff44aa, health:  80, speed: 17000, scannerRangeKm: 260 },
+  { name: "Ravager",     color: 0xffaa00, health: 130, speed: 10000, scannerRangeKm: 160 },
 ] as const;
 
 const SOLAR_WEAPONS = [
@@ -223,6 +244,17 @@ export class GameManager {
   private solarEnemyShips: SolarEnemyShip[] = [];
   private solarEnemyProjectiles: SolarEnemyProjectile[] = [];
   private solarEnemyNextId = 0;
+  /**
+   * Last known world position for every enemy ship the player has spotted.
+   * Updated each frame while the ship is within scanner range; persists after
+   * the ship leaves range so the player sees a ghost marker.
+   */
+  private readonly solarLastKnownShipPositions = new Map<string, { x: number; y: number; color: number }>();
+  /**
+   * Enemy station ids the player has scanned at least once.  Stations never
+   * move so a discovered position is permanently accurate.
+   */
+  private readonly solarDiscoveredStationIds = new Set<string>();
   /** Click-to-lock targeting. */
   private solarLockedIds = new Set<string>();
   private solarFocusedId: string | null = null;
@@ -239,6 +271,8 @@ export class GameManager {
   private solarPlayerMaxHealth = 100;
   private solarPlayerShield = 50;
   private solarPlayerMaxShield = 50;
+  /** Effective scanner range (km) for the player's active blueprint. Recomputed when blueprint changes. */
+  private solarPlayerScannerRangeKm = 150;
   /** Flash overlay when player takes damage (counts down ms). */
   private solarDamageFlashMs = 0;
   /** Active explosions in solar-system space. */
@@ -270,26 +304,26 @@ export class GameManager {
   private solarActiveBlueprintId: string | null = null;
   private solarBlueprintCounter = 0;
 
-  // Blueprint shape caches — computed once per blueprint/sizeClass, reused every frame.
+  // Blueprint shape caches — computed once per blueprint id, reused every frame.
   private solarPlayerBlueprintCache: {
     blueprintId: string;
-    modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
+    modules: Array<{ vertices: Array<{ x: number; y: number }>; worldX: number; worldY: number; moduleType: string; partKind: string; grade: number }>;
     coreRadius: number;
   } | null = null;
-  private readonly pirateBlueprintModulesCache = new Map<number, {
-    modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
-    coreRadius: number;
-  }>();
-  private readonly earthBlueprintModulesCache = new Map<number, {
-    modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
-    coreRadius: number;
-  }>();
-  private readonly marsBlueprintModulesCache = new Map<number, {
-    modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
+  /** Single geometry cache for all faction ship/station blueprints (key = blueprint id). */
+  private readonly blueprintGeometryCache = new Map<string, {
+    modules: Array<{ vertices: Array<{ x: number; y: number }>; worldX: number; worldY: number; moduleType: string; partKind: string; grade: number }>;
     coreRadius: number;
   }>();
   /** Factions that have attacked Mars ships — triggers Mars retaliation. */
   private marsProvokedFactions: Set<StationFaction | "player"> = new Set();
+  /** True while the player is dragging the zoom slider. */
+  private zoomBarDragging = false;
+  /** Ship id that is visually selected (white circle, no weapon lock). */
+  private solarSelectedId: string | null = null;
+
+  /** Screen-space bounds of the zoom bar track (fixed, 1280×720 canvas). */
+  private static readonly ZOOM_BAR = { x: 12, top: 110, bottom: 540, w: 28 } as const;
   /** Where the shipyard should return when ESC is pressed. */
   private shipyardReturnScreen: "main-menu" | "docked" = "main-menu";
   /** Selection in the solar-system pause overlay (0=Resume, 1=Quit). */
@@ -328,11 +362,6 @@ export class GameManager {
   private shipyardStatusMs = 0;
 
   // Edge-triggered menu input tracking. `prev*` mirrors last frame's poll.
-  private prevPausePressed = false;
-  private prevMenuConfirmPressed = false;
-  private prevMenuBackPressed = false;
-  private prevUpPressed = false;
-  private prevDownPressed = false;
   /** Active selection index within the current menu list. */
   private menuSelection = 0;
   /** Where the stats screen should return to when ESC/back is pressed. */
@@ -483,14 +512,6 @@ export class GameManager {
       this.updateMissionDetail(clamped);
     }
 
-    // Commit edge-trigger prev-state AFTER all update*() have consumed edges.
-    const input = this.input.poll();
-    this.prevPausePressed = input.pause;
-    this.prevMenuConfirmPressed = input.menuConfirm;
-    this.prevMenuBackPressed = input.menuBack;
-    this.prevUpPressed = input.moveUp;
-    this.prevDownPressed = input.moveDown;
-
     this.renderFrame(clamped);
 
     // Clear one-frame touch pulses (bomb, menuConfirm, pause from a tap) so
@@ -504,16 +525,14 @@ export class GameManager {
   /** Moves the menu selection by ±1, wrapping, on Up/Down edge presses. */
   private stepMenuSelection(itemCount: number): void {
     const input = this.input.poll();
-    const upEdge = input.moveUp && !this.prevUpPressed;
-    const downEdge = input.moveDown && !this.prevDownPressed;
-    const swipeUp = input.swipeUpPulse;
-    const swipeDown = input.swipeDownPulse;
+    const upEdge = this.input.wasPressed("ArrowUp") || input.swipeUpPulse;
+    const downEdge = this.input.wasPressed("ArrowDown") || input.swipeDownPulse;
 
-    if (upEdge || swipeUp) {
+    if (upEdge) {
       this.menuSelection = (this.menuSelection - 1 + itemCount) % itemCount;
       soundManager.menuNav();
     }
-    if (downEdge || swipeDown) {
+    if (downEdge) {
       this.menuSelection = (this.menuSelection + 1) % itemCount;
       soundManager.menuNav();
     }
@@ -521,20 +540,17 @@ export class GameManager {
 
   /** True when menuConfirm is newly pressed (edge-triggered). */
   private wasMenuConfirmPressed(): boolean {
-    const input = this.input.poll();
-    return input.menuConfirm && !this.prevMenuConfirmPressed;
+    return this.input.menuConfirmEdge();
   }
 
   /** True when menuBack is newly pressed (edge-triggered). */
   private wasMenuBackPressed(): boolean {
-    const input = this.input.poll();
-    return input.menuBack && !this.prevMenuBackPressed;
+    return this.input.wasPressed("Escape");
   }
 
   /** True when pause toggle (ESC/P) is newly pressed (edge-triggered). */
   private wasPausePressed(): boolean {
-    const input = this.input.poll();
-    return input.pause && !this.prevPausePressed;
+    return this.input.pauseEdge();
   }
 
   /** Public accessor for the renderer. */
@@ -1090,9 +1106,8 @@ export class GameManager {
     }
 
     const nodeIds = this.getStarmapNodeIds();
-    const input = this.input.poll();
-    const upEdge = input.moveUp && !this.prevUpPressed;
-    const downEdge = input.moveDown && !this.prevDownPressed;
+    const upEdge = this.input.wasPressed("ArrowUp");
+    const downEdge = this.input.wasPressed("ArrowDown");
     const len = nodeIds.length;
     if (len > 0) {
       if (upEdge) {
@@ -1232,13 +1247,27 @@ export class GameManager {
     // Start the player docked at Earth Station.
     const sessionState = this.solarSystem.getSessionState();
 
-    // Give the player 3 of each module as starter inventory.
+    // Give the player 3 of each non-core module as starter inventory.
     for (const mod of SolarModuleRegistry.getAllModules()) {
       if (mod.type !== "core") {
         sessionState.moduleInventory.set(mod.id, 3);
       }
     }
-    sessionState.playerPosition = { x: 312, y: 0 }; // Earth Station world position
+    // Give the player 1 of each class-1 frigate core for testing.
+    for (const core of SolarModuleRegistry.getCores(1)) {
+      sessionState.moduleInventory.set(core.id, 1);
+    }
+
+    // Seed the player's starting ship — "The Drifter", a mercenary-spec
+    // class-1 frigate: scaffold + one cannon + one thruster.  Worst in game.
+    if (!this.solarActiveBlueprintId) {
+      const starter = makePlayerStarterBlueprint();
+      this.solarSavedBlueprints.set(starter.id, starter);
+      this.solarActiveBlueprintId = starter.id;
+    }
+    this.solarPlayerScannerRangeKm = this.computePlayerScannerRange();
+
+    sessionState.playerPosition = { x: 980, y: 30 }; // Earth Station world position (Earth 900,0 + offset 80,30)
     sessionState.playerVelocity = { x: 0, y: 0 };
     sessionState.playerHeading = 0;
     sessionState.zoomLevel = 1.0;
@@ -1247,6 +1276,8 @@ export class GameManager {
 
     // Initialize combat stations from the data registry.
     this.marsProvokedFactions = new Set();
+    this.solarLastKnownShipPositions.clear();
+    this.solarDiscoveredStationIds.clear();
     this.solarEnemyBases = SolarStationRegistry.getStationsBySystem("sol").map(def => ({
       id: def.id,
       name: def.name,
@@ -1261,11 +1292,14 @@ export class GameManager {
       maxShips: def.spawn.maxShips,
       spawnRoster: def.spawn.roster,
       spawnRadiusKm: def.spawn.radiusKm,
+      defenseRadiusKm: def.defenseRadiusKm,
       turretRangeKm: def.turret.rangeKm,
       turretDamage: def.turret.damage,
       turretCooldownMs: def.turret.cooldownMs,
       turretWeaponIdx: def.turret.weaponIdx,
       lastTurretFireMs: 0,
+      sizeClass: def.sizeClass,
+      blueprintId: def.blueprintId,
     }));
     this.solarEnemyShips = [];
     this.solarEnemyProjectiles = [];
@@ -1319,29 +1353,29 @@ export class GameManager {
         },
         {
           id: "planet-earth", name: "Earth", type: "planet",
-          position: { x: 300, y: 0 }, radius: 8, mass: 5.972e24, gravityStrength: 0,
+          position: { x: 900, y: 0 }, radius: 8, mass: 5.972e24, gravityStrength: 0,
           color: { r: 100, g: 150, b: 255 },
-          orbital: this.staticOrbit("star-sol", 300),
+          orbital: this.staticOrbit("star-sol", 900),
           isPrimaryGravitySource: false,
         },
         {
           id: "planet-mars", name: "Mars", type: "planet",
-          position: { x: 480, y: 80 }, radius: 6, mass: 6.417e23, gravityStrength: 0,
+          position: { x: 1440, y: 240 }, radius: 6, mass: 6.417e23, gravityStrength: 0,
           color: { r: 200, g: 100, b: 80 },
-          orbital: this.staticOrbit("star-sol", 486),
+          orbital: this.staticOrbit("star-sol", 1458),
           isPrimaryGravitySource: false,
         },
       ],
       locations: [
         {
           id: "station-earth-orbit", name: "Earth Station", type: "station",
-          bodyId: "planet-earth", position: { x: 12, y: 0 }, dockingRadius: 30,
+          bodyId: "planet-earth", position: { x: 80, y: 30 }, dockingRadius: 40,
           controllingFaction: "terran-federation",
           npcs: ["npc-commander-voss", "npc-trader-halley"], shops: [],
         },
         {
           id: "outpost-mars", name: "Curiosity Base", type: "outpost",
-          bodyId: "planet-mars", position: { x: 8, y: 2 }, dockingRadius: 25,
+          bodyId: "planet-mars", position: { x: 55, y: 25 }, dockingRadius: 35,
           controllingFaction: "terran-federation",
           npcs: ["npc-trader-halley"], shops: [],
         },
@@ -1366,16 +1400,16 @@ export class GameManager {
         },
         {
           id: "planet-kepler-442b", name: "Kepler-442b", type: "planet",
-          position: { x: 340, y: -60 }, radius: 9, mass: 8.4e24, gravityStrength: 0,
+          position: { x: 1000, y: -180 }, radius: 9, mass: 8.4e24, gravityStrength: 0,
           color: { r: 120, g: 200, b: 130 },
-          orbital: this.staticOrbit("star-kepler-442", 346),
+          orbital: this.staticOrbit("star-kepler-442", 1016),
           isPrimaryGravitySource: false,
         },
       ],
       locations: [
         {
           id: "station-kepler-orbital", name: "Kepler Orbital", type: "station",
-          bodyId: "planet-kepler-442b", position: { x: 14, y: 0 }, dockingRadius: 30,
+          bodyId: "planet-kepler-442b", position: { x: 80, y: 30 }, dockingRadius: 40,
           controllingFaction: "xeno-collective",
           npcs: ["npc-emissary-zyx", "npc-archivist-krell"], shops: [],
         },
@@ -1400,16 +1434,16 @@ export class GameManager {
         },
         {
           id: "planet-proxima-b", name: "Proxima b", type: "planet",
-          position: { x: 200, y: 40 }, radius: 7, mass: 7.6e24, gravityStrength: 0,
+          position: { x: 600, y: 120 }, radius: 7, mass: 7.6e24, gravityStrength: 0,
           color: { r: 180, g: 90, b: 70 },
-          orbital: this.staticOrbit("star-proxima", 204),
+          orbital: this.staticOrbit("star-proxima", 612),
           isPrimaryGravitySource: false,
         },
       ],
       locations: [
         {
           id: "outpost-proxima-b", name: "Frontier Outpost", type: "outpost",
-          bodyId: "planet-proxima-b", position: { x: 8, y: 0 }, dockingRadius: 25,
+          bodyId: "planet-proxima-b", position: { x: 65, y: 20 }, dockingRadius: 35,
           controllingFaction: "nova-rebels",
           npcs: ["npc-insurgent-tyne", "npc-strategist-orion"], shops: [],
         },
@@ -1556,19 +1590,19 @@ export class GameManager {
       }
     }
 
-    // Click-to-lock: tap on an enemy to lock/unlock it.
-    if (input.pointerDownPulse && !this.mapOpen) {
-      const { x: sx, y: sy } = input.pointerDownPulse;
+    // Click = select (white ring).  Meta/ctrl+click = weapon-lock the ship.
+    const clickPulse = input.pointerDownPulse ?? input.pointerMetaDownPulse;
+    const isMetaClick = !input.pointerDownPulse && !!input.pointerMetaDownPulse;
+    if (clickPulse && !this.mapOpen) {
+      const { x: sx, y: sy } = clickPulse;
       const zoom = this.solarSystem.getSessionState().zoomLevel;
       const kmToPx = Math.max(0.05, zoom);
-      const pcx = this.width / 2;  // 640
-      const pcy = this.height / 2; // 360
+      const pcx = this.width / 2;
+      const pcy = this.height / 2;
       const worldX = (sx - pcx) / kmToPx + playerPos.x;
       const worldY = (sy - pcy) / kmToPx + playerPos.y;
-      const sensorRange = 200; // km
-      // Click target radius in km: 30 screen-px converted to world units so
-      // the hit area always matches the rendered ship regardless of zoom.
-      const clickRadiusKm = 30 / kmToPx;
+      const sensorRange = this.solarPlayerScannerRangeKm;
+      const clickRadiusKm = SOLAR_COMBAT_CONFIG.CLICK_DETECT_RADIUS_PX / kmToPx;
       let bestDist = clickRadiusKm;
       let clicked: string | null = null;
       for (const ship of this.solarEnemyShips) {
@@ -1578,19 +1612,25 @@ export class GameManager {
           bestDist = d; clicked = ship.id;
         }
       }
-      if (clicked) {
-        if (this.solarLockedIds.has(clicked)) {
-          this.solarLockedIds.delete(clicked);
-          if (this.solarFocusedId === clicked) this.solarFocusedId = null;
-        } else {
-          this.solarLockedIds.add(clicked);
-          this.solarFocusedId = clicked;
+      if (isMetaClick) {
+        // Meta+click: weapon lock
+        if (clicked) {
+          if (this.solarLockedIds.has(clicked)) {
+            this.solarLockedIds.delete(clicked);
+            if (this.solarFocusedId === clicked) this.solarFocusedId = null;
+          } else {
+            this.solarLockedIds.add(clicked);
+            this.solarFocusedId = clicked;
+          }
         }
+      } else {
+        // Plain click: visual selection only (no weapon targeting)
+        this.solarSelectedId = clicked; // null if clicked empty space
       }
     }
 
     // Validate existing locks: remove any that moved out of sensor range or were destroyed
-    const sensorRangeKm = 200;
+    const sensorRangeKm = this.solarPlayerScannerRangeKm;
     for (const lockedId of [...this.solarLockedIds]) {
       const ship = this.solarEnemyShips.find(s => s.id === lockedId);
       if (!ship || Math.hypot(ship.position.x - playerPos.x, ship.position.y - playerPos.y) > sensorRangeKm) {
@@ -1632,10 +1672,25 @@ export class GameManager {
       this.solarSystem.adjustZoom(input.zoomDelta);
     }
 
+    // Zoom bar drag (screen-space slider on the left edge)
+    const zb = GameManager.ZOOM_BAR;
+    if (input.pointerDownPulse && !this.mapOpen) {
+      const { x: zbx, y: zby } = input.pointerDownPulse;
+      if (zbx >= zb.x && zbx <= zb.x + zb.w && zby >= zb.top && zby <= zb.bottom) {
+        this.zoomBarDragging = true;
+      }
+    }
+    if (this.zoomBarDragging && input.pointerHeld && input.pointer) {
+      const frac = 1 - Math.max(0, Math.min(1, (input.pointer.y - zb.top) / (zb.bottom - zb.top)));
+      const newZoom = 0.5 * Math.pow(40, frac);
+      this.solarSystem.setZoomLevel(newZoom);
+    }
+    if (!input.pointerHeld) this.zoomBarDragging = false;
+
     // Update enemy bases and ships only in Sol system for now.
     if (this.currentSystemId === "sol") {
       this.updateSolarEnemies(deltaMs, playerPos);
-      this.updatePlayerProjectiles(deltaMs);
+      this.updatePlayerProjectiles(deltaMs, playerPos);
       this.updateFriendlyShips(deltaMs, playerPos);
     }
   }
@@ -1661,7 +1716,7 @@ export class GameManager {
     const dx = target.x - from.x;
     const dy = target.y - from.y;
     const dist = Math.hypot(dx, dy) || 1;
-    const speed = 600; // km/s
+    const speed = SOLAR_COMBAT_CONFIG.PROJECTILE_SPEED_KM_S;
 
     for (const w of weapons) {
       const cooldown = this.solarWeaponCooldowns.get(w.defId) ?? 0;
@@ -1675,7 +1730,7 @@ export class GameManager {
         this.laserFlashMs = 200;
         // Instant hit
         const ship = this.solarEnemyShips.find(s =>
-          Math.hypot(s.position.x - target.x, s.position.y - target.y) < 20
+          Math.hypot(s.position.x - target.x, s.position.y - target.y) < SOLAR_COMBAT_CONFIG.LASER_HIT_RADIUS_KM
         );
         if (ship) {
           this.damageEnemyShip(ship, w.damage);
@@ -1699,8 +1754,21 @@ export class GameManager {
   }
 
   /** Apply damage to an enemy ship, removing it and checking missions if destroyed. */
-  private damageEnemyShip(ship: SolarEnemyShip, damage: number, attackerFaction?: StationFaction | "player"): void {
+  private damageEnemyShip(
+    ship: SolarEnemyShip,
+    damage: number,
+    attackerFaction?: StationFaction | "player",
+    attackerPos?: { x: number; y: number },
+  ): void {
     ship.health -= damage;
+    // Sniping reaction: player hit this ship from beyond its scanner range →
+    // record the shot origin so the ship investigates even without a visual.
+    if (attackerFaction === "player" && attackerPos) {
+      const d = Math.hypot(attackerPos.x - ship.position.x, attackerPos.y - ship.position.y);
+      if (d > ship.scannerRangeKm) {
+        ship.lastKnownThreatPos = { x: attackerPos.x, y: attackerPos.y };
+      }
+    }
     // Attacking a Mars ship provokes the entire Mars faction.
     if (ship.faction === "mars" && attackerFaction && attackerFaction !== "mars") {
       this.marsProvokedFactions.add(attackerFaction);
@@ -1717,11 +1785,13 @@ export class GameManager {
         scale: 1 + ship.sizeClass * 0.4,
       });
       this.solarLockedIds.delete(ship.id);
+      this.solarLastKnownShipPositions.delete(ship.id);
       if (this.solarFocusedId === ship.id) {
         this.solarFocusedId = null;
         // Auto-focus next remaining lock
         for (const id of this.solarLockedIds) { this.solarFocusedId = id; break; }
       }
+      if (this.solarSelectedId === ship.id) this.solarSelectedId = null;
       this.solarEnemyShips = this.solarEnemyShips.filter(s => s.id !== ship.id);
       this.checkKillMissions();
       const base = this.solarEnemyBases.find(b => b.id === ship.baseId);
@@ -1738,8 +1808,8 @@ export class GameManager {
     const headingRad = (headingDeg * Math.PI) / 180;
     const fwdX = Math.sin(headingRad);
     const fwdY = -Math.cos(headingRad);
-    const maxRangeKm = 120;
-    const halfConeDeg = 45;
+    const maxRangeKm = SOLAR_COMBAT_CONFIG.AUTO_FIRE_RANGE_KM;
+    const halfConeDeg = SOLAR_COMBAT_CONFIG.AUTO_FIRE_HALF_CONE_DEG;
 
     let bestDist = Infinity;
     let bestShip: SolarEnemyShip | null = null;
@@ -1767,7 +1837,7 @@ export class GameManager {
     }
   }
 
-  private updatePlayerProjectiles(deltaMs: number): void {
+  private updatePlayerProjectiles(deltaMs: number, playerPos: { x: number; y: number }): void {
     const dtS = deltaMs / 1000;
     const survived: SolarPlayerProjectile[] = [];
     for (const proj of this.solarPlayerProjectiles) {
@@ -1777,8 +1847,8 @@ export class GameManager {
       if (proj.lifetimeMs <= 0) continue;
       let hit = false;
       for (const ship of this.solarEnemyShips) {
-        if (Math.hypot(ship.position.x - proj.position.x, ship.position.y - proj.position.y) < 10) {
-          this.damageEnemyShip(ship, proj.damage, "player");
+        if (Math.hypot(ship.position.x - proj.position.x, ship.position.y - proj.position.y) < SOLAR_COMBAT_CONFIG.PROJECTILE_HIT_RADIUS_KM) {
+          this.damageEnemyShip(ship, proj.damage, "player", playerPos);
           hit = true;
           break;
         }
@@ -1806,7 +1876,9 @@ export class GameManager {
         const speed = Math.min(MAX_SPEED, dist * 2000);
         ship.velocity.x = (dx / dist) * speed;
         ship.velocity.y = (dy / dist) * speed;
-        ship.heading = (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
+        const friendlyTargetH = (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
+        let fhdiff = ((friendlyTargetH - ship.heading + 540) % 360) - 180;
+        ship.heading = (ship.heading + Math.sign(fhdiff) * Math.min(Math.abs(fhdiff), 180 * dtS) + 360) % 360;
       } else {
         ship.velocity = { x: 0, y: 0 };
       }
@@ -1878,10 +1950,13 @@ export class GameManager {
           },
           velocity: { x: 0, y: 0 },
           heading: 0,
+          targetHeading: 0,
           health,
           maxHealth: health,
           weapon0CooldownMs: Math.random() * SOLAR_WEAPONS[loadout[0]]!.cooldownMs,
           weapon1CooldownMs: Math.random() * SOLAR_WEAPONS[loadout[1]]!.cooldownMs,
+          scannerRangeKm: typeDef.scannerRangeKm,
+          lastKnownThreatPos: null,
         };
         this.solarEnemyShips.push(newShip);
         base.lastSpawnMs = nowMs;
@@ -1962,7 +2037,12 @@ export class GameManager {
 
       ship.position.x += (ship.velocity.x * dtS) / 1000;
       ship.position.y += (ship.velocity.y * dtS) / 1000;
-      ship.heading = (Math.atan2(dirX, -dirY) * 180) / Math.PI;
+      ship.targetHeading = (Math.atan2(dirX, -dirY) * 180) / Math.PI;
+      // Smooth heading interpolation: turn at most 180°/s toward targetHeading
+      const turnRateDeg = 180;
+      let hdiff = ((ship.targetHeading - ship.heading + 540) % 360) - 180;
+      const maxTurn = turnRateDeg * dtS;
+      ship.heading = (ship.heading + Math.sign(hdiff) * Math.min(Math.abs(hdiff), maxTurn) + 360) % 360;
 
       if (!targetPos) continue; // neutral — no weapons fire
 
@@ -2042,6 +2122,10 @@ export class GameManager {
           this.solarExplosions.push({ x: pPos.x + 6, y: pPos.y - 4, ageMs: 300, maxAgeMs: 4800, scale: 2.5 });
           this.solarLockedIds = new Set();
           this.solarFocusedId = null;
+          this.solarSelectedId = null;
+          // Remove any active warp effect immediately on death
+          this.antiGravActive = false;
+          this.warpDecayMs = 0;
           soundManager.setThrusterActive(false);
           soundManager.playerDeath();
         }
@@ -2119,10 +2203,9 @@ export class GameManager {
   }
 
   private updateAntiGravity(input: InputState, deltaMs: number): void {
-    const inp = input as any;
-    const thrustFwd = inp.thrustForward === true;
-    const turning = inp.turnLeft === true || inp.turnRight === true;
-    const strafing = inp.strafeLeft === true || inp.strafeRight === true;
+    const thrustFwd = input.thrustForward === true;
+    const turning = input.turnLeft === true || input.turnRight === true;
+    const strafing = input.strafeLeft === true || input.strafeRight === true;
     const pureFwd = thrustFwd && !turning && !strafing;
 
     // Count down decay timer
@@ -2165,10 +2248,8 @@ export class GameManager {
 
     const input = this.input.poll();
     // Up/Down navigate between RESUME and QUIT TO MENU
-    const upEdge = input.moveUp && !this.prevUpPressed;
-    const downEdge = input.moveDown && !this.prevDownPressed;
-    if (upEdge || input.swipeUpPulse) this.solarPauseSelection = 0;
-    if (downEdge || input.swipeDownPulse) this.solarPauseSelection = 1;
+    if (this.input.wasPressed("ArrowUp") || input.swipeUpPulse) this.solarPauseSelection = 0;
+    if (this.input.wasPressed("ArrowDown") || input.swipeDownPulse) this.solarPauseSelection = 1;
 
     // Tap on RESUME button (center y ≈ height/2 - 35) or QUIT button (center y ≈ height/2 + 35)
     if (input.pointerDownPulse && this.menuDebounceMs === 0) {
@@ -2551,13 +2632,67 @@ export class GameManager {
   private static readonly SB_CORE_SIDES_Y = 98;
   private static readonly SB_CORE_SIDES_H = 20;
 
+  // Header button layout (right panel, x=800..1280)
+  // SAVE:  x=1196..1272, y=8..36
+  // NEW:   x=1130..1190, y=8..36
+  // RENAME zone: click ship name text area x=820..1126, y=4..40
+  private static readonly SB_SAVE_X = 1196;
+  private static readonly SB_NEW_X = 1130;
+  private static readonly SB_NEW_W = 58;
+
   private updateSolarShipBuilder(deltaMs: number): void {
     this.solarShipBuilderMgr.tick(deltaMs);
     const input = this.input.poll();
     if (input.pointer) {
       this.solarShipBuilderMgr.onPointerMove(input.pointer.x, input.pointer.y);
     }
-    // ESC → back to docked
+
+    const click = input.pointerDownPulse ?? null;
+    const session = this.solarSystem?.getSessionState();
+    const locId = session?.dockedLocationId ?? null;
+    const inv = session?.moduleInventory ?? new Map<string, number>();
+
+    // ── Rename mode: intercept all keyboard input ──────────────────────────
+    if (this.solarShipBuilderMgr.isRenaming()) {
+      const enterPressed = input.menuConfirm && this.menuDebounceMs === 0;
+      const escPressed = this.wasMenuBackPressed() && this.menuDebounceMs === 0;
+      this.solarShipBuilderMgr.handleRenameInput(
+        input.typedText ?? "",
+        input.backspacePulse ?? false,
+        enterPressed,
+        escPressed,
+      );
+      if (enterPressed || escPressed) this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+
+    // ── Core picker: ESC dismisses picker, not entire builder ─────────────
+    if (this.solarShipBuilderMgr.isCorePicking()) {
+      if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+        this.solarShipBuilderMgr.closeCorePicker();
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+        return;
+      }
+      // Core picker click (left panel)
+      if (click && click.x < GameManager.SB_SPLIT && this.menuDebounceMs === 0) {
+        const rd = this.solarShipBuilderMgr.getRenderData(inv, session?.solarCredits ?? 0);
+        const picker = rd?.corePicker;
+        if (picker) {
+          const ROW_H = 60;
+          const LIST_Y = 120;
+          const idx = Math.floor((click.y - LIST_Y) / ROW_H);
+          if (idx >= 0 && idx < picker.length) {
+            const item = picker[idx]!;
+            const delta = this.solarShipBuilderMgr.selectCore(item.defId, inv);
+            if (delta) this.adjustModuleInventory(delta.moduleDefId, delta.delta);
+            this.menuDebounceMs = MENU_DEBOUNCE_MS;
+          }
+        }
+      }
+      return;
+    }
+
+    // ── ESC → back to docked ───────────────────────────────────────────────
     if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
       this.solarShipBuilderMgr.close();
       this.state.setScreen("docked");
@@ -2565,14 +2700,24 @@ export class GameManager {
       return;
     }
 
-    const click = input.pointerDownPulse ?? null;
-    const session = this.solarSystem?.getSessionState();
-    const locId = session?.dockedLocationId ?? null;
-
-    // ── SAVE button (right panel header, y:4–40, right 80px) ─────────────
-    if (click && click.x >= 1280 - 84 && click.x <= 1276 && click.y >= 4 && click.y <= 40) {
+    // ── SAVE button (right panel header) ─────────────────────────────────
+    if (click && click.x >= GameManager.SB_SAVE_X && click.x <= 1276 && click.y >= 4 && click.y <= 40) {
       const bp = this.solarShipBuilderMgr.getBlueprint();
       if (bp) this.saveSolarBlueprint(bp);
+      return;
+    }
+
+    // ── NEW button ───────────────────────────────────────────────────────
+    if (click && click.x >= GameManager.SB_NEW_X && click.x < GameManager.SB_NEW_X + GameManager.SB_NEW_W && click.y >= 8 && click.y <= 36) {
+      this.solarShipBuilderMgr.openCorePicker(inv);
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+
+    // ── RENAME: click the ship name area ─────────────────────────────────
+    if (click && click.x >= GameManager.SB_SPLIT + 20 && click.x < GameManager.SB_NEW_X && click.y >= 4 && click.y <= 40) {
+      this.solarShipBuilderMgr.enterRenameMode();
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
 
@@ -2607,7 +2752,7 @@ export class GameManager {
         );
         if (tileIdx >= 0) {
           const rd = this.solarShipBuilderMgr.getRenderData(
-            session?.moduleInventory ?? new Map(),
+            inv,
             session?.solarCredits ?? 0,
           );
           const item = rd?.palette[tileIdx];
@@ -2646,13 +2791,11 @@ export class GameManager {
           }
         }
         // Fallthrough: normal palette click (select item)
-        const inv = session?.moduleInventory ?? new Map<string, number>();
         this.solarShipBuilderMgr.onPointerDown(click.x, click.y, inv);
         return;
       }
 
       // ── Left panel: place selected module at snap ──────────────────────
-      const inv = session?.moduleInventory ?? new Map<string, number>();
       const delta = this.solarShipBuilderMgr.onPointerDown(click.x, click.y, inv);
       if (delta) this.adjustModuleInventory(delta.moduleDefId, delta.delta);
     }
@@ -2661,7 +2804,7 @@ export class GameManager {
   // ── Solar ship blueprints ─────────────────────────────────────────────────
 
   private computeBlueprintModules(bp: SolarShipBlueprint): {
-    modules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }>;
+    modules: Array<{ vertices: Array<{ x: number; y: number }>; worldX: number; worldY: number; moduleType: string; partKind: string; grade: number }>;
     coreRadius: number;
   } {
     const defs = SolarModuleRegistry.getModuleMap();
@@ -2674,39 +2817,42 @@ export class GameManager {
       const geom = geometries.get(m.placedId);
       const def = defs.get(m.moduleDefId);
       if (!geom || !def) return [];
-      return [{ vertices: geom.vertices.map(v => ({ x: v.x, y: v.y })), moduleType: def.type as string }];
+      const vertices = def.shape.verts
+        ? GeometryEngine.buildCustomVertices(def.shape.verts, def.shape.sideLengthPx, geom.worldX, geom.worldY, geom.rotationRad).map(v => ({ x: v.x, y: v.y }))
+        : geom.vertices.map(v => ({ x: v.x, y: v.y }));
+      return [{ vertices, worldX: geom.worldX, worldY: geom.worldY, moduleType: def.type as string, partKind: def.partKind as string, grade: def.sizeClass }];
     });
     return { modules, coreRadius };
   }
 
-  private getPirateBlueprintModules(sizeClass: number) {
-    if (!this.pirateBlueprintModulesCache.has(sizeClass)) {
-      const bp = getPirateBlueprint(sizeClass);
-      if (bp) this.pirateBlueprintModulesCache.set(sizeClass, this.computeBlueprintModules(bp));
+  private getBlueprintModulesById(blueprintId: string, getBp: () => import("../types/solarShipBuilder").SolarShipBlueprint | undefined) {
+    if (!this.blueprintGeometryCache.has(blueprintId)) {
+      const bp = getBp();
+      if (bp) this.blueprintGeometryCache.set(blueprintId, this.computeBlueprintModules(bp));
     }
-    return this.pirateBlueprintModulesCache.get(sizeClass);
-  }
-
-  private getEarthBlueprintModules(sizeClass: number) {
-    if (!this.earthBlueprintModulesCache.has(sizeClass)) {
-      const bp = getEarthBlueprint(sizeClass);
-      if (bp) this.earthBlueprintModulesCache.set(sizeClass, this.computeBlueprintModules(bp));
-    }
-    return this.earthBlueprintModulesCache.get(sizeClass);
-  }
-
-  private getMarsBlueprintModules(sizeClass: number) {
-    if (!this.marsBlueprintModulesCache.has(sizeClass)) {
-      const bp = getMarsBlueprint(sizeClass);
-      if (bp) this.marsBlueprintModulesCache.set(sizeClass, this.computeBlueprintModules(bp));
-    }
-    return this.marsBlueprintModulesCache.get(sizeClass);
+    return this.blueprintGeometryCache.get(blueprintId);
   }
 
   private getFactionBlueprintModules(faction: StationFaction, sizeClass: number) {
-    if (faction === "earth") return this.getEarthBlueprintModules(sizeClass);
-    if (faction === "mars") return this.getMarsBlueprintModules(sizeClass);
-    return this.getPirateBlueprintModules(sizeClass);
+    if (faction === "earth") {
+      const bp = getEarthBlueprint(sizeClass);
+      return bp ? this.getBlueprintModulesById(bp.id, () => bp) : undefined;
+    }
+    if (faction === "mars") {
+      const bp = getMarsBlueprint(sizeClass);
+      return bp ? this.getBlueprintModulesById(bp.id, () => bp) : undefined;
+    }
+    const bp = getPirateBlueprint(sizeClass);
+    return bp ? this.getBlueprintModulesById(bp.id, () => bp) : undefined;
+  }
+
+  private getStationBlueprintModules(faction: StationFaction, blueprintId: string) {
+    return this.getBlueprintModulesById(blueprintId, () => {
+      const all = faction === "earth" ? EARTH_BLUEPRINTS
+        : faction === "mars" ? MARS_BLUEPRINTS
+        : PIRATE_BLUEPRINTS;
+      return all.find(b => b.id === blueprintId);
+    });
   }
 
   /** True when ships of faction `a` should attack ships of faction `b`. */
@@ -2728,22 +2874,55 @@ export class GameManager {
     ship: SolarEnemyShip,
     playerPos: { x: number; y: number },
   ): { x: number; y: number } | null {
+    const base = this.solarEnemyBases.find(b => b.id === ship.baseId);
+    const defR = base?.defenseRadiusKm ?? 0;
+
+    // Ships with a defense perimeter retreat when they drift outside it.
+    if (defR > 0 && base) {
+      const distFromBase = Math.hypot(ship.position.x - base.position.x, ship.position.y - base.position.y);
+      if (distFromBase > defR) {
+        return null; // patrol code will send them back to base
+      }
+    }
+
     let nearest: { x: number; y: number } | null = null;
     let nearestDist = Infinity;
 
     for (const other of this.solarEnemyShips) {
       if (other.id === ship.id) continue;
       if (!this.areFactionEnemies(ship.faction, other.faction)) continue;
+      // Ships with a perimeter only engage enemies that have entered it.
+      if (defR > 0 && base) {
+        const enemyDistFromBase = Math.hypot(other.position.x - base.position.x, other.position.y - base.position.y);
+        if (enemyDistFromBase > defR) continue;
+      }
       const d = Math.hypot(other.position.x - ship.position.x, other.position.y - ship.position.y);
       if (d < nearestDist) { nearestDist = d; nearest = other.position; }
     }
 
-    // Pirates always chase the player. Mars chases the player only if provoked.
+    // Pirates / provoked Mars chase the player only if within scanner range.
+    const playerDist = Math.hypot(playerPos.x - ship.position.x, playerPos.y - ship.position.y);
+    const canSeePlayer = playerDist <= ship.scannerRangeKm;
+    if (canSeePlayer) ship.lastKnownThreatPos = null; // clear investigate once player visible
+
     const pirate = ship.faction === "pirate";
     const marsHostileToPlayer = ship.faction === "mars" && this.marsProvokedFactions.has("player");
-    if (pirate || marsHostileToPlayer) {
-      const d = Math.hypot(playerPos.x - ship.position.x, playerPos.y - ship.position.y);
-      if (d < nearestDist) { nearestDist = d; nearest = playerPos; }
+    if ((pirate || marsHostileToPlayer) && canSeePlayer) {
+      if (playerDist < nearestDist) { nearestDist = playerDist; nearest = playerPos; }
+    }
+
+    // Sniping investigation: fly toward the last known threat position when the
+    // attacker was out of scanner range.  Clear once the ship arrives (~30 km).
+    if (nearest === null && ship.lastKnownThreatPos !== null) {
+      const distToThreat = Math.hypot(
+        ship.lastKnownThreatPos.x - ship.position.x,
+        ship.lastKnownThreatPos.y - ship.position.y,
+      );
+      if (distToThreat < 30) {
+        ship.lastKnownThreatPos = null;
+      } else {
+        nearest = ship.lastKnownThreatPos;
+      }
     }
 
     return nearest;
@@ -2763,6 +2942,25 @@ export class GameManager {
     if (this.solarSavedBlueprints.has(id)) this.solarActiveBlueprintId = id;
   }
 
+  /**
+   * Compute the player's effective scanner range from their active blueprint.
+   * Core provides the baseline; sensor modules (ext-sensor-*) add to it.
+   */
+  private computePlayerScannerRange(): number {
+    const bp = this.solarActiveBlueprintId
+      ? this.solarSavedBlueprints.get(this.solarActiveBlueprintId)
+      : null;
+    if (!bp) return SOLAR_COMBAT_CONFIG.PLAYER_SENSOR_RANGE_KM;
+    let range = 0;
+    for (const placed of bp.modules) {
+      const def = SolarModuleRegistry.getModule(placed.moduleDefId);
+      if (!def) continue;
+      const sr = def.stats.sensorRangeKm;
+      if (sr) range += sr;
+    }
+    return range > 0 ? range : SOLAR_COMBAT_CONFIG.PLAYER_SENSOR_RANGE_KM;
+  }
+
   private applyActiveSolarBlueprint(): void {
     if (!this.solarActiveBlueprintId) return;
     const bp = this.solarSavedBlueprints.get(this.solarActiveBlueprintId);
@@ -2778,6 +2976,7 @@ export class GameManager {
     this.solarPlayerHealth = Math.min(this.solarPlayerHealth, hp);
     this.solarPlayerMaxShield = shield;
     this.solarPlayerShield = Math.min(this.solarPlayerShield, shield);
+    this.solarPlayerScannerRangeKm = this.computePlayerScannerRange();
   }
 
   private getSavedBlueprintSummaries(): SavedBlueprintSummary[] {
@@ -2802,20 +3001,18 @@ export class GameManager {
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
-    const input = this.input.poll();
-    const upEdge = (input as any).moveUp && !this.prevUpPressed;
-    const downEdge = (input as any).moveDown && !this.prevDownPressed;
-    if (upEdge && this.menuDebounceMs === 0) {
+    if (this.input.wasPressed("ArrowUp") && this.menuDebounceMs === 0) {
       this.myShipsSelection = (this.myShipsSelection - 1 + Math.max(1, ships.length)) % Math.max(1, ships.length);
       this.menuDebounceMs = 150;
     }
-    if (downEdge && this.menuDebounceMs === 0) {
+    if (this.input.wasPressed("ArrowDown") && this.menuDebounceMs === 0) {
       this.myShipsSelection = (this.myShipsSelection + 1) % Math.max(1, ships.length);
       this.menuDebounceMs = 150;
     }
     this.myShipsSelection = Math.min(this.myShipsSelection, Math.max(0, ships.length - 1));
 
     // Click detection: 3 buttons per row — SET ACTIVE / LOAD TO BUILDER / DELETE
+    const input = this.input.poll();
     const click = input.pointerDownPulse ?? null;
     if (click && this.menuDebounceMs === 0) {
       const ROW_H = 52;
@@ -2874,13 +3071,11 @@ export class GameManager {
     if (entries.length === 0) return;
 
     // Navigation
-    const upEdge = input.moveUp && !this.prevUpPressed;
-    const downEdge = input.moveDown && !this.prevDownPressed;
-    if (upEdge && this.menuDebounceMs === 0) {
+    if (this.input.wasPressed("ArrowUp") && this.menuDebounceMs === 0) {
       this.shopMenuSelection = (this.shopMenuSelection - 1 + entries.length) % entries.length;
       this.menuDebounceMs = 150;
     }
-    if (downEdge && this.menuDebounceMs === 0) {
+    if (this.input.wasPressed("ArrowDown") && this.menuDebounceMs === 0) {
       this.shopMenuSelection = (this.shopMenuSelection + 1) % entries.length;
       this.menuDebounceMs = 150;
     }
@@ -3789,7 +3984,7 @@ export class GameManager {
       : undefined;
 
     // Player blueprint visual (cached by blueprintId)
-    let playerBlueprintModules: Array<{ vertices: Array<{ x: number; y: number }>; moduleType: string }> | undefined;
+    let playerBlueprintModules: Array<{ vertices: Array<{ x: number; y: number }>; worldX: number; worldY: number; moduleType: string; partKind: string; grade: number }> | undefined;
     let playerBlueprintCoreRadius: number | undefined;
     if (this.solarActiveBlueprintId) {
       const activeBp = this.solarSavedBlueprints.get(this.solarActiveBlueprintId);
@@ -3805,23 +4000,56 @@ export class GameManager {
       }
     }
 
-    // Enemy ships and stations for this system
-    const enemyShips = this.currentSystemId === "sol"
-      ? this.solarEnemyShips.map((s) => {
-          const bp = this.getFactionBlueprintModules(s.faction, s.sizeClass);
-          return {
-            id: s.id,
-            typeIdx: s.typeIdx,
+    // Enemy ships and stations for this system — culled to player scanner range.
+    const playerPos = sessionState.playerPosition;
+    const scannerRange = this.solarPlayerScannerRangeKm;
+
+    // ── Per-frame tracker updates ─────────────────────────────────────────
+    if (this.currentSystemId === "sol") {
+      for (const s of this.solarEnemyShips) {
+        const d = Math.hypot(s.position.x - playerPos.x, s.position.y - playerPos.y);
+        if (d <= scannerRange) {
+          this.solarLastKnownShipPositions.set(s.id, {
+            x: s.position.x,
+            y: s.position.y,
             color: FACTION_COLORS[s.faction] ?? (SOLAR_ENEMY_TYPES[s.typeIdx]?.color ?? 0xff3333),
-            position: s.position,
-            heading: s.heading,
-            health: s.health,
-            maxHealth: s.maxHealth,
-            sizeClass: s.sizeClass,
-            ...(bp ? { blueprintModules: bp.modules, blueprintCoreRadius: bp.coreRadius } : {}),
-          };
-        })
+          });
+        }
+      }
+      for (const b of this.solarEnemyBases) {
+        const d = Math.hypot(b.position.x - playerPos.x, b.position.y - playerPos.y);
+        if (d <= scannerRange) this.solarDiscoveredStationIds.add(b.id);
+      }
+    }
+
+    const enemyShips = this.currentSystemId === "sol"
+      ? this.solarEnemyShips
+          .filter((s) => Math.hypot(s.position.x - playerPos.x, s.position.y - playerPos.y) <= scannerRange)
+          .map((s) => {
+            const bp = this.getFactionBlueprintModules(s.faction, s.sizeClass);
+            return {
+              id: s.id,
+              typeIdx: s.typeIdx,
+              color: FACTION_COLORS[s.faction] ?? (SOLAR_ENEMY_TYPES[s.typeIdx]?.color ?? 0xff3333),
+              position: s.position,
+              heading: s.heading,
+              health: s.health,
+              maxHealth: s.maxHealth,
+              sizeClass: s.sizeClass,
+              faction: s.faction as string,
+              ...(bp ? { blueprintModules: bp.modules, blueprintCoreRadius: bp.coreRadius } : {}),
+            };
+          })
       : [];
+
+    // Ghost markers for ships that were spotted but are now out of scanner range.
+    const visibleShipIds = new Set(enemyShips.map((s) => s.id));
+    const lastKnownEnemyPositions = this.currentSystemId === "sol"
+      ? Array.from(this.solarLastKnownShipPositions.entries())
+          .filter(([id]) => !visibleShipIds.has(id))
+          .map(([id, d]) => ({ id, position: { x: d.x, y: d.y }, color: d.color }))
+      : [];
+
     const enemyProjectiles = this.currentSystemId === "sol"
       ? this.solarEnemyProjectiles.map((p) => ({
           id: p.id,
@@ -3829,15 +4057,30 @@ export class GameManager {
           color: SOLAR_WEAPONS[p.weaponIdx]?.color ?? 0xff4444,
         }))
       : [];
+
+    // Stations: show if within range OR previously discovered.
+    // Stations do not move — a discovered position is permanently accurate.
     const enemyStations = this.currentSystemId === "sol"
-      ? this.solarEnemyBases.map((b) => ({
-          id: b.id,
-          name: b.name,
-          position: b.position,
-          health: b.health,
-          maxHealth: b.maxHealth,
-          alertLevel: b.alertLevel,
-        }))
+      ? this.solarEnemyBases
+          .filter((b) =>
+            Math.hypot(b.position.x - playerPos.x, b.position.y - playerPos.y) <= scannerRange ||
+            this.solarDiscoveredStationIds.has(b.id),
+          )
+          .map((b) => {
+            const bp = this.getStationBlueprintModules(b.faction, b.blueprintId);
+            return {
+              id: b.id,
+              name: b.name,
+              position: b.position,
+              health: b.health,
+              maxHealth: b.maxHealth,
+              alertLevel: b.alertLevel,
+              faction: b.faction as string,
+              sizeClass: b.sizeClass,
+              heading: 0,
+              ...(bp ? { blueprintModules: bp.modules, blueprintCoreRadius: bp.coreRadius } : {}),
+            };
+          })
       : [];
 
     return {
@@ -3864,12 +4107,14 @@ export class GameManager {
       enemyShips,
       enemyProjectiles,
       enemyStations,
+      lastKnownEnemyPositions,
       playerHealth: this.solarPlayerHealth,
       playerMaxHealth: this.solarPlayerMaxHealth,
       playerShield: this.solarPlayerShield,
       playerMaxShield: this.solarPlayerMaxShield,
       damageFlash: this.solarDamageFlashMs > 0 ? this.solarDamageFlashMs / 300 : 0,
       warpIntensity: this.antiGravActive ? 1 : this.warpDecayMs / GameManager.WARP_DECAY_DURATION_MS,
+      warpChargeFraction: this.antiGravActive ? 0 : this.antiGravHoldMs / GameManager.ANTIGRAV_HOLD_THRESHOLD_MS,
       pauseMenuSelection: this.solarPauseSelection,
       ...(playerBlueprintModules && playerBlueprintCoreRadius !== undefined
         ? {
@@ -3891,6 +4136,13 @@ export class GameManager {
         .filter((s): s is SolarEnemyShip => !!s)
         .map(s => ({ id: s.id, position: s.position })),
       ...(this.solarFocusedId ? { focusedTargetId: this.solarFocusedId } : {}),
+      ...(this.solarSelectedId ? { selectedShipId: this.solarSelectedId } : {}),
+      zoomBar: (() => {
+        const z = sessionState.zoomLevel;
+        const frac = Math.log(z / 0.5) / Math.log(40);
+        const label = z >= 10 ? `${Math.round(z)}x` : z >= 1 ? `${z.toFixed(1)}x` : `${z.toFixed(2)}x`;
+        return { fraction: Math.max(0, Math.min(1, frac)), label };
+      })(),
       friendlyShips: this.solarFriendlyShips.map(s => ({
         id: s.id,
         position: s.position,
