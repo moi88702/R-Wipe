@@ -37,18 +37,19 @@ async function init(): Promise<void> {
       // Fullscreen denied or unsupported — fail silently.
     }
   };
-  // Capture phase on window intercepts before the browser's own shortcut handling.
   window.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       void toggleFullscreen();
     }
-    // Block Cmd/Ctrl+W before the browser's tab-close handler fires.
-    if ((e.key === "w" || e.key === "W") && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      e.stopImmediatePropagation();
-    }
   }, { capture: true });
+
+  // Block the tab/window from closing while the game is open.
+  window.addEventListener("beforeunload", function(e) {
+    e.stopPropagation();
+    e.preventDefault();
+    return false;
+  }, true);
 
   const game = new GameManager(app, {
     width: CANVAS_WIDTH,
