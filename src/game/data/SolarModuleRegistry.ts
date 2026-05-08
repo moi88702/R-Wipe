@@ -26,66 +26,80 @@ const SIDE_PX: Record<ShipClass, number> = {
 };
 
 // ── Visual vertex templates ───────────────────────────────────────────────────
-// Unit coords where 1.0 = sideLengthPx. +Y = toward parent (attachment side).
+// Unit coords where 1.0 = sideLengthPx. Output/tip at -Y, attachment base at +Y.
+// BASE CONSTRAINT: attachment-side edge must sit at Y = apothem of the polygon:
+//   N=3 (triangle): a = 1/(2√3) ≈ 0.289
+//   N=4 (square):   a = 1/2     = 0.500
 // Applied only to leaf modules (attachmentSideIndices: []).
 
 type Verts = PolygonShape["verts"];
 
+// Apothem constants (unit coords, 1.0 = sideLengthPx)
+const A3 = 0.289; // triangle: 1/(2·tan(π/3))
+const A4 = 0.500; // square:   1/(2·tan(π/4))
+
 const WEAPON_VERTS: Partial<Record<PartKind, Verts>> = {
-  // Gun barrel: wide mount at +Y, narrow barrel tip at -Y
+  // Cannon — T-shape gun barrel. Barrel tip at -Y, wide mount base at +Y.
+  // Base at A3 (+0.289) exactly, full side-width (±0.50).
   cannon: [
-    [-0.15, -0.65], [0.15, -0.65],
-    [0.15, -0.10], [0.40, -0.10],
-    [0.40,  0.55], [-0.40, 0.55],
-    [-0.40, -0.10], [-0.15, -0.10],
+    [-0.13, -0.65], [+0.13, -0.65],          // narrow barrel tip
+    [+0.13, +0.06], [+0.50, +0.06],          // right shoulder step
+    [+0.50, +A3],   [-0.50, +A3],            // full-width base at apothem
+    [-0.50, +0.06], [-0.13, +0.06],          // left shoulder step
   ],
-  // Laser spine: narrow pointed tip at -Y, wider base at +Y
+  // Laser — asymmetric blade spike. Tip at -Y, wide flat base at +Y.
+  // Base at A4 (+0.500), full side-width.
   laser: [
-    [0, -0.80],
-    [0.20, -0.40], [0.35, 0.20],
-    [0.35, 0.55], [-0.35, 0.55],
-    [-0.35, 0.20], [-0.20, -0.40],
+    [0,     -0.75],                           // spike tip
+    [+0.22, -0.30], [+0.50, +0.15],          // right blade profile
+    [+0.50, +A4],   [-0.50, +A4],            // base at apothem
+    [-0.50, +0.15], [-0.22, -0.30],          // left blade profile
   ],
-  // Torpedo tube: cylindrical body, wider at base
+  // Torpedo — tapered tube. Rounded tip at -Y, flared base at +Y.
+  // Base at A3 (+0.289), full side-width.
   torpedo: [
-    [-0.25, -0.65], [0.25, -0.65],
-    [0.35, -0.10], [0.35, 0.55],
-    [-0.35, 0.55], [-0.35, -0.10],
+    [-0.28, -0.55], [+0.28, -0.55],          // tip
+    [+0.50, +0.00], [+0.50, +A3],            // right side → base
+    [-0.50, +A3],   [-0.50, +0.00],          // base → left side
   ],
 };
 
+// Bell nozzle: wide exhaust bell at -Y, narrow throat mount at +Y.
+// Mount base at A3 (+0.289), narrow width (±0.22) — intentionally narrower
+// so the nozzle throat looks realistic against the full-width parent side.
 const THRUSTER_VERTS: Verts = [
-  // Bell nozzle (T-shape): wide output at -Y, narrow mount at +Y
-  [-0.60, -0.45], [0.60, -0.45],
-  [0.60,  0.10], [0.22,  0.10],
-  [0.22,  0.55], [-0.22, 0.55],
-  [-0.22,  0.10], [-0.60, 0.10],
+  [-0.60, -0.40], [+0.60, -0.40],            // wide bell output
+  [+0.60, +0.00], [+0.22, +0.00],            // right inner step
+  [+0.22, +A3],   [-0.22, +A3],              // narrow throat at apothem
+  [-0.22, +0.00], [-0.60, +0.00],            // left inner step
 ];
 
 const EXTERNAL_VERTS: Partial<Record<PartKind, Verts>> = {
-  // Dome shield: curved top at -Y, flat mount at +Y
+  // Shield dome: rounded dome at -Y, flat base at +Y.
+  // Base at A4 (+0.500), full side-width.
   shield: [
-    [-0.60,  0.30], [0.60,  0.30],
-    [0.72,   0.00], [0.50, -0.45],
-    [0,     -0.70], [-0.50, -0.45],
-    [-0.72,  0.00],
+    [-0.50, +A4],   [+0.50, +A4],            // flat base at apothem
+    [+0.70, +0.15], [+0.50, -0.40],          // right profile
+    [0,     -0.70], [-0.50, -0.40],          // dome apex + left
+    [-0.70, +0.15],                          // left profile
   ],
-  // Radar dish: wide flat dish at -Y, narrow stem at +Y
+  // Radar dish: wide parabolic dish at -Y, narrow stem at +Y.
+  // Stem base at A3 (+0.289), dish extends to ±0.65.
   radar: [
-    [-0.70, -0.25], [0.70, -0.25],
-    [0.70,   0.10], [0.25,  0.10],
-    [0.25,   0.60], [-0.25, 0.60],
-    [-0.25,  0.10], [-0.70, 0.10],
+    [-0.65, -0.30], [+0.65, -0.30],          // dish wide edge
+    [+0.65, -0.05], [+0.22, -0.05],          // dish inner right
+    [+0.22, +A3],   [-0.22, +A3],            // narrow stem base at apothem
+    [-0.22, -0.05], [-0.65, -0.05],          // dish inner left
   ],
   lidar: [
-    [-0.70, -0.25], [0.70, -0.25],
-    [0.70,   0.10], [0.25,  0.10],
-    [0.25,   0.60], [-0.25, 0.60],
-    [-0.25,  0.10], [-0.70, 0.10],
+    [-0.65, -0.30], [+0.65, -0.30],
+    [+0.65, -0.05], [+0.22, -0.05],
+    [+0.22, +A3],   [-0.22, +A3],
+    [-0.22, -0.05], [-0.65, -0.05],
   ],
-  thruster:       THRUSTER_VERTS,
-  "ion-engine":   THRUSTER_VERTS,
-  "warp-nacelle": THRUSTER_VERTS,
+  thruster:        THRUSTER_VERTS,
+  "ion-engine":    THRUSTER_VERTS,
+  "warp-nacelle":  THRUSTER_VERTS,
   "gravity-drive": THRUSTER_VERTS,
 };
 

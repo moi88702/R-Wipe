@@ -1253,9 +1253,11 @@ export class GameManager {
         sessionState.moduleInventory.set(mod.id, 3);
       }
     }
-    // Give the player 1 of each class-1 frigate core for testing.
-    for (const core of SolarModuleRegistry.getCores(1)) {
-      sessionState.moduleInventory.set(core.id, 1);
+    // Give the player 1 of each class-1 core + 1 balanced core for classes 2–9.
+    for (const core of SolarModuleRegistry.getCores()) {
+      if (core.sizeClass === 1 || core.variant === "balanced") {
+        sessionState.moduleInventory.set(core.id, 1);
+      }
     }
 
     // Seed the player's starting ship — "The Drifter", a mercenary-spec
