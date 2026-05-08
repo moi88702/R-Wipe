@@ -138,7 +138,7 @@ interface SolarExplosion {
 /** Tunable constants for solar-system combat — edit here to balance, not inline. */
 const SOLAR_COMBAT_CONFIG = {
   PROJECTILE_SPEED_KM_S: 600,
-  PLAYER_SENSOR_RANGE_KM: 200,
+  PLAYER_SENSOR_RANGE_KM: 540,
   LASER_HIT_RADIUS_KM: 20,
   PROJECTILE_HIT_RADIUS_KM: 10,
   AUTO_FIRE_RANGE_KM: 120,
@@ -272,7 +272,7 @@ export class GameManager {
   private solarPlayerShield = 50;
   private solarPlayerMaxShield = 50;
   /** Effective scanner range (km) for the player's active blueprint. Recomputed when blueprint changes. */
-  private solarPlayerScannerRangeKm = 150;
+  private solarPlayerScannerRangeKm = 540;
   /** Flash overlay when player takes damage (counts down ms). */
   private solarDamageFlashMs = 0;
   /** Active explosions in solar-system space. */

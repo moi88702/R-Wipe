@@ -107,9 +107,10 @@ const EXTERNAL_VERTS: Partial<Record<PartKind, Verts>> = {
 
 // Base scanner ranges per ship class (km).  Ships without a dedicated sensor
 // module fall back to this built-in antenna range.
+// Class 1 minimum = 0.6 × Earth–Sol distance (0.6 × 900 km = 540 km).
 const CORE_SENSOR_RANGE_KM: Record<ShipClass, number> = {
-  1: 150, 2: 200, 3: 280, 4: 380, 5: 500,
-  6: 660, 7: 850, 8: 1_100, 9: 1_400,
+  1: 540, 2: 720, 3: 1_000, 4: 1_400, 5: 1_800,
+  6: 2_400, 7: 3_000, 8: 4_000, 9: 5_000,
 };
 
 function core(
