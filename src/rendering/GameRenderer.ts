@@ -214,6 +214,13 @@ export interface SolarSystemRenderData {
   readonly playerVelocity: { x: number; y: number };
   readonly playerHeading: number;
   readonly thrustActive: boolean;
+  /** Per-axis thrust flags for directional engine exhaust visuals. */
+  readonly thrustForward?: boolean;
+  readonly thrustReverse?: boolean;
+  readonly thrustStrafeLeft?: boolean;
+  readonly thrustStrafeRight?: boolean;
+  readonly thrustTurnLeft?: boolean;
+  readonly thrustTurnRight?: boolean;
   readonly currentSystemName: string;
   readonly celestialBodies: ReadonlyArray<{
     readonly id: string;
@@ -3274,6 +3281,19 @@ export class GameRenderer {
       const engineMods = data.playerBlueprintModules?.filter(m => engineKinds.includes(m.partKind)) ?? [];
       const bpScale = data.playerBlueprintCoreRadius ? playerTargetR / data.playerBlueprintCoreRadius : gs;
 
+      // Compute directional exhaust activation vector in ship space.
+      // Ship space: front = -Y, back = +Y, right = +X, left = -X.
+      // Exhaust direction is opposite to the thrust applied to the ship.
+      let etX = 0, etY = 0;
+      if (data.thrustForward)     etY += 1;   // forward thrust → exhaust backward (+Y ship)
+      if (data.thrustReverse)     etY -= 1;   // reverse thrust → exhaust forward (-Y ship)
+      if (data.thrustStrafeRight) etX -= 1;   // strafe right   → exhaust leftward (-X ship)
+      if (data.thrustStrafeLeft)  etX += 1;   // strafe left    → exhaust rightward (+X ship)
+      if (data.thrustTurnRight)   etX -= 0.6; // turn right     → left-side engines
+      if (data.thrustTurnLeft)    etX += 0.6; // turn left      → right-side engines
+      const etLen = Math.hypot(etX, etY);
+      const hasDirectional = etLen > 0.1;
+
       if (engineMods.length > 0) {
         for (const eng of engineMods) {
           const ex = cx + (eng.worldX * cosH - eng.worldY * sinH) * bpScale;
@@ -3288,11 +3308,20 @@ export class GameRenderer {
             outX = -sinH;
             outY = cosH;
           }
+          // Determine if this engine contributes to the current thrust direction.
+          // Contribution = dot(engine outward dir in ship space, exhaust target dir).
+          let engineFiring = data.thrustActive;
+          if (data.thrustActive && hasDirectional) {
+            const oux = dist > 0.5 ? eng.worldX / dist : 0;
+            const ouy = dist > 0.5 ? eng.worldY / dist : 1;
+            const contribution = oux * (etX / etLen) + ouy * (etY / etLen);
+            engineFiring = contribution > 0.25;
+          }
           g.circle(ex, ey, 9 * gs).fill({ color: 0xff4400, alpha: 0.12 });
           g.circle(ex, ey, 5 * gs).fill({ color: 0xff6600, alpha: 0.28 });
           g.circle(ex, ey, 3 * gs).fill({ color: 0xffaa44, alpha: 0.55 });
           g.circle(ex, ey, 1.5 * gs).fill({ color: 0xffffff, alpha: 0.8 });
-          if (data.thrustActive) {
+          if (engineFiring) {
             g.circle(ex, ey, 5 * gs).fill({ color: 0x66aaff, alpha: 0.9 });
             g.circle(ex + outX * 8 * gs, ey + outY * 8 * gs, 4 * gs).fill({ color: 0x4488ff, alpha: 0.6 });
             g.circle(ex + outX * 14 * gs, ey + outY * 14 * gs, 2 * gs).fill({ color: 0x2266ff, alpha: 0.3 });
@@ -5420,10 +5449,13 @@ export class GameRenderer {
     // Ship name header + SAVE + NEW buttons
     g.rect(SPLIT + 4, 4, W - SPLIT - 8, 36).fill({ color: 0x112233, alpha: 0.8 });
     g.rect(SPLIT + 4, 4, W - SPLIT - 8, 36).stroke({ color: 0x2a466b, width: 1 });
-    // SAVE button (right side of header)
-    g.rect(W - 84, 8, 76, 28).fill({ color: 0x005522, alpha: 0.9 });
-    g.rect(W - 84, 8, 76, 28).stroke({ color: 0x00cc66, width: 1 });
-    // NEW button (just left of SAVE)
+    // SAVE button (saves without activating)
+    g.rect(W - 84, 8, 36, 28).fill({ color: 0x005522, alpha: 0.9 });
+    g.rect(W - 84, 8, 36, 28).stroke({ color: 0x00cc66, width: 1 });
+    // USE button (saves and sets as active ship — gold accent)
+    g.rect(W - 84 + 38, 8, 38, 28).fill({ color: 0x332200, alpha: 0.9 });
+    g.rect(W - 84 + 38, 8, 38, 28).stroke({ color: 0xffaa00, width: 1 });
+    // NEW button (just left of SAVE/USE group)
     g.rect(W - 84 - 4 - 58, 8, 58, 28).fill({ color: 0x002244, alpha: 0.9 });
     g.rect(W - 84 - 4 - 58, 8, 58, 28).stroke({ color: 0x2266aa, width: 1 });
     // Rename hint: ship name zone shows subtle underline to indicate clickability
@@ -5573,17 +5605,27 @@ export class GameRenderer {
       t.visible = true;
     }
 
-    // ── SAVE + NEW button labels ───────────────────────────────────────────────
-    this.ensureTextPool(this.solarBuilderBudgetLabels, budgetLabelDefs.length + 3, 11);
+    // ── SAVE + USE + NEW button labels ────────────────────────────────────────
+    this.ensureTextPool(this.solarBuilderBudgetLabels, budgetLabelDefs.length + 4, 11);
     {
       const tSave = this.solarBuilderBudgetLabels[budgetLabelDefs.length + 1]!;
       tSave.text = "SAVE";
-      tSave.x = W - 84 + 38;
+      tSave.x = W - 84 + 18;
       tSave.y = 22;
       tSave.anchor.set(0.5, 0.5);
       tSave.style.fill = 0x00ff88;
-      tSave.style.fontSize = 12;
+      tSave.style.fontSize = 11;
       tSave.visible = true;
+    }
+    {
+      const tUse = this.solarBuilderBudgetLabels[budgetLabelDefs.length + 3]!;
+      tUse.text = "USE";
+      tUse.x = W - 84 + 38 + 19;
+      tUse.y = 22;
+      tUse.anchor.set(0.5, 0.5);
+      tUse.style.fill = 0xffaa00;
+      tUse.style.fontSize = 11;
+      tUse.visible = true;
     }
     {
       const tNew = this.solarBuilderBudgetLabels[budgetLabelDefs.length + 2]!;

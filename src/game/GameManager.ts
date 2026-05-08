@@ -271,8 +271,20 @@ export class GameManager {
   private solarPlayerMaxHealth = 100;
   private solarPlayerShield = 50;
   private solarPlayerMaxShield = 50;
+  /** Shield recharge rate (HP/s). Recomputed when blueprint changes. */
+  private solarPlayerShieldRechargeRate = 0;
+  /** Timestamp (session ms) of last damage taken — recharge delayed after hits. */
+  private solarPlayerLastDamageTimeMs = -Infinity;
+  private static readonly SOLAR_SHIELD_REGEN_DELAY_MS = 5000;
   /** Effective scanner range (km) for the player's active blueprint. Recomputed when blueprint changes. */
   private solarPlayerScannerRangeKm = 540;
+  /** Last-frame directional thrust inputs — used for engine FX direction. */
+  private solarLastThrustForward = false;
+  private solarLastThrustReverse = false;
+  private solarLastStrafeLeft = false;
+  private solarLastStrafeRight = false;
+  private solarLastTurnLeft = false;
+  private solarLastTurnRight = false;
   /** Flash overlay when player takes damage (counts down ms). */
   private solarDamageFlashMs = 0;
   /** Active explosions in solar-system space. */
@@ -1562,6 +1574,25 @@ export class GameManager {
       this.solarSystem.updateShipPhysics(input, deltaMs, skipGrav, speedMult);
       soundManager.setThrusterActive(this.solarSystem.getLastThrustActive() || this.antiGravActive);
       soundManager.tickThruster(deltaMs);
+      // Record directional inputs for engine exhaust FX
+      this.solarLastThrustForward = (input as any).thrustForward ?? false;
+      this.solarLastThrustReverse = (input as any).thrustReverse ?? false;
+      this.solarLastStrafeLeft    = (input as any).strafeLeft ?? false;
+      this.solarLastStrafeRight   = (input as any).strafeRight ?? false;
+      this.solarLastTurnLeft      = (input as any).turnLeft ?? false;
+      this.solarLastTurnRight     = (input as any).turnRight ?? false;
+    }
+
+    // Shield recharge: delayed after last hit, rate from blueprint modules
+    if (!this.solarPlayerDead && this.solarPlayerShield < this.solarPlayerMaxShield) {
+      const sessionMs = this.solarSystem.getSessionState().gameTimeMs;
+      const sinceHit = sessionMs - this.solarPlayerLastDamageTimeMs;
+      if (sinceHit >= GameManager.SOLAR_SHIELD_REGEN_DELAY_MS) {
+        this.solarPlayerShield = Math.min(
+          this.solarPlayerMaxShield,
+          this.solarPlayerShield + this.solarPlayerShieldRechargeRate * (deltaMs / 1000),
+        );
+      }
     }
 
     // Proximity updates: stations + gates
@@ -2117,6 +2148,7 @@ export class GameManager {
           dmg -= absorbed;
         }
         this.solarPlayerHealth = Math.max(0, this.solarPlayerHealth - dmg);
+        this.solarPlayerLastDamageTimeMs = this.solarSystem?.getSessionState().gameTimeMs ?? 0;
         soundManager.solarHit();
         this.solarDamageFlashMs = 300;
         if (this.solarPlayerHealth <= 0 && this.solarDeathTimerMs === 0) {
@@ -2649,10 +2681,13 @@ export class GameManager {
   private static readonly SB_CORE_SIDES_H = 20;
 
   // Header button layout (right panel, x=800..1280)
-  // SAVE:  x=1196..1272, y=8..36
+  // SAVE:  x=1196..1232, y=8..36  (save without activating)
+  // USE:   x=1234..1272, y=8..36  (save and set as active ship)
   // NEW:   x=1130..1190, y=8..36
   // RENAME zone: click ship name text area x=820..1126, y=4..40
   private static readonly SB_SAVE_X = 1196;
+  private static readonly SB_SAVE_W = 36;
+  private static readonly SB_USE_X = 1234;
   private static readonly SB_NEW_X = 1130;
   private static readonly SB_NEW_W = 58;
 
@@ -2716,10 +2751,22 @@ export class GameManager {
       return;
     }
 
-    // ── SAVE button (right panel header) ─────────────────────────────────
-    if (click && click.x >= GameManager.SB_SAVE_X && click.x <= 1276 && click.y >= 4 && click.y <= 40) {
+    // ── SAVE button (save without activating) ────────────────────────────
+    if (click && click.x >= GameManager.SB_SAVE_X && click.x < GameManager.SB_SAVE_X + GameManager.SB_SAVE_W && click.y >= 4 && click.y <= 40) {
       const bp = this.solarShipBuilderMgr.getBlueprint();
       if (bp) this.saveSolarBlueprint(bp);
+      return;
+    }
+    // ── USE button (save and set as active ship) ──────────────────────────
+    if (click && click.x >= GameManager.SB_USE_X && click.x <= 1276 && click.y >= 4 && click.y <= 40) {
+      const bp = this.solarShipBuilderMgr.getBlueprint();
+      if (bp) {
+        this.saveSolarBlueprint(bp);
+        this.solarActiveBlueprintId = bp.id || `ship-${this.solarBlueprintCounter}`;
+        this.solarPlayerBlueprintCache = null;
+        this.applyActiveSolarBlueprint();
+        this.solarShipBuilderMgr.setStatus(`ACTIVE: ${bp.name.toUpperCase()}`);
+      }
       return;
     }
 
@@ -2996,6 +3043,22 @@ export class GameManager {
     this.solarPlayerMaxShield = shield;
     this.solarPlayerShield = Math.min(this.solarPlayerShield, shield);
     this.solarPlayerScannerRangeKm = this.computePlayerScannerRange();
+    this.solarPlayerShieldRechargeRate = this.computePlayerShieldRechargeRate();
+  }
+
+  private computePlayerShieldRechargeRate(): number {
+    const bp = this.solarActiveBlueprintId
+      ? this.solarSavedBlueprints.get(this.solarActiveBlueprintId)
+      : null;
+    if (!bp) return 0;
+    let rate = 0;
+    for (const placed of bp.modules) {
+      const def = SolarModuleRegistry.getModule(placed.moduleDefId);
+      if (!def) continue;
+      const r = def.stats.shieldRechargeRatePerSec;
+      if (r) rate += r;
+    }
+    return rate;
   }
 
   private getSavedBlueprintSummaries(): SavedBlueprintSummary[] {
@@ -4107,6 +4170,12 @@ export class GameManager {
       playerVelocity: sessionState.playerVelocity,
       playerHeading: sessionState.playerHeading,
       thrustActive: this.solarSystem.getLastThrustActive(),
+      thrustForward: this.solarLastThrustForward,
+      thrustReverse: this.solarLastThrustReverse,
+      thrustStrafeLeft: this.solarLastStrafeLeft,
+      thrustStrafeRight: this.solarLastStrafeRight,
+      thrustTurnLeft: this.solarLastTurnLeft,
+      thrustTurnRight: this.solarLastTurnRight,
       currentSystemName: system.seed.name,
       celestialBodies: system.celestialBodies.map((body) => ({
         id: body.id,

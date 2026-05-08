@@ -113,6 +113,13 @@ const CORE_SENSOR_RANGE_KM: Record<ShipClass, number> = {
   6: 2_400, 7: 3_000, 8: 4_000, 9: 5_000,
 };
 
+// Base shield recharge rate per ship class (HP/s).
+// Internal shield-regen modules add on top of this.
+const CORE_SHIELD_REGEN_PER_SEC: Record<ShipClass, number> = {
+  1: 2, 2: 3, 3: 5, 4: 8, 5: 12,
+  6: 18, 7: 25, 8: 35, 9: 50,
+};
+
 function core(
   id: string,
   cls: ShipClass,
@@ -132,7 +139,7 @@ function core(
     variant,
     shape: { sides: 6, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: null },
     budgetCost: 0,
-    stats: { hp, sensorRangeKm: CORE_SENSOR_RANGE_KM[cls] },
+    stats: { hp, sensorRangeKm: CORE_SENSOR_RANGE_KM[cls], shieldRechargeRatePerSec: CORE_SHIELD_REGEN_PER_SEC[cls] },
     weaponPoints: wp,
     externalPoints: ep,
     internalPoints: ip,

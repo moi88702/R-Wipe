@@ -70,6 +70,13 @@ export interface ShipControlConfig {
   turnRateRadPerS: number;
 
   /**
+   * Angular acceleration (rad/s²). When provided, turning ramps up gradually
+   * to turnRateRadPerS instead of snapping to full rate immediately.
+   * Omit for legacy instant-rate behaviour.
+   */
+  turnAccelRadPerS2?: number;
+
+  /**
    * Optional top-speed cap (m/s).
    * When provided, the ship's velocity magnitude is clamped to this value
    * after thrust and gravity have been integrated, preventing runaway speeds.
@@ -136,6 +143,12 @@ export interface ShipPhysicsState {
    * Range: [0, 2π).
    */
   headingRadians: number;
+  /**
+   * Current angular velocity (rad/s). Positive = clockwise, negative = CCW.
+   * Optional: omit or set to 0 for legacy callers.
+   * Only used when config.turnAccelRadPerS2 is set.
+   */
+  angularVelocity?: number;
 }
 
 /**
@@ -153,6 +166,8 @@ export interface ShipControlResult extends ShipPhysicsState {
    * toward a mouse heading target).
    */
   isRotating: boolean;
+  /** Angular velocity carried forward (rad/s). Always present in result. */
+  angularVelocity: number;
 }
 
 // ── ShipControlManager ────────────────────────────────────────────────────────
@@ -269,6 +284,7 @@ export class ShipControlManager {
 
     // ── 1. Rotation ─────────────────────────────────────────────────────────
     let headingRad = current.headingRadians;
+    let angularVel = current.angularVelocity ?? 0;
     let isRotating = false;
 
     const mouseTarget = input.mouseHeadingTarget;
@@ -277,17 +293,36 @@ export class ShipControlManager {
       const diff = ShipControlManager.normalizeAngleDiff(mouseTarget - headingRad);
       const maxTurn = config.turnRateRadPerS * dtS;
       if (Math.abs(diff) <= maxTurn) {
-        // Close enough this frame — snap to the exact target heading.
         headingRad = mouseTarget;
+        angularVel = 0;
       } else {
         headingRad += Math.sign(diff) * maxTurn;
+        angularVel = Math.sign(diff) * config.turnRateRadPerS;
         isRotating = true;
       }
-    } else if (input.turnLeft || input.turnRight) {
-      // Keyboard turning: D = clockwise (+), A = counter-clockwise (−).
+    } else if (config.turnAccelRadPerS2 !== undefined) {
+      // Accelerated keyboard turning: ramp up/down angular velocity.
       const dir = (input.turnRight ? 1 : 0) - (input.turnLeft ? 1 : 0);
-      headingRad += dir * config.turnRateRadPerS * dtS;
+      if (dir !== 0) {
+        angularVel += dir * config.turnAccelRadPerS2 * dtS;
+        // Clamp to configured maximum rate
+        angularVel = Math.max(-config.turnRateRadPerS, Math.min(config.turnRateRadPerS, angularVel));
+        isRotating = true;
+      } else {
+        // Decelerate: exponential decay toward zero
+        angularVel *= Math.exp(-8 * dtS);
+        if (Math.abs(angularVel) < 0.001) angularVel = 0;
+        isRotating = Math.abs(angularVel) > 0.001;
+      }
+      headingRad += angularVel * dtS;
+    } else if (input.turnLeft || input.turnRight) {
+      // Legacy instant-rate keyboard turning.
+      const dir = (input.turnRight ? 1 : 0) - (input.turnLeft ? 1 : 0);
+      angularVel = dir * config.turnRateRadPerS;
+      headingRad += angularVel * dtS;
       isRotating = true;
+    } else {
+      angularVel = 0;
     }
 
     headingRad = ShipControlManager.normalizeHeading(headingRad);
@@ -357,6 +392,7 @@ export class ShipControlManager {
       position: { x: newPosX, y: newPosY },
       velocity: { x: vx, y: vy },
       headingRadians: headingRad,
+      angularVelocity: angularVel,
       isThrustActive,
       isRotating,
     };

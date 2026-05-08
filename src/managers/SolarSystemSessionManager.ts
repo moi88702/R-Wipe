@@ -24,8 +24,9 @@ export const DEFAULT_SHIP_CONTROL_CONFIG: ShipControlConfig = {
   hullMass: 5000,
   thrusterPower: 15000,  // m/s² — decelerates from max speed in < 1 s
   strafePower: 10000,
-  turnRateRadPerS: Math.PI,  // 180° per second
-  maxSpeedMs: 10000,         // 10 km/s; gravity stays well below this everywhere
+  turnRateRadPerS: Math.PI,     // 180° per second max
+  turnAccelRadPerS2: Math.PI * 4, // reaches full rate in ~0.25 s
+  maxSpeedMs: 10000,             // 10 km/s; gravity stays well below this everywhere
 };
 
 export class SolarSystemSessionManager {
@@ -33,6 +34,7 @@ export class SolarSystemSessionManager {
   private shipState: CapitalShipState;
   private targetingState: TargetingState;
   private _lastThrustActive = false;
+  private _playerAngularVelocity = 0;
 
   constructor(system: SolarSystemState, blueprint: CapitalShipBlueprint) {
     this.sessionState = this.initializeSessionState(system);
@@ -181,6 +183,7 @@ export class SolarSystemSessionManager {
         position: this.sessionState.playerPosition,
         velocity: this.sessionState.playerVelocity,
         headingRadians,
+        angularVelocity: this._playerAngularVelocity,
       },
       shipControlInput,
       config,
@@ -191,6 +194,7 @@ export class SolarSystemSessionManager {
     this.sessionState.playerPosition = shipResult.position;
     this.sessionState.playerVelocity = shipResult.velocity;
     this.sessionState.playerHeading = (shipResult.headingRadians * 180) / Math.PI;
+    this._playerAngularVelocity = shipResult.angularVelocity;
     this._lastThrustActive = shipResult.isThrustActive;
 
     // Sync ship state with session state (visual consistency)
