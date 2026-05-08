@@ -42,6 +42,10 @@ async function init(): Promise<void> {
       e.preventDefault();
       void toggleFullscreen();
     }
+    // Prevent Cmd/Ctrl+W from closing the tab while the game is active.
+    if (e.key === "w" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+    }
   });
 
   const game = new GameManager(app, {

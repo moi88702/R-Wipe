@@ -3281,50 +3281,85 @@ export class GameRenderer {
       const engineMods = data.playerBlueprintModules?.filter(m => engineKinds.includes(m.partKind)) ?? [];
       const bpScale = data.playerBlueprintCoreRadius ? playerTargetR / data.playerBlueprintCoreRadius : gs;
 
-      // Compute directional exhaust activation vector in ship space.
-      // Ship space: front = -Y, back = +Y, right = +X, left = -X.
-      // Exhaust direction is opposite to the thrust applied to the ship.
+      // Exhaust target vector in ship space (+Y = aft, -Y = fore, +X = stbd, -X = port).
       let etX = 0, etY = 0;
-      if (data.thrustForward)     etY += 1;   // forward thrust → exhaust backward (+Y ship)
-      if (data.thrustReverse)     etY -= 1;   // reverse thrust → exhaust forward (-Y ship)
-      if (data.thrustStrafeRight) etX -= 1;   // strafe right   → exhaust leftward (-X ship)
-      if (data.thrustStrafeLeft)  etX += 1;   // strafe left    → exhaust rightward (+X ship)
-      if (data.thrustTurnRight)   etX -= 0.6; // turn right     → left-side engines
-      if (data.thrustTurnLeft)    etX += 0.6; // turn left      → right-side engines
+      if (data.thrustForward)     etY += 1;
+      if (data.thrustReverse)     etY -= 1;
+      if (data.thrustStrafeRight) etX -= 1;
+      if (data.thrustStrafeLeft)  etX += 1;
+      if (data.thrustTurnRight)   etX -= 0.5;
+      if (data.thrustTurnLeft)    etX += 0.5;
       const etLen = Math.hypot(etX, etY);
       const hasDirectional = etLen > 0.1;
+      const etNx = hasDirectional ? etX / etLen : 0;
+      const etNy = hasDirectional ? etY / etLen : 0;
+      // Exhaust target in world space
+      const etWX = etNx * cosH - etNy * sinH;
+      const etWY = etNx * sinH + etNy * cosH;
+
+      const linearActive = data.thrustActive;
+      const turnActive   = (data.thrustTurnLeft ?? false) || (data.thrustTurnRight ?? false);
 
       if (engineMods.length > 0) {
+        // Pre-scan: check whether any engine aligns with the directional thrust vector.
+        // If none do (e.g. only rear engines when strafing), all engines show at fallback
+        // intensity so RCS / attitude thrusters are implied.
+        let anyAligned = false;
+        if (linearActive && hasDirectional) {
+          for (const eng of engineMods) {
+            const d = Math.hypot(eng.worldX, eng.worldY);
+            const ox = d > 0.5 ? eng.worldX / d : 0;
+            const oy = d > 0.5 ? eng.worldY / d : 1;
+            if (ox * etNx + oy * etNy > 0.2) { anyAligned = true; break; }
+          }
+        } else if (linearActive) {
+          anyAligned = true;
+        }
+
         for (const eng of engineMods) {
           const ex = cx + (eng.worldX * cosH - eng.worldY * sinH) * bpScale;
           const ey = cy + (eng.worldX * sinH + eng.worldY * cosH) * bpScale;
           const dist = Math.hypot(eng.worldX, eng.worldY);
-          let outX: number, outY: number;
-          if (dist > 0.5) {
-            const oux = eng.worldX / dist, ouy = eng.worldY / dist;
-            outX = oux * cosH - ouy * sinH;
-            outY = oux * sinH + ouy * cosH;
-          } else {
-            outX = -sinH;
-            outY = cosH;
+          const oux = dist > 0.5 ? eng.worldX / dist : 0;
+          const ouy = dist > 0.5 ? eng.worldY / dist : 1;
+          // Engine radial-outward direction in world space
+          const outX = oux * cosH - ouy * sinH;
+          const outY = oux * sinH + ouy * cosH;
+
+          // Decide if this engine fires and at what intensity
+          let firing = false;
+          let intensity = 1.0;
+          if (linearActive) {
+            if (hasDirectional && anyAligned) {
+              firing = oux * etNx + ouy * etNy > 0.2;
+            } else if (!anyAligned) {
+              firing = true; intensity = 0.55; // fallback: no aligned engine — RCS implied
+            } else {
+              firing = true;
+            }
           }
-          // Determine if this engine contributes to the current thrust direction.
-          // Contribution = dot(engine outward dir in ship space, exhaust target dir).
-          let engineFiring = data.thrustActive;
-          if (data.thrustActive && hasDirectional) {
-            const oux = dist > 0.5 ? eng.worldX / dist : 0;
-            const ouy = dist > 0.5 ? eng.worldY / dist : 1;
-            const contribution = oux * (etX / etLen) + ouy * (etY / etLen);
-            engineFiring = contribution > 0.25;
+          if (!firing && turnActive) {
+            firing = true; intensity = 0.4; // RCS for rotation
           }
+
+          // Gimbal: blend exhaust trail 35% toward actual thrust direction
+          let gimX = outX, gimY = outY;
+          if (firing && hasDirectional) {
+            const f = 0.35;
+            const bx = outX * (1 - f) + etWX * f;
+            const by = outY * (1 - f) + etWY * f;
+            const bl = Math.hypot(bx, by);
+            if (bl > 0.01) { gimX = bx / bl; gimY = by / bl; }
+          }
+
           g.circle(ex, ey, 9 * gs).fill({ color: 0xff4400, alpha: 0.12 });
           g.circle(ex, ey, 5 * gs).fill({ color: 0xff6600, alpha: 0.28 });
           g.circle(ex, ey, 3 * gs).fill({ color: 0xffaa44, alpha: 0.55 });
           g.circle(ex, ey, 1.5 * gs).fill({ color: 0xffffff, alpha: 0.8 });
-          if (engineFiring) {
-            g.circle(ex, ey, 5 * gs).fill({ color: 0x66aaff, alpha: 0.9 });
-            g.circle(ex + outX * 8 * gs, ey + outY * 8 * gs, 4 * gs).fill({ color: 0x4488ff, alpha: 0.6 });
-            g.circle(ex + outX * 14 * gs, ey + outY * 14 * gs, 2 * gs).fill({ color: 0x2266ff, alpha: 0.3 });
+          if (firing) {
+            g.circle(ex, ey, 5 * gs).fill({ color: 0x66aaff, alpha: 0.9 * intensity });
+            g.circle(ex + gimX * 8 * gs, ey + gimY * 8 * gs, 4 * gs).fill({ color: 0x4488ff, alpha: 0.6 * intensity });
+            g.circle(ex + gimX * 14 * gs, ey + gimY * 14 * gs, 2 * gs).fill({ color: 0x2266ff, alpha: 0.3 * intensity });
           }
         }
       } else {
@@ -3335,10 +3370,21 @@ export class GameRenderer {
         g.circle(backX, backY, 5 * gs).fill({ color: 0xff6600, alpha: 0.28 });
         g.circle(backX, backY, 3 * gs).fill({ color: 0xffaa44, alpha: 0.55 });
         g.circle(backX, backY, 1.5 * gs).fill({ color: 0xffffff, alpha: 0.8 });
-        if (data.thrustActive) {
-          g.circle(backX, backY, 5 * gs).fill({ color: 0x66aaff, alpha: 0.9 });
-          g.circle(backX - sinH * 8 * gs, backY + cosH * 8 * gs, 4 * gs).fill({ color: 0x4488ff, alpha: 0.6 });
-          g.circle(backX - sinH * 14 * gs, backY + cosH * 14 * gs, 2 * gs).fill({ color: 0x2266ff, alpha: 0.3 });
+        const fallbackActive = linearActive || turnActive;
+        const fallbackIntensity = turnActive && !linearActive ? 0.4 : 1.0;
+        // Gimbaled direction for fallback: backward with slight offset toward thrust
+        let fbGimX = -sinH, fbGimY = cosH; // backward direction
+        if (fallbackActive && hasDirectional) {
+          const f = 0.35;
+          const bx = fbGimX * (1 - f) + etWX * f;
+          const by = fbGimY * (1 - f) + etWY * f;
+          const bl = Math.hypot(bx, by);
+          if (bl > 0.01) { fbGimX = bx / bl; fbGimY = by / bl; }
+        }
+        if (fallbackActive) {
+          g.circle(backX, backY, 5 * gs).fill({ color: 0x66aaff, alpha: 0.9 * fallbackIntensity });
+          g.circle(backX + fbGimX * 8 * gs, backY + fbGimY * 8 * gs, 4 * gs).fill({ color: 0x4488ff, alpha: 0.6 * fallbackIntensity });
+          g.circle(backX + fbGimX * 14 * gs, backY + fbGimY * 14 * gs, 2 * gs).fill({ color: 0x2266ff, alpha: 0.3 * fallbackIntensity });
         }
       }
     }
