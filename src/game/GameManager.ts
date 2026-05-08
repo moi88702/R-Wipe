@@ -2818,7 +2818,7 @@ export class GameManager {
       const def = defs.get(m.moduleDefId);
       if (!geom || !def) return [];
       const vertices = def.shape.verts
-        ? GeometryEngine.buildCustomVertices(def.shape.verts, def.shape.sideLengthPx, geom.worldX, geom.worldY, geom.rotationRad).map(v => ({ x: v.x, y: v.y }))
+        ? GeometryEngine.buildCustomVertices(def.shape.verts, def.shape.sideLengthPx, geom.worldX, geom.worldY).map(v => ({ x: v.x, y: v.y }))
         : geom.vertices.map(v => ({ x: v.x, y: v.y }));
       return [{ vertices, worldX: geom.worldX, worldY: geom.worldY, moduleType: def.type as string, partKind: def.partKind as string, grade: def.sizeClass }];
     });

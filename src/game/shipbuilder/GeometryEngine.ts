@@ -59,19 +59,26 @@ export class GeometryEngine {
 
   /**
    * Build visual vertices from a unit-coordinate template.
-   * verts[i] = [ux, uy] where 1.0 = sideLengthPx. The template is scaled by
-   * sideLengthPx, rotated by rotationRad, then translated to (cx, cy).
-   * Only used for rendering; snap geometry always uses buildVertices.
+   * verts[i] = [ux, uy] where 1.0 = sideLengthPx.
+   *
+   * Templates are authored with their "output end" (barrel tip, bell nozzle,
+   * dish face) at −Y and their attachment base at +Y. This function rotates
+   * them so the output end points radially outward from the ship centre, i.e.
+   * in the direction (cx, cy) from origin. The required rotation is π/2 + α
+   * where α = atan2(cy, cx). Only used for rendering; snap geometry always
+   * uses buildVertices.
    */
   static buildCustomVertices(
     verts: ReadonlyArray<readonly [number, number]>,
     sideLengthPx: number,
     cx: number,
     cy: number,
-    rotationRad: number,
   ): Array<{ x: number; y: number }> {
-    const cos = Math.cos(rotationRad);
-    const sin = Math.sin(rotationRad);
+    const dist = Math.hypot(cx, cy);
+    const α = dist > 0.5 ? Math.atan2(cy, cx) : -Math.PI / 2;
+    const θ = Math.PI / 2 + α;
+    const cos = Math.cos(θ);
+    const sin = Math.sin(θ);
     return verts.map(([ux, uy]) => {
       const sx = ux * sideLengthPx;
       const sy = uy * sideLengthPx;

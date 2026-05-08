@@ -345,7 +345,7 @@ export class ShipBuilderManager {
       const def = defs.get(m.moduleDefId);
       if (!geom || !def) return [];
       const vertices = def.shape.verts
-        ? GeometryEngine.buildCustomVertices(def.shape.verts, def.shape.sideLengthPx, geom.worldX, geom.worldY, geom.rotationRad)
+        ? GeometryEngine.buildCustomVertices(def.shape.verts, def.shape.sideLengthPx, geom.worldX, geom.worldY)
         : geom.vertices;
       return [{ placedId: m.placedId, vertices, worldX: geom.worldX, worldY: geom.worldY, moduleType: def.type, partKind: def.partKind, grade: def.sizeClass }];
     });
