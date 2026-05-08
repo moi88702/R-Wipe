@@ -257,6 +257,15 @@ export class SolarSystemSessionManager {
   }
 
   undock(): void {
+    const locId = this.sessionState.dockedLocationId;
+    if (locId) {
+      const loc = this.sessionState.currentSystem.locations.find(l => l.id === locId);
+      if (loc) {
+        // Place the ship at the station's world position so it exits right outside.
+        this.sessionState.playerPosition = this.getLocationWorldPosition(loc);
+        this.sessionState.playerVelocity = { x: 0, y: 0 };
+      }
+    }
     this.sessionState.dockedLocationId = null;
   }
 

@@ -1527,12 +1527,22 @@ export class GameManager {
         this.solarPlayerDead = false;
         this.solarPlayerHealth = this.solarPlayerMaxHealth;
         this.solarPlayerShield = this.solarPlayerMaxShield;
+        // Switch back to Sol if the player died in another system.
+        if (this.currentSystemId !== "sol") {
+          const solSystem = this.getOrBuildSystemState("sol");
+          this.solarSystem.switchSystem(solSystem);
+          this.currentSystemId = "sol";
+        }
         const ss = this.solarSystem.getSessionState();
-        ss.playerPosition = { x: 312, y: 0 };
         ss.playerVelocity = { x: 0, y: 0 };
         ss.playerHeading = 0;
-        ss.dockedLocationId = "station-earth-orbit";
-        ss.nearbyLocations = ["station-earth-orbit"];
+        const spawnLocId = "station-earth-orbit";
+        const spawnLoc = ss.currentSystem.locations.find(l => l.id === spawnLocId);
+        ss.playerPosition = spawnLoc
+          ? this.solarSystem.getLocationWorldPosition(spawnLoc)
+          : { x: 980, y: 30 }; // fallback matches Sol system Earth Station world pos
+        ss.dockedLocationId = spawnLocId;
+        ss.nearbyLocations = [spawnLocId];
         this.state.setScreen("docked");
       }
       return;
