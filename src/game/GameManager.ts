@@ -194,9 +194,9 @@ const FACTION_COLORS: Record<StationFaction, number> = {
 
 /** Menu item ids used by updateMenu / updatePause. */
 type MainMenuItem = "play" | "campaign" | "solar-system" | "shipyard" | "stats";
-type PauseMenuItem = "continue" | "stats" | "quit";
+type PauseMenuItem = "continue" | "stats" | "quit" | "mute";
 const MAIN_MENU_ITEMS: readonly MainMenuItem[] = ["play", "campaign", "solar-system", "shipyard", "stats"];
-const PAUSE_MENU_ITEMS: readonly PauseMenuItem[] = ["continue", "stats", "quit"];
+const PAUSE_MENU_ITEMS: readonly PauseMenuItem[] = ["continue", "stats", "quit", "mute"];
 
 export interface GameManagerOptions {
   width: number;
@@ -691,6 +691,10 @@ export class GameManager {
       this.state.finalizeRun("no-lives");
       this.menuSelection = 0;
       this.state.setScreen("main-menu");
+    } else if (pick === "mute") {
+      soundManager.init();
+      soundManager.toggleMute();
+      return; // don't close menu; stay on pause so user sees state change
     }
     this.menuDebounceMs = MENU_DEBOUNCE_MS;
   }
@@ -2249,22 +2253,27 @@ export class GameManager {
     }
 
     const input = this.input.poll();
-    // Up/Down navigate between RESUME and QUIT TO MENU
-    if (this.input.wasPressed("ArrowUp") || input.swipeUpPulse) this.solarPauseSelection = 0;
-    if (this.input.wasPressed("ArrowDown") || input.swipeDownPulse) this.solarPauseSelection = 1;
+    // Up/Down navigate between RESUME / QUIT TO MENU / SOUND
+    if (this.input.wasPressed("ArrowUp") || input.swipeUpPulse)
+      this.solarPauseSelection = (this.solarPauseSelection - 1 + 3) % 3;
+    if (this.input.wasPressed("ArrowDown") || input.swipeDownPulse)
+      this.solarPauseSelection = (this.solarPauseSelection + 1) % 3;
 
-    // Tap on RESUME button (center y ≈ height/2 - 35) or QUIT button (center y ≈ height/2 + 35)
+    // Tap on one of three buttons (panel centred at height/2, buttons at +72/+140/+208 from panelY)
     if (input.pointerDownPulse && this.menuDebounceMs === 0) {
       const tap = input.pointerDownPulse;
       const halfH = this.height / 2;
-      if (tap.y >= halfH - 75 && tap.y < halfH + 10) {
-        this.solarPauseSelection = 0;
-        this.executeSolarPauseAction(0);
-        return;
-      }
-      if (tap.y >= halfH + 10 && tap.y < halfH + 90) {
-        this.solarPauseSelection = 1;
-        this.executeSolarPauseAction(1);
+      // panelHeight=300, panelY=halfH-150; btn tops at halfH-78, halfH-10, halfH+58 (btnH=52)
+      const zone = (y: number): number | null => {
+        if (y >= halfH - 78 && y < halfH - 26) return 0;
+        if (y >= halfH - 10 && y < halfH + 42) return 1;
+        if (y >= halfH + 58 && y < halfH + 110) return 2;
+        return null;
+      };
+      const z = zone(tap.y);
+      if (z !== null) {
+        this.solarPauseSelection = z;
+        this.executeSolarPauseAction(z);
         return;
       }
     }
@@ -2276,13 +2285,18 @@ export class GameManager {
 
   private executeSolarPauseAction(idx: number): void {
     soundManager.menuConfirm();
-    soundManager.setThrusterActive(false);
     if (idx === 0) {
+      soundManager.setThrusterActive(false);
       this.solarPauseSelection = 0;
       this.state.setScreen("solar-system");
-    } else {
+    } else if (idx === 1) {
+      soundManager.setThrusterActive(false);
       this.solarPauseSelection = 0;
       this.state.setScreen("main-menu");
+    } else {
+      soundManager.init();
+      soundManager.toggleMute();
+      return; // stay in pause so user can see the state change
     }
     this.menuDebounceMs = 350;
   }
@@ -2820,7 +2834,10 @@ export class GameManager {
       const def = defs.get(m.moduleDefId);
       if (!geom || !def) return [];
       const vertices = def.shape.verts
-        ? GeometryEngine.buildCustomVertices(def.shape.verts, def.shape.sideLengthPx, geom.worldX, geom.worldY).map(v => ({ x: v.x, y: v.y }))
+        ? GeometryEngine.buildCustomVertices(
+            def.shape.verts, def.shape.sideLengthPx, geom.worldX, geom.worldY,
+            geom.rotationRad, m.ownSideIndex ?? undefined, def.shape.sides,
+          ).map(v => ({ x: v.x, y: v.y }))
         : geom.vertices.map(v => ({ x: v.x, y: v.y }));
       return [{ vertices, worldX: geom.worldX, worldY: geom.worldY, moduleType: def.type as string, partKind: def.partKind as string, grade: def.sizeClass }];
     });

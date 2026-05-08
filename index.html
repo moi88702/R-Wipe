@@ -54,52 +54,6 @@
         user-select: none;
       }
 
-      /* Fullscreen toggle — overlay button anchored top-right. Anchored to
-         the body (not the game-container) so it always sits inside the
-         visible viewport even when the game-container is letterboxed, and
-         respects notch/safe-area insets so it isn't clipped by the browser
-         chrome on iOS/Android. */
-      #fullscreen-btn, #mute-btn {
-        position: fixed;
-        width: 48px;
-        height: 48px;
-        border: 1px solid rgba(255, 255, 255, 0.45);
-        background: rgba(10, 10, 20, 0.65);
-        color: #fff;
-        font-size: 22px;
-        line-height: 48px;
-        text-align: center;
-        cursor: pointer;
-        z-index: 100;
-        font-family: monospace;
-        border-radius: 6px;
-        padding: 0;
-        -webkit-tap-highlight-color: transparent;
-        touch-action: manipulation;
-      }
-      #fullscreen-btn {
-        top: max(10px, env(safe-area-inset-top, 10px));
-        right: max(10px, env(safe-area-inset-right, 10px));
-      }
-      #mute-btn {
-        top: max(10px, env(safe-area-inset-top, 10px));
-        right: max(68px, calc(env(safe-area-inset-right, 10px) + 58px));
-      }
-      #fullscreen-btn:hover, #fullscreen-btn:active,
-      #mute-btn:hover, #mute-btn:active {
-        background: rgba(40, 40, 60, 0.85);
-        border-color: rgba(255, 255, 255, 0.7);
-      }
-      /* When already in fullscreen, the button swaps to an "exit" glyph (set
-         by main.ts) — still visible so the user can toggle back out. */
-      :fullscreen #fullscreen-btn {
-        top: 10px;
-        right: 10px;
-      }
-      :fullscreen #mute-btn {
-        top: 10px;
-        right: 68px;
-      }
       /* Portrait-rotated mode: the container is sized landscape and CSS-rotated
          +90° CW so the 1280×720 game fills the portrait screen. Only active for
          menus and solar-system; arcade gameplay shows the rotate hint instead. */
@@ -139,8 +93,6 @@
   </head>
   <body>
     <div id="game-container"></div>
-    <button id="fullscreen-btn" type="button" aria-label="Toggle fullscreen">⛶</button>
-    <button id="mute-btn" type="button" aria-label="Toggle sound">🔊</button>
     <div id="rotate-hint">
       <div style="font-size:48px">↻</div>
       <div>Rotate to landscape to play the arcade mode</div>

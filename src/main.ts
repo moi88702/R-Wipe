@@ -1,6 +1,5 @@
 import { Application, VERSION } from "pixi.js";
 import { GameManager } from "./game/GameManager";
-import { soundManager } from "./audio/SoundManager";
 
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 720;
@@ -20,73 +19,35 @@ async function init(): Promise<void> {
     container.appendChild(app.canvas);
   }
 
-  // Fullscreen toggle. Pointerup (not click) so iOS Safari treats it as a
-  // user gesture on the first tap. Falls back to a no-op on desktops where
-  // the API isn't available.
-  const fsButton = document.getElementById("fullscreen-btn");
-  if (fsButton) {
-    const ENTER_GLYPH = "⛶";
-    const EXIT_GLYPH = "✕";
-    const syncIcon = (): void => {
-      const active = document.fullscreenElement !== null;
-      fsButton.textContent = active ? EXIT_GLYPH : ENTER_GLYPH;
-      fsButton.setAttribute(
-        "aria-label",
-        active ? "Exit fullscreen" : "Enter fullscreen",
-      );
-    };
-    syncIcon();
-    document.addEventListener("fullscreenchange", syncIcon);
-
-    const toggleFullscreen = async (): Promise<void> => {
-      try {
-        if (!document.fullscreenElement) {
-          await document.documentElement.requestFullscreen?.();
-          type OrientationLock = (orientation: "landscape") => Promise<void>;
-          const lock = (screen.orientation as unknown as { lock?: OrientationLock })
-            ?.lock;
-          if (typeof lock === "function") {
-            await lock.call(screen.orientation, "landscape").catch(() => undefined);
-          }
-        } else {
-          await document.exitFullscreen?.();
+  // Fullscreen via Cmd/Ctrl+Enter (keyboard shortcut only — no on-screen button).
+  const toggleFullscreen = async (): Promise<void> => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen?.();
+        type OrientationLock = (orientation: "landscape") => Promise<void>;
+        const lock = (screen.orientation as unknown as { lock?: OrientationLock })
+          ?.lock;
+        if (typeof lock === "function") {
+          await lock.call(screen.orientation, "landscape").catch(() => undefined);
         }
-      } catch {
-        // Fullscreen denied or unsupported — fail silently.
+      } else {
+        await document.exitFullscreen?.();
       }
-    };
-    fsButton.addEventListener("pointerup", (e) => {
+    } catch {
+      // Fullscreen denied or unsupported — fail silently.
+    }
+  };
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      e.stopPropagation();
       void toggleFullscreen();
-    });
-    // Prevent the button's touch from being interpreted as a game tap.
-    fsButton.addEventListener("touchstart", (e) => e.stopPropagation(), {
-      passive: true,
-    });
-  }
+    }
+  });
 
   const game = new GameManager(app, {
     width: CANVAS_WIDTH,
     height: CANVAS_HEIGHT,
   });
-
-  // Mute toggle button
-  const muteBtn = document.getElementById("mute-btn");
-  if (muteBtn) {
-    const syncMuteIcon = (): void => {
-      muteBtn.textContent = soundManager.isMuted() ? "🔇" : "🔊";
-      muteBtn.setAttribute("aria-label", soundManager.isMuted() ? "Unmute sound" : "Mute sound");
-    };
-    muteBtn.addEventListener("pointerup", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      soundManager.init();
-      soundManager.toggleMute();
-      syncMuteIcon();
-    });
-    muteBtn.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
-  }
 
   // Drag-to-move, hold-to-fire, double-tap-bomb, two-finger-pause.
   game.enableTouchControls(app.canvas);

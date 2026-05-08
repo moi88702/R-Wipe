@@ -34,6 +34,7 @@ import {
 } from "./ShapePrimitives";
 import { drawBossBody } from "./BossArt";
 import { createNPCRobot } from "./NPCRobotRenderer";
+import { soundManager } from "../audio/SoundManager";
 import { NPCRobotAnimator } from "./NPCRobotAnimator";
 import { getFactionColors, type FactionColors } from "../game/data/FactionColors";
 import { getGradeColors } from "../game/data/GradeColors";
@@ -594,6 +595,7 @@ export class GameRenderer {
   private readonly solarSystemNameText: Text;
   private readonly solarApproachText: Text;
   private readonly solarSpeedBarLabel: Text;
+  private readonly solarPauseSoundText: Text;
   // Docked screen elements.
   private readonly dockedTitle: Text;
   private readonly dockedHint: Text;
@@ -1061,6 +1063,14 @@ export class GameRenderer {
     this.solarSpeedBarLabel.visible = false;
     this.menuLayer.addChild(this.solarSpeedBarLabel);
 
+    this.solarPauseSoundText = new Text({
+      text: "",
+      style: hudStyle(COLOR.hudWhite, 22),
+    });
+    this.solarPauseSoundText.anchor.set(0.5, 0.5);
+    this.solarPauseSoundText.visible = false;
+    this.menuLayer.addChild(this.solarPauseSoundText);
+
     // Docked screen — title + hint. Menu items live in a pool.
     this.dockedTitle = new Text({
       text: "",
@@ -1324,6 +1334,7 @@ export class GameRenderer {
     // Galaxy-map labels visible only when galaxy map drawn (set in drawGalaxyMap).
     if (!isSolarSystem) for (const t of this.galaxySystemLabels) t.visible = false;
     // Docked screen labels
+    this.solarPauseSoundText.visible = isSolarPaused;
     this.dockedTitle.visible = isAnyDockedScreen;
     this.dockedHint.visible = isAnyDockedScreen;
     for (const t of this.dockedMenuLabels) t.visible = isAnyDockedScreen;
@@ -4391,9 +4402,9 @@ export class GameRenderer {
     // Semi-transparent dark overlay
     g.rect(0, 0, this.width, this.height).fill({ color: 0x000000, alpha: 0.5 });
 
-    // Pause panel — taller to fit two buttons
+    // Pause panel — three buttons: Resume, Quit, Sound
     const panelWidth = 360;
-    const panelHeight = 230;
+    const panelHeight = 300;
     const panelX = this.width / 2 - panelWidth / 2;
     const panelY = this.height / 2 - panelHeight / 2;
 
@@ -4402,16 +4413,17 @@ export class GameRenderer {
 
     this.pauseTitle.text = "PAUSED";
     this.pauseTitle.x = this.width / 2;
-    this.pauseTitle.y = panelY + 22;
+    this.pauseTitle.y = panelY + 26;
 
-    // Two touch-friendly buttons
     const btnW = 280;
     const btnH = 52;
     const btnX = this.width / 2 - btnW / 2;
-    const btn0Y = panelY + 90;
-    const btn1Y = panelY + 158;
+    const btn0Y = panelY + 72;
+    const btn1Y = panelY + 140;
+    const btn2Y = panelY + 208;
     const sel0 = solarPauseSelection === 0;
     const sel1 = solarPauseSelection === 1;
+    const sel2 = solarPauseSelection === 2;
 
     g.roundRect(btnX, btn0Y, btnW, btnH, 8)
       .fill({ color: sel0 ? 0x003366 : 0x001a33, alpha: 0.9 })
@@ -4419,6 +4431,9 @@ export class GameRenderer {
     g.roundRect(btnX, btn1Y, btnW, btnH, 8)
       .fill({ color: sel1 ? 0x330011 : 0x1a0011, alpha: 0.9 })
       .stroke({ color: sel1 ? COLOR.hudAmber : 0x334455, width: sel1 ? 2 : 1 });
+    g.roundRect(btnX, btn2Y, btnW, btnH, 8)
+      .fill({ color: sel2 ? 0x003333 : 0x001a1a, alpha: 0.9 })
+      .stroke({ color: sel2 ? COLOR.hudAmber : 0x334455, width: sel2 ? 2 : 1 });
 
     this.promptText.text = sel0 ? "▶  RESUME  ◀" : "   RESUME";
     this.promptText.style.fill = sel0 ? COLOR.hudAmber : COLOR.hudWhite;
@@ -4426,13 +4441,19 @@ export class GameRenderer {
     this.promptText.y = btn0Y + btnH / 2;
     this.promptText.anchor.set(0.5, 0.5);
 
-    // Reuse dockedHint text for the quit button
     this.dockedHint.text = sel1 ? "▶  QUIT TO MENU  ◀" : "   QUIT TO MENU";
     this.dockedHint.style.fill = sel1 ? COLOR.hudAmber : 0xddaaaa;
     this.dockedHint.x = this.width / 2;
     this.dockedHint.y = btn1Y + btnH / 2;
     this.dockedHint.anchor.set(0.5, 0.5);
     this.dockedHint.visible = true;
+
+    const soundLabel = soundManager.isMuted() ? "SOUND: OFF" : "SOUND: ON";
+    this.solarPauseSoundText.text = sel2 ? `▶  ${soundLabel}  ◀` : soundLabel;
+    this.solarPauseSoundText.style.fill = sel2 ? COLOR.hudAmber : 0xaaccaa;
+    this.solarPauseSoundText.x = this.width / 2;
+    this.solarPauseSoundText.y = btn2Y + btnH / 2;
+    this.solarPauseSoundText.visible = true;
   }
 
   private drawDockRoomInterior(
@@ -6480,7 +6501,8 @@ export class GameRenderer {
 
   /** Populates the 3-item pause-menu list and highlights the selected one. */
   private updatePauseMenu(selectedIdx: number): void {
-    const items = ["CONTINUE", "STATS", "QUIT TO MENU"];
+    const soundLabel = soundManager.isMuted() ? "SOUND: OFF" : "SOUND: ON";
+    const items = ["CONTINUE", "STATS", "QUIT TO MENU", soundLabel];
     this.renderMenuList(items, selectedIdx, this.height / 2, 52);
   }
 

@@ -62,20 +62,40 @@ export class GeometryEngine {
    * verts[i] = [ux, uy] where 1.0 = sideLengthPx.
    *
    * Templates are authored with their "output end" (barrel tip, bell nozzle,
-   * dish face) at −Y and their attachment base at +Y. This function rotates
-   * them so the output end points radially outward from the ship centre, i.e.
-   * in the direction (cx, cy) from origin. The required rotation is π/2 + α
-   * where α = atan2(cy, cx). Only used for rendering; snap geometry always
-   * uses buildVertices.
+   * dish face) at −Y and their attachment base at +Y. The function rotates
+   * them so the output end points in the exact outward direction of the
+   * module's attachment side.
+   *
+   * When rotationRad + ownSideIndex + sides are supplied (non-root modules),
+   * the outward angle is derived exactly from the snap formula:
+   *   α = rotationRad − π + π/N + ownSideIndex × (2π/N)
+   * This correctly orients modules attached to side faces of polygons (e.g. a
+   * thruster on a pentagon side that doesn't point purely radially outward).
+   *
+   * For the core (root, no parent) the fallback atan2(cy, cx) is fine because
+   * root modules never carry custom verts.
    */
   static buildCustomVertices(
     verts: ReadonlyArray<readonly [number, number]>,
     sideLengthPx: number,
     cx: number,
     cy: number,
+    rotationRad?: number,
+    ownSideIndex?: number,
+    sides?: number,
   ): Array<{ x: number; y: number }> {
-    const dist = Math.hypot(cx, cy);
-    const α = dist > 0.5 ? Math.atan2(cy, cx) : -Math.PI / 2;
+    let α: number;
+    if (
+      rotationRad !== undefined &&
+      ownSideIndex !== undefined &&
+      sides !== undefined
+    ) {
+      // Exact parent-side-normal derived from snap placement formula.
+      α = rotationRad - Math.PI + Math.PI / sides + ownSideIndex * ((2 * Math.PI) / sides);
+    } else {
+      const dist = Math.hypot(cx, cy);
+      α = dist > 0.5 ? Math.atan2(cy, cx) : -Math.PI / 2;
+    }
     const θ = Math.PI / 2 + α;
     const cos = Math.cos(θ);
     const sin = Math.sin(θ);
