@@ -68,6 +68,36 @@ export const MARS_BLUEPRINTS: ReadonlyArray<SolarShipBlueprint> = [
     ],
   },
 
+
+  // ── C4 "Mars Citadel" — capital station ─────────────────────────────────
+  // No engine: stationary fortress.  Cannon/torpedo cluster on hex arm,
+  // ECA shield wall, a ship foundry and power reactor.
+  // Budget (core-c4-armor: 5W 4E 4I): used 5W, 3E, 2I — no engine.
+  {
+    id: "mars-c4-citadel",
+    name: "Mars Citadel",
+    sizeClass: 4,
+    coreSideCount: 8,
+    modules: [
+      { placedId: "mc-core", moduleDefId: "core-c4-armor",     parentPlacedId: null,      parentSideIndex: null, ownSideIndex: null },
+      // Weapon cluster
+      { placedId: "mc-s1",   moduleDefId: "struct-hex-c4",     parentPlacedId: "mc-core", parentSideIndex: 0,    ownSideIndex: 0 },
+      { placedId: "mc-w1",   moduleDefId: "weapon-cannon-c4",  parentPlacedId: "mc-s1",   parentSideIndex: 1,    ownSideIndex: 0 },
+      { placedId: "mc-w2",   moduleDefId: "weapon-cannon-c4",  parentPlacedId: "mc-s1",   parentSideIndex: 2,    ownSideIndex: 0 },
+      { placedId: "mc-w3",   moduleDefId: "weapon-torpedo-c4", parentPlacedId: "mc-s1",   parentSideIndex: 3,    ownSideIndex: 0 },
+      // Direct weapons
+      { placedId: "mc-w4",   moduleDefId: "weapon-cannon-c4",  parentPlacedId: "mc-core", parentSideIndex: 1,    ownSideIndex: 0 },
+      { placedId: "mc-w5",   moduleDefId: "weapon-torpedo-c4", parentPlacedId: "mc-core", parentSideIndex: 2,    ownSideIndex: 0 },
+      // Shields
+      { placedId: "mc-e1",   moduleDefId: "ext-shield-c4",     parentPlacedId: "mc-core", parentSideIndex: 3,    ownSideIndex: 0 },
+      { placedId: "mc-e2",   moduleDefId: "ext-shield-c4",     parentPlacedId: "mc-core", parentSideIndex: 4,    ownSideIndex: 0 },
+      { placedId: "mc-e3",   moduleDefId: "ext-armor-c4",      parentPlacedId: "mc-core", parentSideIndex: 5,    ownSideIndex: 0 },
+      // Utility
+      { placedId: "mc-i1",   moduleDefId: "int-factory-c4",    parentPlacedId: "mc-core", parentSideIndex: 6,    ownSideIndex: 0 },
+      { placedId: "mc-i2",   moduleDefId: "int-power-c4",      parentPlacedId: "mc-core", parentSideIndex: 7,    ownSideIndex: 0 },
+    ],
+  },
+
 ];
 
 export function getMarsBlueprint(sizeClass: number): SolarShipBlueprint | undefined {

@@ -116,6 +116,8 @@ export interface InputState {
   pointerDownPulse?: { x: number; y: number } | null;
   /** One-frame pulse: right-click just landed this frame. */
   pointerRightClickPulse?: { x: number; y: number } | null;
+  /** One-frame pulse: ctrl/cmd+click (weapon target a ship without selecting it). */
+  pointerMetaDownPulse?: { x: number; y: number } | null;
   /** True whenever the primary pointer is pressed (mouse button or finger). */
   pointerHeld?: boolean;
 
@@ -240,6 +242,11 @@ export interface InputState {
    * One-frame pulse; cleared by InputHandler.endFrame().
    */
   dockPulse?: boolean;
+
+  /** Printable characters typed this frame. Empty string when nothing typed. One-frame; cleared by endFrame(). */
+  typedText?: string;
+  /** True if Backspace was pressed this frame. One-frame pulse; cleared by endFrame(). */
+  backspacePulse?: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

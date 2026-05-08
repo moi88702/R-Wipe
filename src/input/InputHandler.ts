@@ -15,6 +15,8 @@ const DOUBLE_TAP_MS = 320;
 
 export class InputHandler {
   private readonly keysPressed = new Set<string>();
+  /** Snapshot of keysPressed at the end of the previous frame — for edge detection. */
+  private readonly prevKeysPressed = new Set<string>();
   private readonly boundKeyDown: (e: KeyboardEvent) => void;
   private readonly boundKeyUp: (e: KeyboardEvent) => void;
 
@@ -43,6 +45,10 @@ export class InputHandler {
   // ── Solar-system dock / gate key (F) ────────────────────────────────────
   private dockPulse = false;
 
+  // ── Text input capture ───────────────────────────────────────────────────
+  private pendingTypedText = "";
+  private pendingBackspacePulse = false;
+
   // ── Solar-system zoom ──────────────────────────────────────────────────
   private zoomDelta = 0;
   private readonly boundWheel: (e: WheelEvent) => void;
@@ -57,6 +63,7 @@ export class InputHandler {
   private pointerPos: { x: number; y: number } | null = null;
   private pointerDownPulse: { x: number; y: number } | null = null;
   private pointerRightClickPulse: { x: number; y: number } | null = null;
+  private pointerMetaDownPulse: { x: number; y: number } | null = null;
   private pointerHeld = false;
   private pointerDisposers: Array<() => void> = [];
 
@@ -92,6 +99,10 @@ export class InputHandler {
       }
       if (e.code === "KeyM") this.mapTogglePulse = true;
       if (e.code === "KeyF") this.dockPulse = true;
+      if (e.code === "Backspace") this.pendingBackspacePulse = true;
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        this.pendingTypedText += e.key;
+      }
     };
 
     this.boundKeyUp = (e: KeyboardEvent) => {
@@ -238,8 +249,12 @@ export class InputHandler {
       if (e.button !== 0) return;
       const p = mapMouse(e);
       this.pointerPos = p;
-      this.pointerDownPulse = p;
       this.pointerHeld = true;
+      if (e.metaKey || e.ctrlKey) {
+        this.pointerMetaDownPulse = p;
+      } else {
+        this.pointerDownPulse = p;
+      }
     };
     const onContextMenu = (e: MouseEvent): void => {
       e.preventDefault();
@@ -298,6 +313,7 @@ export class InputHandler {
       pointer: this.pointerPos,
       pointerDownPulse: this.pointerDownPulse,
       pointerRightClickPulse: this.pointerRightClickPulse,
+      pointerMetaDownPulse: this.pointerMetaDownPulse,
       pointerHeld: this.pointerHeld,
       // ── Solar-system free-flight keys ─────────────────────────────────────
       thrustForward: this.keysPressed.has("KeyW"),
@@ -331,7 +347,36 @@ export class InputHandler {
 
       // D key one-frame pulse for docking (separate from held turnRight)
       dockPulse: this.dockPulse,
+
+      // Text input capture (always emitted; typedText="" when nothing typed)
+      typedText: this.pendingTypedText,
+      backspacePulse: this.pendingBackspacePulse,
     };
+  }
+
+  /**
+   * Returns true if `code` is currently held AND was not held at the end of
+   * the previous frame — i.e. the key was just pressed this frame.
+   * Use this instead of managing `prev*` booleans in callers.
+   */
+  wasPressed(code: string): boolean {
+    return this.keysPressed.has(code) && !this.prevKeysPressed.has(code);
+  }
+
+  /**
+   * True once per menu-confirm gesture: keyboard edge (Enter/Space newly
+   * pressed) OR touch tap pulse (menuConfirmPulse).
+   */
+  menuConfirmEdge(): boolean {
+    return this.wasPressed("Enter") || this.wasPressed("Space") || this.menuConfirmPulse;
+  }
+
+  /**
+   * True once per pause gesture: keyboard edge (Escape/P newly pressed) OR
+   * touch two-finger tap pulse (pausePulse).
+   */
+  pauseEdge(): boolean {
+    return this.wasPressed("Escape") || this.wasPressed("KeyP") || this.pausePulse;
   }
 
   /**
@@ -347,6 +392,7 @@ export class InputHandler {
     this.pausePulse = false;
     this.pointerDownPulse = null;
     this.pointerRightClickPulse = null;
+    this.pointerMetaDownPulse = null;
     // Solar-system ability key pulses
     this.abilityVPulse = false;
     this.abilityCPulse = false;
@@ -363,6 +409,12 @@ export class InputHandler {
     this.swipeDownPulse = false;
     // Solar-system dock key pulse
     this.dockPulse = false;
+    // Text input capture
+    this.pendingTypedText = "";
+    this.pendingBackspacePulse = false;
+    // Snapshot held keys for next-frame edge detection (wasPressed)
+    this.prevKeysPressed.clear();
+    for (const k of this.keysPressed) this.prevKeysPressed.add(k);
   }
 
   // ── Test helpers ─────────────────────────────────────────────────────────

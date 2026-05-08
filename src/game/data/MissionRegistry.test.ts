@@ -72,7 +72,7 @@ describe("MissionRegistry.getAllMissions", () => {
   });
 
   it("every mission has a non-empty id, title, npcId, and valid type", () => {
-    const validTypes = new Set(["courier", "trade"]);
+    const validTypes = new Set(["courier", "trade", "explore", "kill", "away"]);
     for (const m of MissionRegistry.getAllMissions()) {
       expect(m.id.length).toBeGreaterThan(0);
       expect(m.title.length).toBeGreaterThan(0);
@@ -178,11 +178,14 @@ describe("MissionRegistry.getMissionsByType", () => {
     }
   });
 
-  it("courier + trade together equal the full list", () => {
+  it("all known types together equal the full list", () => {
     const couriers = MissionRegistry.getMissionsByType("courier");
     const trades = MissionRegistry.getMissionsByType("trade");
+    const explores = MissionRegistry.getMissionsByType("explore");
+    const kills = MissionRegistry.getMissionsByType("kill");
+    const aways = MissionRegistry.getMissionsByType("away");
     const total = MissionRegistry.getAllMissions().length;
-    expect(couriers.length + trades.length).toBe(total);
+    expect(couriers.length + trades.length + explores.length + kills.length + aways.length).toBe(total);
   });
 });
 

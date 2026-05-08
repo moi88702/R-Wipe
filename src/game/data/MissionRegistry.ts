@@ -309,6 +309,99 @@ const NR_TRADE_EXOTIC: MissionSpec = {
   requiredReputation: 50,
 };
 
+// ── Explore missions ──────────────────────────────────────────────────────────
+
+const TF_EXPLORE_MARS: MissionSpec = {
+  id: "mission-tf-explore-mars",
+  npcId: "npc-commander-voss",
+  type: "explore",
+  title: "Survey Curiosity Base",
+  description:
+    "We've lost contact with the skeleton crew at Curiosity Base on Mars. Fly out there, dock, and confirm the outpost is still operational. Report back when you return.",
+  destinationLocationId: "outpost-mars",
+  rewardCredits: 500,
+  rewardReputation: 30,
+  difficulty: "easy",
+  requiredReputation: 0,
+};
+
+const DM_EXPLORE_STATION: MissionSpec = {
+  id: "mission-dm-explore-station",
+  npcId: "npc-foreman-groth",
+  type: "explore",
+  title: "Dock at Earth Station",
+  description:
+    "Groth needs a trusted contact to deliver a verbal message to the crew at Earth Station. No radios — the bots intercept everything. Go there in person and return when it's done.",
+  destinationLocationId: "station-earth-orbit",
+  rewardCredits: 400,
+  rewardReputation: 25,
+  difficulty: "easy",
+  requiredReputation: 0,
+};
+
+// ── Kill missions ─────────────────────────────────────────────────────────────
+
+const TF_KILL_PIRATES: MissionSpec = {
+  id: "mission-tf-kill-pirates",
+  npcId: "npc-commander-voss",
+  type: "kill",
+  title: "Clear the Pirate Threat",
+  description:
+    "Scavenger ships have been harassing Federation traffic. Hunt down and destroy 5 pirate vessels operating in the Sol system. Proof of destruction on your scanner is sufficient.",
+  killCount: 5,
+  rewardCredits: 1200,
+  rewardReputation: 80,
+  rewardItems: [{ type: "alloy", count: 10 }],
+  difficulty: "normal",
+  requiredReputation: 0,
+};
+
+const SC_KILL_RIVALS: MissionSpec = {
+  id: "mission-sc-kill-rivals",
+  npcId: "npc-chief-rask",
+  type: "kill",
+  title: "Eliminate the Rivals",
+  description:
+    "Rival scavengers are cutting into our salvage routes. Take out 3 of their ships and the territory is ours. Don't leave witnesses.",
+  killCount: 3,
+  rewardCredits: 800,
+  rewardReputation: 60,
+  difficulty: "normal",
+  requiredReputation: 0,
+};
+
+// ── Away missions ─────────────────────────────────────────────────────────────
+
+const NR_ASSAULT_BASE: MissionSpec = {
+  id: "mission-nr-assault-base",
+  npcId: "npc-strategist-orion",
+  type: "away",
+  title: "Assault the Pirate Stronghold",
+  description:
+    "Intel confirms the Scavenger pirate base in Sol is running critical operations against Federation and Rebel alike. Orion wants it gone. Fly to the stronghold and fight your way through in a direct assault. The Rebels will compensate you handsomely.",
+  awayBriefing: "ASSAULT BRIEFING: Pirate Stronghold — Sol System\n\nExpect heavy resistance. Multiple waves of armed scavengers. Destroy all hostiles and neutralise the base. Fight hard — no extraction if you go down.",
+  rewardCredits: 2500,
+  rewardReputation: 150,
+  rewardItems: [{ type: "power-crystal", count: 5 }, { type: "exotic-material", count: 1 }],
+  difficulty: "hard",
+  requiredReputation: 0,
+};
+
+const TF_AWAY_PATROL: MissionSpec = {
+  id: "mission-tf-away-patrol",
+  npcId: "npc-commander-voss",
+  type: "away",
+  title: "Federation Combat Deployment",
+  description:
+    "The Federation needs fighters on the front line. Board your combat frame and engage the enemy wave threatening our supply lanes. Clear the zone and return.",
+  awayBriefing: "DEPLOYMENT ORDERS: Combat Patrol — Sol System\n\nFederation intelligence has identified a pirate incursion. Your mission: engage and destroy all enemy contacts. You have full Federation authority to engage on sight.",
+  rewardCredits: 1800,
+  rewardReputation: 100,
+  rewardItems: [{ type: "alloy", count: 20 }],
+  difficulty: "normal",
+  requiredReputation: 0,
+};
+
 // ── Registry ──────────────────────────────────────────────────────────────────
 
 /** Explicit faction ownership map: missionId → factionId. */
@@ -331,6 +424,12 @@ const MISSION_FACTION: Readonly<Record<string, string>> = Object.freeze({
   "mission-nr-courier-rebel": "nova-rebels",
   "mission-nr-trade-crystals": "nova-rebels",
   "mission-nr-trade-exotic": "nova-rebels",
+  "mission-tf-explore-mars": "terran-federation",
+  "mission-dm-explore-station": "deep-miners",
+  "mission-tf-kill-pirates": "terran-federation",
+  "mission-sc-kill-rivals": "scavenger-clans",
+  "mission-nr-assault-base": "nova-rebels",
+  "mission-tf-away-patrol": "terran-federation",
 });
 
 const ALL_MISSIONS: readonly MissionSpec[] = Object.freeze([
@@ -352,6 +451,12 @@ const ALL_MISSIONS: readonly MissionSpec[] = Object.freeze([
   NR_COURIER_REBEL,
   NR_TRADE_CRYSTALS,
   NR_TRADE_EXOTIC,
+  TF_EXPLORE_MARS,
+  DM_EXPLORE_STATION,
+  TF_KILL_PIRATES,
+  SC_KILL_RIVALS,
+  NR_ASSAULT_BASE,
+  TF_AWAY_PATROL,
 ]);
 
 const MISSION_MAP: Readonly<Record<string, MissionSpec>> = Object.freeze(
@@ -399,9 +504,9 @@ export const MissionRegistry = {
   },
 
   /**
-   * Returns missions of the given type ("courier" or "trade").
+   * Returns missions of the given type.
    */
-  getMissionsByType(type: "courier" | "trade"): MissionSpec[] {
+  getMissionsByType(type: MissionSpec["type"]): MissionSpec[] {
     return ALL_MISSIONS.filter((m) => m.type === type);
   },
 

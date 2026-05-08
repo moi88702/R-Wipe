@@ -53,6 +53,9 @@ const COMMANDER_VOSS: NPCDefinition = {
   missionIds: [
     "mission-tf-courier-alpha",
     "mission-tf-patrol-dispatch",
+    "mission-tf-explore-mars",
+    "mission-tf-kill-pirates",
+    "mission-tf-away-patrol",
   ],
   role: "commander",
 };
@@ -137,6 +140,7 @@ const CHIEF_RASK: NPCDefinition = {
   missionIds: [
     "mission-sc-courier-salvage",
     "mission-sc-trade-parts",
+    "mission-sc-kill-rivals",
   ],
   role: "chief",
 };
@@ -165,6 +169,7 @@ const FOREMAN_GROTH: NPCDefinition = {
   missionIds: [
     "mission-dm-courier-gamma",
     "mission-dm-trade-alloys",
+    "mission-dm-explore-station",
   ],
   role: "foreman",
 };
@@ -206,7 +211,7 @@ const STRATEGIST_ORION: NPCDefinition = {
     "We need materials to build, not just fight. Bring me what's on this list.",
   dialogueIdle:
     "The revolution waits for no one — but I'll wait for you.",
-  missionIds: ["mission-nr-trade-exotic"],
+  missionIds: ["mission-nr-trade-exotic", "mission-nr-assault-base"],
   role: "strategist",
 };
 

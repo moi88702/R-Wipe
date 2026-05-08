@@ -85,6 +85,17 @@ const NOVA_REBELS: FactionDefinition = {
   enemies: ["terran-federation", "void-merchants", "xeno-collective"],
 };
 
+const MERCENARY: FactionDefinition = {
+  id: "mercenary",
+  name: "Independent Mercenary",
+  // Muted steel-grey — no allegiance, just credits
+  color: { r: 160, g: 160, b: 170 },
+  baselineNpcs: [],
+  baselineLocations: [],
+  allies: [],
+  enemies: [],
+};
+
 // ── Registry ──────────────────────────────────────────────────────────────────
 
 const ALL_FACTIONS: readonly FactionDefinition[] = Object.freeze([
@@ -94,6 +105,7 @@ const ALL_FACTIONS: readonly FactionDefinition[] = Object.freeze([
   SCAVENGER_CLANS,
   DEEP_MINERS,
   NOVA_REBELS,
+  MERCENARY,
 ]);
 
 const FACTION_MAP: Readonly<Record<string, FactionDefinition>> = Object.freeze(

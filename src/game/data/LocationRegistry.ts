@@ -145,6 +145,32 @@ const REBEL_BASE: Location = {
   requiredReputation: 0,
 };
 
+// ── Sol system locations ─────────────────────────────────────────────────────
+
+const STATION_EARTH_ORBIT: Location = {
+  id: "station-earth-orbit",
+  name: "Earth Station",
+  bodyId: "planet-earth",
+  position: { x: 0, y: 0 },
+  dockingRadius: 3,
+  controllingFaction: "terran-federation",
+  npcs: ["npc-commander-voss", "npc-trader-halley", "npc-foreman-groth"],
+  shops: ["shop-tf-earth"],
+  type: "station",
+};
+
+const OUTPOST_MARS: Location = {
+  id: "outpost-mars",
+  name: "Curiosity Base",
+  bodyId: "planet-mars",
+  position: { x: 0, y: 0 },
+  dockingRadius: 2,
+  controllingFaction: "terran-federation",
+  npcs: [],
+  shops: [],
+  type: "outpost",
+};
+
 // ── Registry ──────────────────────────────────────────────────────────────────
 
 const ALL_LOCATIONS: readonly Location[] = Object.freeze([
@@ -158,6 +184,8 @@ const ALL_LOCATIONS: readonly Location[] = Object.freeze([
   MINING_OUTPOST_GAMMA,
   DEEP_CORE_STATION,
   REBEL_BASE,
+  STATION_EARTH_ORBIT,
+  OUTPOST_MARS,
 ]);
 
 const LOCATION_MAP: Readonly<Record<string, Location>> = Object.freeze(

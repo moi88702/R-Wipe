@@ -24,7 +24,7 @@ export interface MissionSpec {
    * - `"courier"` — deliver a package to a destination location.
    * - `"trade"` — acquire a specific item type and sell it back to the NPC.
    */
-  type: "courier" | "trade";
+  type: "courier" | "trade" | "explore" | "kill" | "away";
   /** Short display title shown in the mission log and NPC dialogue. */
   title: string;
   /** Longer flavour description presented in the mission detail view. */
@@ -43,6 +43,17 @@ export interface MissionSpec {
   requiredItemCount?: number;
   /** Credits per unit the NPC will pay (above open-market price). */
   sellPrice?: number;
+
+  // ── Explore fields (type === "explore") ─────────────────────────────────
+  // Uses destinationLocationId — auto-completes on docking at that location.
+
+  // ── Kill fields (type === "kill") ────────────────────────────────────────
+  /** Number of enemy ships the player must destroy. */
+  killCount?: number;
+
+  // ── Away-mission fields (type === "away") ────────────────────────────────
+  /** Briefing shown before the player launches the arcade assault. */
+  awayBriefing?: string;
 
   // ── Rewards ───────────────────────────────────────────────────────────────
   /** Credit reward on mission completion. */

@@ -15,6 +15,10 @@ export class SoundManager {
   private thrusterOsc: OscillatorNode | null = null;
   private thrusterGain: GainNode | null = null;
   private thrusterActive = false;
+  private thrusterActiveMs = 0;
+  private static readonly THRUSTER_PEAK_GAIN = 0.12;
+  private static readonly THRUSTER_FADE_START_MS = 2500;
+  private static readonly THRUSTER_FADE_DURATION_MS = 3000;
 
   // Per-sound throttle timestamps (ms)
   private readonly lastPlayed = new Map<string, number>();
@@ -174,13 +178,27 @@ export class SoundManager {
   setThrusterActive(active: boolean): void {
     if (active === this.thrusterActive) return;
     this.thrusterActive = active;
+    if (active) {
+      this.thrusterActiveMs = 0;
+    }
     if (!this.ctx || !this.masterGain) return;
-
     if (active) {
       this.startThruster();
     } else {
       this.stopThruster();
     }
+  }
+
+  tickThruster(deltaMs: number): void {
+    if (!this.thrusterActive || !this.thrusterGain || !this.ctx) return;
+    this.thrusterActiveMs += deltaMs;
+    const fadeStart = SoundManager.THRUSTER_FADE_START_MS;
+    const fadeDur = SoundManager.THRUSTER_FADE_DURATION_MS;
+    const peak = SoundManager.THRUSTER_PEAK_GAIN;
+    if (this.thrusterActiveMs <= fadeStart) return;
+    const t = Math.min(1, (this.thrusterActiveMs - fadeStart) / fadeDur);
+    const target = peak * (1 - t);
+    this.thrusterGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.1);
   }
 
   private startThruster(): void {
@@ -190,7 +208,7 @@ export class SoundManager {
     const ctx = this.ctx;
     const gain = ctx.createGain();
     gain.gain.setValueAtTime(0, ctx.currentTime);
-    gain.gain.linearRampToValueAtTime(0.12, ctx.currentTime + 0.1);
+    gain.gain.linearRampToValueAtTime(SoundManager.THRUSTER_PEAK_GAIN, ctx.currentTime + 0.1);
 
     // Low rumble oscillator
     const osc = ctx.createOscillator();
@@ -216,11 +234,14 @@ export class SoundManager {
   private stopThruster(): void {
     if (!this.ctx || !this.thrusterGain || !this.thrusterOsc) return;
     const ctx = this.ctx;
-    this.thrusterGain.gain.setTargetAtTime(0, ctx.currentTime, 0.08);
+    const currentVal = this.thrusterGain.gain.value;
+    this.thrusterGain.gain.cancelScheduledValues(ctx.currentTime);
+    this.thrusterGain.gain.setValueAtTime(currentVal, ctx.currentTime);
+    this.thrusterGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 2.0);
     const osc = this.thrusterOsc;
     setTimeout(() => {
       try { osc.stop(); } catch { /* already stopped */ }
-    }, 400);
+    }, 2200);
     this.thrusterOsc = null;
     this.thrusterGain = null;
   }

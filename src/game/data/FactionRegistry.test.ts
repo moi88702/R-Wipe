@@ -59,7 +59,8 @@ describe("FactionRegistry.getAllFactions", () => {
     expect(ids).toContain("scavenger-clans");
     expect(ids).toContain("deep-miners");
     expect(ids).toContain("nova-rebels");
-    expect(ids).toHaveLength(6);
+    expect(ids).toContain("mercenary");
+    expect(ids).toHaveLength(7);
   });
 
   it("every definition has a non-empty id, name, and colour", () => {

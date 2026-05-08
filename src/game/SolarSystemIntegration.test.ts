@@ -81,8 +81,8 @@ describe("Solar System Integration", () => {
       manager.tick(16);
       manager["input"].endFrame();
 
-      // Should transition to solar system
-      expect(manager["state"].getScreen()).toBe("solar-system");
+      // Should start docked at Earth Station on first entry
+      expect(manager["state"].getScreen()).toBe("docked");
     });
 
     it("solar system mode initializes session manager", () => {
@@ -96,14 +96,14 @@ describe("Solar System Integration", () => {
     });
 
     it("escape key from solar system returns to main menu", () => {
-      // Open solar system
+      // Open solar system (starts docked)
       manager["menuSelection"] = 2;
       manager["input"].simulateKeyDown("Enter");
       manager.tick(16);
       manager["input"].simulateKeyUp("Enter");
       manager["input"].endFrame();
 
-      expect(manager["state"].getScreen()).toBe("solar-system");
+      expect(manager["state"].getScreen()).toBe("docked");
 
       // Press escape
       manager["input"].simulateKeyDown("Escape");
@@ -127,12 +127,15 @@ describe("Solar System Integration", () => {
 
   describe("Game loop", () => {
     beforeEach(() => {
-      // Open solar system before each test
+      // Open solar system (starts docked at Earth Station) then undock to fly freely
       manager["menuSelection"] = 2;
       manager["input"].simulateKeyDown("Enter");
       manager.tick(16);
       manager["input"].simulateKeyUp("Enter");
       manager["input"].endFrame();
+      // Undock so physics input is processed
+      manager["solarSystem"]?.undock();
+      manager["state"].setScreen("solar-system");
     });
 
     it("updateSolarSystem() processes W key (thrust forward)", () => {
@@ -221,12 +224,14 @@ describe("Solar System Integration", () => {
 
   describe("Ship controls", () => {
     beforeEach(() => {
-      // Open solar system
+      // Open solar system then undock so ship controls are active
       manager["menuSelection"] = 2;
       manager["input"].simulateKeyDown("Enter");
       manager.tick(16);
       manager["input"].simulateKeyUp("Enter");
       manager["input"].endFrame();
+      manager["solarSystem"]?.undock();
+      manager["state"].setScreen("solar-system");
     });
 
     it("WASD keys control ship movement and rotation", () => {
@@ -254,12 +259,14 @@ describe("Solar System Integration", () => {
 
   describe("Rendering integration", () => {
     beforeEach(() => {
-      // Open solar system
+      // Open solar system then undock so screen is solar-system
       manager["menuSelection"] = 2;
       manager["input"].simulateKeyDown("Enter");
       manager.tick(16);
       manager["input"].simulateKeyUp("Enter");
       manager["input"].endFrame();
+      manager["solarSystem"]?.undock();
+      manager["state"].setScreen("solar-system");
     });
 
     it("renders solar system when screen is solar-system", () => {

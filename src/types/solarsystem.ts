@@ -255,4 +255,12 @@ export interface SolarSystemSessionState {
    * Persisted via the solar system state on session end.
    */
   discoveredLocations: Set<string>;
+  /** Player credits in solar-system mode. */
+  solarCredits: number;
+  /** Modules owned by the player: moduleDefId → quantity. */
+  moduleInventory: Map<string, number>;
+  /** Trade goods and mission items: itemType → quantity. */
+  carriedItems: Map<string, number>;
+  /** Cumulative real-time elapsed (ms) used to pace economy refresh cycles. */
+  gameTimeMs: number;
 }

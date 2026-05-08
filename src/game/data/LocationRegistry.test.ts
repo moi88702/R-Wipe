@@ -43,7 +43,7 @@ describe("LocationRegistry.getAllLocations", () => {
     expect(Object.isFrozen(all)).toBe(true);
   });
 
-  it("contains all ten expected locations", () => {
+  it("contains all expected locations", () => {
     const ids = LocationRegistry.getAllLocations().map((l) => l.id);
     const expected = [
       "station-alpha",
@@ -56,11 +56,13 @@ describe("LocationRegistry.getAllLocations", () => {
       "mining-outpost-gamma",
       "deep-core-station",
       "rebel-base",
+      "station-earth-orbit",
+      "outpost-mars",
     ];
     for (const id of expected) {
       expect(ids).toContain(id);
     }
-    expect(ids).toHaveLength(10);
+    expect(ids).toHaveLength(12);
   });
 
   it("every location has a non-empty id, name, bodyId, and valid type", () => {
