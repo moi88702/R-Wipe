@@ -255,6 +255,7 @@ export interface SolarSystemRenderData {
   readonly enemyShips: ReadonlyArray<{
     readonly id: string;
     readonly typeIdx: number;
+    readonly typeName: string;
     readonly sizeClass: number;
     readonly color: number;
     readonly position: { x: number; y: number };
@@ -328,9 +329,8 @@ export interface SolarSystemRenderData {
     readonly targetX: number;
     readonly targetY: number;
     readonly alpha: number;
-    /** Screen-pixel offset from the view centre to the weapon-tip origin. */
-    readonly originDx?: number;
-    readonly originDy?: number;
+    /** One entry per weapon module; each is a screen-pixel offset from view centre. */
+    readonly origins: ReadonlyArray<{ readonly dx: number; readonly dy: number }>;
   };
   /** 0 = no warp, 1 = full warp, 0–1 during deceleration. */
   readonly warpIntensity?: number;
@@ -3139,7 +3139,8 @@ export class GameRenderer {
         this.drawDeltaWing(g, p.x, p.y, ship.heading, ship.color, screenR / 16);
       }
       // Selection ring (thin white circle around click-selected ship)
-      if (data.selectedShipId === ship.id) {
+      const isSelected = data.selectedShipId === ship.id;
+      if (isSelected) {
         g.circle(p.x, p.y, screenR * 1.6).stroke({ color: 0xffffff, width: 1.2, alpha: 0.85 });
       }
       // Health bar sits just below the rendered hull
@@ -3148,7 +3149,17 @@ export class GameRenderer {
       const barY = p.y + screenR + 3;
       g.rect(p.x - barW / 2, barY, barW, 3).fill({ color: 0x333333, alpha: 0.7 });
       g.rect(p.x - barW / 2, barY, barW * ratio, 3).fill({ color: ship.color, alpha: 0.9 });
-      label.visible = false;
+      if (isSelected) {
+        label.text = `${ship.typeName}  C${ship.sizeClass}`;
+        label.style.fontSize = 10;
+        label.style.fill = 0xffffff;
+        label.x = p.x;
+        label.y = barY + 6;
+        label.anchor.set(0.5, 0);
+        label.visible = true;
+      } else {
+        label.visible = false;
+      }
     }
     for (let i = data.enemyShips.length; i < this.solarEnemyLabels.length; i++) {
       this.solarEnemyLabels[i]!.visible = false;
@@ -3412,21 +3423,25 @@ export class GameRenderer {
     if (data.laserFlash) {
       const tp = w2s(data.laserFlash.targetX, data.laserFlash.targetY);
       const alpha = data.laserFlash.alpha;
-      // Origin at weapon tip (screen-space offset from centre)
-      const ox = cx + (data.laserFlash.originDx ?? 0);
-      const oy = cy + (data.laserFlash.originDy ?? 0);
-      // Outer glow
-      g.moveTo(ox, oy).lineTo(tp.x, tp.y).stroke({ color: 0x44ffff, width: 6, alpha: alpha * 0.18 });
-      // Mid halo
-      g.moveTo(ox, oy).lineTo(tp.x, tp.y).stroke({ color: 0x88ffff, width: 3, alpha: alpha * 0.45 });
-      // Core beam
-      g.moveTo(ox, oy).lineTo(tp.x, tp.y).stroke({ color: 0xffffff, width: 1.2, alpha });
-      // Impact flash at target
+      const origins = data.laserFlash.origins.length > 0
+        ? data.laserFlash.origins
+        : [{ dx: 0, dy: 0 }];
+      // Impact flash at target (once, not per weapon)
       g.circle(tp.x, tp.y, 9 * alpha).fill({ color: 0xffffff, alpha: alpha * 0.9 });
       g.circle(tp.x, tp.y, 16 * alpha).fill({ color: 0x44ffff, alpha: alpha * 0.5 });
       g.circle(tp.x, tp.y, 24 * alpha).fill({ color: 0x0088cc, alpha: alpha * 0.25 });
-      // Muzzle flash at origin
-      g.circle(ox, oy, 5 * alpha).fill({ color: 0x88ffff, alpha: alpha * 0.7 });
+      for (const ori of origins) {
+        const ox = cx + ori.dx;
+        const oy = cy + ori.dy;
+        // Outer glow
+        g.moveTo(ox, oy).lineTo(tp.x, tp.y).stroke({ color: 0x44ffff, width: 6, alpha: alpha * 0.18 });
+        // Mid halo
+        g.moveTo(ox, oy).lineTo(tp.x, tp.y).stroke({ color: 0x88ffff, width: 3, alpha: alpha * 0.45 });
+        // Core beam
+        g.moveTo(ox, oy).lineTo(tp.x, tp.y).stroke({ color: 0xffffff, width: 1.2, alpha });
+        // Muzzle flash at origin
+        g.circle(ox, oy, 5 * alpha).fill({ color: 0x88ffff, alpha: alpha * 0.7 });
+      }
     }
 
     // ── Warp bubble + distortion shader ──────────────────────────────────

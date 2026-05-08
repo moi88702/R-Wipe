@@ -79,6 +79,8 @@ export interface ModuleStats {
   powerOutput?: number;
   damagePerShot?: number;
   fireRateHz?: number;
+  /** Maximum effective range of a weapon module (km). */
+  rangeKm?: number;
   sensorRangeKm?: number;
   /** Factory: max ship class that can be built/fueled/rearmed here. */
   shipFactoryMaxClass?: number;

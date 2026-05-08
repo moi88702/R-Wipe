@@ -139,6 +139,8 @@ interface SolarExplosion {
 const SOLAR_COMBAT_CONFIG = {
   PROJECTILE_SPEED_KM_S: 600,
   PLAYER_SENSOR_RANGE_KM: 540,
+  /** Weapon-lock range is capped below the sensor range so you can see farther than you can lock. */
+  PLAYER_LOCK_RANGE_KM: 200,
   LASER_HIT_RADIUS_KM: 20,
   PROJECTILE_HIT_RADIUS_KM: 10,
   AUTO_FIRE_RANGE_KM: 120,
@@ -1638,20 +1640,24 @@ export class GameManager {
       const pcy = this.height / 2;
       const worldX = (sx - pcx) / kmToPx + playerPos.x;
       const worldY = (sy - pcy) / kmToPx + playerPos.y;
+      // Visual selection uses full sensor range; weapon lock is gated to lock range.
       const sensorRange = this.solarPlayerScannerRangeKm;
+      const lockRange = SOLAR_COMBAT_CONFIG.PLAYER_LOCK_RANGE_KM;
       const clickRadiusKm = SOLAR_COMBAT_CONFIG.CLICK_DETECT_RADIUS_PX / kmToPx;
       let bestDist = clickRadiusKm;
       let clicked: string | null = null;
+      let clickedInLockRange = false;
       for (const ship of this.solarEnemyShips) {
         const d = Math.hypot(ship.position.x - worldX, ship.position.y - worldY);
         const playerDist = Math.hypot(ship.position.x - playerPos.x, ship.position.y - playerPos.y);
         if (d < bestDist && playerDist < sensorRange) {
           bestDist = d; clicked = ship.id;
+          clickedInLockRange = playerDist < lockRange;
         }
       }
       if (isMetaClick) {
-        // Meta+click: weapon lock
-        if (clicked) {
+        // Meta+click: weapon lock (only allowed within lock range)
+        if (clicked && clickedInLockRange) {
           if (this.solarLockedIds.has(clicked)) {
             this.solarLockedIds.delete(clicked);
             if (this.solarFocusedId === clicked) this.solarFocusedId = null;
@@ -1666,11 +1672,12 @@ export class GameManager {
       }
     }
 
-    // Validate existing locks: remove any that moved out of sensor range or were destroyed
-    const sensorRangeKm = this.solarPlayerScannerRangeKm;
+    // Validate existing locks: remove any that moved out of lock range or were destroyed.
+    // Lock range is intentionally lower than sensor/view range.
+    const lockRangeKm = SOLAR_COMBAT_CONFIG.PLAYER_LOCK_RANGE_KM;
     for (const lockedId of [...this.solarLockedIds]) {
       const ship = this.solarEnemyShips.find(s => s.id === lockedId);
-      if (!ship || Math.hypot(ship.position.x - playerPos.x, ship.position.y - playerPos.y) > sensorRangeKm) {
+      if (!ship || Math.hypot(ship.position.x - playerPos.x, ship.position.y - playerPos.y) > lockRangeKm) {
         this.solarLockedIds.delete(lockedId);
         if (this.solarFocusedId === lockedId) this.solarFocusedId = null;
       }
@@ -1755,11 +1762,22 @@ export class GameManager {
     const dist = Math.hypot(dx, dy) || 1;
     const speed = SOLAR_COMBAT_CONFIG.PROJECTILE_SPEED_KM_S;
 
-    for (const w of weapons) {
+    // Compute weapon world-km positions from blueprint (zoom-independent using zoom=1 reference scale).
+    const weaponPositions = this.computeWeaponWorldPositions(from);
+
+    for (let wi = 0; wi < weapons.length; wi++) {
+      const w = weapons[wi]!;
+      // Per-weapon range check
+      const weaponRangeKm = this.getWeaponRangeKm(w.defId);
+      if (dist > weaponRangeKm) continue;
+
       const cooldown = this.solarWeaponCooldowns.get(w.defId) ?? 0;
       if (cooldown > 0) continue;
       const intervalMs = 1000 / w.rateHz;
       this.solarWeaponCooldowns.set(w.defId, intervalMs);
+
+      // Spawn origin: use blueprint weapon position if available, else ship centre.
+      const spawnPos = weaponPositions[wi] ?? { ...from };
 
       if (w.kind === "laser") {
         soundManager.solarShoot();
@@ -1773,13 +1791,13 @@ export class GameManager {
           this.damageEnemyShip(ship, w.damage);
         }
       } else {
-        // Cannon / torpedo — create projectile
+        // Cannon / torpedo — create projectile; lifetime derived from weapon range
         const vx = (dx / dist) * speed;
         const vy = (dy / dist) * speed;
-        const lifetime = w.kind === "torpedo" ? 8000 : 3000;
+        const lifetime = Math.round((weaponRangeKm / speed) * 1000);
         this.solarPlayerProjectiles.push({
           id: `pp-${this.solarPlayerNextId++}`,
-          position: { ...from },
+          position: { ...spawnPos },
           velocity: { x: vx, y: vy },
           damage: w.damage,
           weaponKind: w.kind,
@@ -1788,6 +1806,43 @@ export class GameManager {
         });
       }
     }
+  }
+
+  /**
+   * Returns the world-km position for each active weapon module, in the same
+   * order as getActiveWeapons(). Uses zoom=1 reference scale so the offset is
+   * physically consistent regardless of current zoom level.
+   */
+  private computeWeaponWorldPositions(shipPos: { x: number; y: number }): Array<{ x: number; y: number }> {
+    const cache = this.solarPlayerBlueprintCache;
+    if (!cache) return [];
+    const { modules, coreRadius } = cache;
+    const szClass = this.solarActiveBlueprintId
+      ? (this.solarSavedBlueprints.get(this.solarActiveBlueprintId)?.sizeClass ?? 2)
+      : 2;
+    // Reference scale at zoom=1: matches renderer formula at kmToPx=1
+    const refTargetR = Math.max(3, (4 + szClass * 2) * 0.6);
+    const bpScale = refTargetR / coreRadius;  // screen-px per blueprint-px at zoom=1
+    // 1 km = 1 px at zoom=1, so km offset = blueprint_px * bpScale / 1
+    const heading = this.solarSystem?.getSessionState().playerHeading ?? 0;
+    const h = (heading * Math.PI) / 180;
+    const cosH = Math.cos(h);
+    const sinH = Math.sin(h);
+    const weaponMods = modules.filter(m => m.moduleType === "weapon");
+    return weaponMods.map(mod => ({
+      x: shipPos.x + (mod.worldX * cosH - mod.worldY * sinH) * bpScale,
+      y: shipPos.y + (mod.worldX * sinH + mod.worldY * cosH) * bpScale,
+    }));
+  }
+
+  /** Returns weapon range in km from SOLAR_WEAPONS if the weapon def is a blueprint module weapon,
+   *  otherwise falls back to AUTO_FIRE_RANGE_KM. */
+  private getWeaponRangeKm(defId: string): number {
+    // Blueprint weapon: check if any solar module has a rangeKm stat.
+    const mod = SolarModuleRegistry.getModule(defId);
+    if (mod?.stats.rangeKm !== undefined) return mod.stats.rangeKm;
+    // Fallback for the hardcoded default laser
+    return SOLAR_COMBAT_CONFIG.AUTO_FIRE_RANGE_KM;
   }
 
   /** Apply damage to an enemy ship, removing it and checking missions if destroyed. */
@@ -4024,10 +4079,9 @@ export class GameManager {
         }
       : undefined;
 
-    // Laser flash FX — include weapon-tip screen offset for the origin.
-    // bpScale must match the renderer's formula exactly (same zoom-aware computation).
-    let laserOriginDx = 0;
-    let laserOriginDy = 0;
+    // Laser flash FX — compute screen-space offsets for each weapon module origin.
+    // Uses zoom-aware bpScale so origins track the rendered ship at current zoom.
+    const laserFlashOrigins: Array<{ dx: number; dy: number }> = [];
     if (this.solarPlayerBlueprintCache && this.laserFlashMs > 0) {
       const { modules, coreRadius } = this.solarPlayerBlueprintCache;
       const laserKmToPx = Math.max(0.05, sessionState.zoomLevel);
@@ -4043,6 +4097,7 @@ export class GameManager {
       const sinH = Math.sin(h);
       for (const mod of modules) {
         if (mod.moduleType !== "weapon") continue;
+        // Use the outermost vertex of the weapon polygon as the muzzle tip.
         const vcx = mod.vertices.reduce((s, v) => s + v.x, 0) / (mod.vertices.length || 1);
         const vcy = mod.vertices.reduce((s, v) => s + v.y, 0) / (mod.vertices.length || 1);
         let tipX = vcx, tipY = vcy, maxD2 = 0;
@@ -4050,9 +4105,10 @@ export class GameManager {
           const d2 = Math.hypot(v.x - vcx, v.y - vcy);
           if (d2 > maxD2) { maxD2 = d2; tipX = v.x; tipY = v.y; }
         }
-        laserOriginDx = (tipX * cosH - tipY * sinH) * bpScale;
-        laserOriginDy = (tipX * sinH + tipY * cosH) * bpScale;
-        break;
+        laserFlashOrigins.push({
+          dx: (tipX * cosH - tipY * sinH) * bpScale,
+          dy: (tipX * sinH + tipY * cosH) * bpScale,
+        });
       }
     }
     const laserFlash = this.laserFlashMs > 0 && this.laserFlashTarget
@@ -4060,8 +4116,7 @@ export class GameManager {
           targetX: this.laserFlashTarget.x,
           targetY: this.laserFlashTarget.y,
           alpha: this.laserFlashMs / 200,
-          originDx: laserOriginDx,
-          originDy: laserOriginDy,
+          origins: laserFlashOrigins,
         }
       : undefined;
 
@@ -4112,6 +4167,7 @@ export class GameManager {
             return {
               id: s.id,
               typeIdx: s.typeIdx,
+              typeName: SOLAR_ENEMY_TYPES[s.typeIdx]?.name ?? "Unknown",
               color: FACTION_COLORS[s.faction] ?? (SOLAR_ENEMY_TYPES[s.typeIdx]?.color ?? 0xff3333),
               position: s.position,
               heading: s.heading,
