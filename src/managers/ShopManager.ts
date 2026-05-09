@@ -48,12 +48,17 @@ export class ShopManager {
     const entries: ShopEntry[] = [];
     const allModules = SolarModuleRegistry.getAllModules();
 
-    for (const def of allModules) {
-      if (def.type === "core") continue;
-      if (def.sizeClass !== 1) continue;
+    // Stations that stock the full catalogue including capital-class and projector modules.
+    const isFullStockStation =
+      locationId === "station-earth-orbit" ||
+      locationId === "outpost-mars";
 
-      // Earth Station carries all class-1 parts so players can always kit out
-      const selectionProb = locationId === "station-earth-orbit"
+    for (const def of allModules) {
+      if (!isFullStockStation && def.type === "core") continue;
+      if (!isFullStockStation && def.sizeClass !== 1) continue;
+
+      // Full-stock stations carry everything; others use economy-weighted selection.
+      const selectionProb = isFullStockStation
         ? 1.0
         : getModuleSelectionProb(economyType, def.type);
       if (rng() > selectionProb) continue;
@@ -68,8 +73,8 @@ export class ShopManager {
 
       const price = Math.round(def.shopCost * DEMAND_MULTIPLIER[demand]);
 
-      // Stock mirrors demand level; converters have an extra 40% chance of being unavailable
-      if (def.type === "converter" && rng() < 0.4) continue;
+      // Stock mirrors demand level; converters have an extra 40% chance of being unavailable (not full-stock stations)
+      if (!isFullStockStation && def.type === "converter" && rng() < 0.4) continue;
       const stock = stockForDemand(demand, rng);
 
       entries.push({ moduleDefId: def.id, demand, price, stock });

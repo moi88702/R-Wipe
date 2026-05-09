@@ -70,8 +70,8 @@ export const EARTH_BLUEPRINTS: ReadonlyArray<SolarShipBlueprint> = [
 
   // ── C6 "Earth Orbital Platform" — super-capital station ─────────────────
   // No engine: stationary defense platform.  Weapon clusters on hex-junction
-  // arms, heavy shields, fleet foundry, and power core.
-  // Budget (core-c6-balanced: 7W 7E 7I): used 7W, 4E, 2I — no engine.
+  // arms, projected shield, heavy shields, fleet foundry, and power core.
+  // Budget (core-c6-balanced: 7W 7E 7I): used 7W, 6E(shield×4+proj-shield+amp), 3I.
   {
     id: "earth-c6-orbital-platform",
     name: "Earth Orbital Platform",
@@ -84,11 +84,15 @@ export const EARTH_BLUEPRINTS: ReadonlyArray<SolarShipBlueprint> = [
       { placedId: "eo-w1",   moduleDefId: "weapon-cannon-c6",  parentPlacedId: "eo-s1",    parentSideIndex: 1,    ownSideIndex: 0 },
       { placedId: "eo-w2",   moduleDefId: "weapon-cannon-c6",  parentPlacedId: "eo-s1",    parentSideIndex: 2,    ownSideIndex: 0 },
       { placedId: "eo-w3",   moduleDefId: "weapon-laser-c6",   parentPlacedId: "eo-s1",    parentSideIndex: 3,    ownSideIndex: 0 },
+      // Shield projector cluster on port arm
+      { placedId: "eo-ps1",  moduleDefId: "ext-proj-shield-c6",parentPlacedId: "eo-s1",    parentSideIndex: 4,    ownSideIndex: 0 },
+      { placedId: "eo-pa1",  moduleDefId: "ext-proj-amp-c6",   parentPlacedId: "eo-s1",    parentSideIndex: 5,    ownSideIndex: 0 },
       // Weapon cluster B — starboard side
       { placedId: "eo-s2",   moduleDefId: "struct-hex-c6",     parentPlacedId: "eo-core",  parentSideIndex: 1,    ownSideIndex: 0 },
       { placedId: "eo-w4",   moduleDefId: "weapon-cannon-c6",  parentPlacedId: "eo-s2",    parentSideIndex: 1,    ownSideIndex: 0 },
       { placedId: "eo-w5",   moduleDefId: "weapon-torpedo-c6", parentPlacedId: "eo-s2",    parentSideIndex: 2,    ownSideIndex: 0 },
       { placedId: "eo-w6",   moduleDefId: "weapon-torpedo-c6", parentPlacedId: "eo-s2",    parentSideIndex: 3,    ownSideIndex: 0 },
+      { placedId: "eo-pr1",  moduleDefId: "int-proj-regen-c6", parentPlacedId: "eo-s2",    parentSideIndex: 4,    ownSideIndex: 0 },
       // Direct forward weapon
       { placedId: "eo-w7",   moduleDefId: "weapon-laser-c6",   parentPlacedId: "eo-core",  parentSideIndex: 2,    ownSideIndex: 0 },
       // Heavy shields
@@ -99,6 +103,36 @@ export const EARTH_BLUEPRINTS: ReadonlyArray<SolarShipBlueprint> = [
       // Utility: power + fleet foundry
       { placedId: "eo-i1",   moduleDefId: "int-power-c6",      parentPlacedId: "eo-core",  parentSideIndex: 7,    ownSideIndex: 0 },
       { placedId: "eo-i2",   moduleDefId: "int-factory-c6",    parentPlacedId: "eo-core",  parentSideIndex: 8,    ownSideIndex: 0 },
+    ],
+  },
+
+  // ── C4 "Lunar Garrison" — capital-class moon defense station ────────────────
+  // No engine: stationary forward operating base on the Moon.  Two cannon arms
+  // on a hex-junction provide overlapping fields of fire; projected shield with
+  // amplifier gives ~95,000 HP bubble; on-board foundry spawns patrol wings.
+  // Budget (core-c4-balanced: 5W 5E 5I): used 3W, 5E(struct+proj+amp+shield×2), 3I.
+  {
+    id: "earth-c4-moon-garrison",
+    name: "Lunar Garrison",
+    sizeClass: 4,
+    coreSideCount: 8,
+    modules: [
+      { placedId: "em-core", moduleDefId: "core-c4-balanced",    parentPlacedId: null,       parentSideIndex: null, ownSideIndex: null },
+      // Weapon arm — forward fire
+      { placedId: "em-s1",   moduleDefId: "struct-hex-c4",       parentPlacedId: "em-core",  parentSideIndex: 0,    ownSideIndex: 0 },
+      { placedId: "em-w1",   moduleDefId: "weapon-cannon-c4",    parentPlacedId: "em-s1",    parentSideIndex: 1,    ownSideIndex: 0 },
+      { placedId: "em-w2",   moduleDefId: "weapon-cannon-c4",    parentPlacedId: "em-s1",    parentSideIndex: 2,    ownSideIndex: 0 },
+      { placedId: "em-w3",   moduleDefId: "weapon-torpedo-c4",   parentPlacedId: "em-s1",    parentSideIndex: 3,    ownSideIndex: 0 },
+      // Shield projector cluster
+      { placedId: "em-ps1",  moduleDefId: "ext-proj-shield-c4",  parentPlacedId: "em-core",  parentSideIndex: 1,    ownSideIndex: 0 },
+      { placedId: "em-pa1",  moduleDefId: "ext-proj-amp-c4",     parentPlacedId: "em-core",  parentSideIndex: 2,    ownSideIndex: 0 },
+      // Heavy shields
+      { placedId: "em-e1",   moduleDefId: "ext-shield-c4",       parentPlacedId: "em-core",  parentSideIndex: 3,    ownSideIndex: 0 },
+      { placedId: "em-e2",   moduleDefId: "ext-shield-c4",       parentPlacedId: "em-core",  parentSideIndex: 4,    ownSideIndex: 0 },
+      // Utility: regen + power + foundry
+      { placedId: "em-pr1",  moduleDefId: "int-proj-regen-c4",   parentPlacedId: "em-core",  parentSideIndex: 5,    ownSideIndex: 0 },
+      { placedId: "em-i1",   moduleDefId: "int-power-c4",        parentPlacedId: "em-core",  parentSideIndex: 6,    ownSideIndex: 0 },
+      { placedId: "em-i2",   moduleDefId: "int-factory-c4",      parentPlacedId: "em-core",  parentSideIndex: 7,    ownSideIndex: 0 },
     ],
   },
 

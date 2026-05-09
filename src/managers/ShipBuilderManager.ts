@@ -43,6 +43,9 @@ export class ShipBuilderManager {
   private statusMs = 0;
   private contextMenu: SolarBuilderContextMenu | null = null;
   private corePicker: ReadonlyArray<CorePickerItem> | null = null;
+  private corePickerScrollOffset = 0;
+  private corePickerSearch = "";
+  private corePickerShowAll = false;
   private renameMode = false;
   private renameBuf = "";
 
@@ -85,15 +88,53 @@ export class ShipBuilderManager {
 
   openCorePicker(inventory: ReadonlyMap<string, number>): void {
     this.contextMenu = null;
-    this.corePicker = SolarModuleRegistry.getCores(1)
+    this.corePickerScrollOffset = 0;
+    this.corePickerSearch = "";
+    this.corePickerShowAll = false;
+    this.corePicker = SolarModuleRegistry.getCores()
       .map((c): CorePickerItem => ({
         defId: c.id,
         name: c.name,
+        sizeClass: c.sizeClass,
         weaponPoints: c.weaponPoints,
         externalPoints: c.externalPoints,
         internalPoints: c.internalPoints,
         quantity: inventory.get(c.id) ?? 0,
       }));
+  }
+
+  /** Apply text search + owned-only filter. Returns the visible slice for rendering. */
+  getFilteredCorePicker(): ReadonlyArray<CorePickerItem> {
+    if (!this.corePicker) return [];
+    const term = this.corePickerSearch.toLowerCase();
+    return this.corePicker.filter(c =>
+      (this.corePickerShowAll || c.quantity > 0) &&
+      (!term || c.name.toLowerCase().includes(term))
+    );
+  }
+
+  typeCorePickerSearch(chars: string): void {
+    this.corePickerSearch += chars;
+    this.corePickerScrollOffset = 0;
+  }
+
+  backspaceCorePickerSearch(): void {
+    this.corePickerSearch = this.corePickerSearch.slice(0, -1);
+    this.corePickerScrollOffset = 0;
+  }
+
+  toggleCorePickerShowAll(): void {
+    this.corePickerShowAll = !this.corePickerShowAll;
+    this.corePickerScrollOffset = 0;
+  }
+
+  getCorePickerSearch(): string { return this.corePickerSearch; }
+  getCorePickerShowAll(): boolean { return this.corePickerShowAll; }
+
+  scrollCorePicker(delta: number, maxVisible: number): void {
+    const filtered = this.getFilteredCorePicker();
+    const max = Math.max(0, filtered.length - maxVisible);
+    this.corePickerScrollOffset = Math.max(0, Math.min(max, this.corePickerScrollOffset + delta));
   }
 
   closeCorePicker(): void {
@@ -126,6 +167,29 @@ export class ShipBuilderManager {
     this.renameBuf = this.engine.getBlueprint().name;
     this.renameMode = true;
   }
+
+  /** Zoom in/out. delta > 0 = zoom in, < 0 = zoom out. */
+  adjustZoom(delta: number, screenX?: number, screenY?: number): void {
+    const prevZoom = this.zoom;
+    const newZoom = Math.max(0.2, Math.min(5.0, this.zoom + delta));
+    if (newZoom === prevZoom) return;
+    // Zoom toward the cursor position (screen space), if provided.
+    if (screenX !== undefined && screenY !== undefined) {
+      const cx = ShipBuilderManager.CANVAS_CX;
+      const cy = ShipBuilderManager.CANVAS_CY;
+      const worldX = (screenX - cx - this.panX) / prevZoom;
+      const worldY = (screenY - cy - this.panY) / prevZoom;
+      this.panX = screenX - cx - worldX * newZoom;
+      this.panY = screenY - cy - worldY * newZoom;
+    }
+    this.zoom = newZoom;
+  }
+
+  setZoomLevel(zoom: number): void {
+    this.zoom = Math.max(0.2, Math.min(5.0, zoom));
+  }
+
+  getZoom(): number { return this.zoom; }
 
   isRenaming(): boolean {
     return this.renameMode;
@@ -213,11 +277,11 @@ export class ShipBuilderManager {
   }
 
   /**
-   * Handle right-click. Returns an InventoryDelta when a module is removed
-   * from the ship (caller increments inventory), or null if deselecting/menu.
+   * Handle right-click. Returns InventoryDeltas for every module removed
+   * (the clicked module and all its descendants). Empty array if no removal occurred.
    */
-  onRightClick(screenX: number, screenY: number): InventoryDelta | null {
-    if (!this.engine) return null;
+  onRightClick(screenX: number, screenY: number): InventoryDelta[] {
+    if (!this.engine) return [];
 
     // Right panel: open context menu for palette item
     if (screenX >= ShipBuilderManager.LEFT_PANEL_W) {
@@ -240,7 +304,7 @@ export class ShipBuilderManager {
           };
         }
       }
-      return null;
+      return [];
     }
 
     // Left panel with palette item selected:
@@ -250,30 +314,44 @@ export class ShipBuilderManager {
     const placedId = this.findModuleAtWorld(worldPos.x, worldPos.y);
     if (this.selectedDefId) {
       if (placedId && placedId !== "core") {
-        const blueprint = this.engine.getBlueprint();
-        const placed = blueprint.modules.find((m) => m.placedId === placedId);
-        const defId = placed?.moduleDefId;
+        const deltas = this.collectSubtreeDeltas(placedId);
         this.engine.removeModule(placedId);
         this.setStatus("REMOVED");
-        if (defId) return { moduleDefId: defId, delta: +1 };
+        return deltas;
       } else {
         // Blank space → deselect without removing anything
         this.selectedDefId = null;
         this.contextMenu = null;
       }
-      return null;
+      return [];
     }
 
     // No selection — try to remove module under cursor
     if (placedId && placedId !== "core") {
-      const blueprint = this.engine.getBlueprint();
-      const placed = blueprint.modules.find((m) => m.placedId === placedId);
-      const defId = placed?.moduleDefId;
+      const deltas = this.collectSubtreeDeltas(placedId);
       this.engine.removeModule(placedId);
       this.setStatus("REMOVED");
-      if (defId) return { moduleDefId: defId, delta: +1 };
+      return deltas;
     }
-    return null;
+    return [];
+  }
+
+  /** Collect +1 inventory deltas for a placed module and all its descendants. */
+  private collectSubtreeDeltas(rootPlacedId: string): InventoryDelta[] {
+    const blueprint = this.engine!.getBlueprint();
+    const result: InventoryDelta[] = [];
+    const queue = [rootPlacedId];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      const placed = blueprint.modules.find((m) => m.placedId === id);
+      if (placed) {
+        result.push({ moduleDefId: placed.moduleDefId, delta: +1 });
+        for (const m of blueprint.modules) {
+          if (m.parentPlacedId === id) queue.push(m.placedId);
+        }
+      }
+    }
+    return result;
   }
 
   /** Handle context-menu option selection. Returns InventoryDelta when "trash" removes 1 unit. */
@@ -396,7 +474,10 @@ export class ShipBuilderManager {
       playerCredits,
       coreSideCount: blueprint.coreSideCount,
       savedBlueprints: savedBlueprints ?? [],
-      corePicker: this.corePicker,
+      corePicker: this.corePicker ? this.getFilteredCorePicker() : null,
+      corePickerScrollOffset: this.corePickerScrollOffset,
+      corePickerSearch: this.corePickerSearch,
+      corePickerShowAll: this.corePickerShowAll,
       renameMode: this.renameMode,
       renameBuf: this.renameBuf,
     };

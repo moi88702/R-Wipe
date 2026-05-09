@@ -94,12 +94,19 @@ async function init(): Promise<void> {
     updateOrientationState(); // keep in sync as game screen changes
   });
 
-  // Dev-only URL-param cheats. The `import.meta.env.DEV` literal is replaced
-  // with `false` by Vite in production, so the dynamic import and the whole
-  // `src/dev/cheats.ts` module are tree-shaken out of the prod bundle.
+  // Dev-only URL-param cheats and E2E scene setup.
+  // `import.meta.env.DEV` is replaced with `false` by Vite in production, so
+  // the dynamic imports and both src/dev/ modules are tree-shaken out.
   if (import.meta.env.DEV) {
-    const mod = await import("./dev/cheats");
-    mod.applyCheats(game, mod.parseCheats(window.location.search));
+    const [cheatsMod, e2eMod] = await Promise.all([
+      import("./dev/cheats"),
+      import("./dev/e2eScene"),
+    ]);
+    cheatsMod.applyCheats(game, cheatsMod.parseCheats(window.location.search));
+    const e2eSpec = e2eMod.parseE2eScene(window.location.search);
+    if (e2eMod.hasE2eScene(e2eSpec)) {
+      e2eMod.applyE2eScene(game, e2eSpec);
+    }
   }
 
   console.log("R-Wipe: Pixi.js Application initialized", {

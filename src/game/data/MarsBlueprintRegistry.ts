@@ -71,8 +71,8 @@ export const MARS_BLUEPRINTS: ReadonlyArray<SolarShipBlueprint> = [
 
   // ── C4 "Mars Citadel" — capital station ─────────────────────────────────
   // No engine: stationary fortress.  Cannon/torpedo cluster on hex arm,
-  // ECA shield wall, a ship foundry and power reactor.
-  // Budget (core-c4-armor: 5W 4E 4I): used 5W, 3E, 2I — no engine.
+  // projected shield, a ship foundry and power reactor.
+  // Budget (core-c4-armor: 5W 4E 4I): used 5W, 4E(proj-shield+amp+shield×2), 3I.
   {
     id: "mars-c4-citadel",
     name: "Mars Citadel",
@@ -85,16 +85,19 @@ export const MARS_BLUEPRINTS: ReadonlyArray<SolarShipBlueprint> = [
       { placedId: "mc-w1",   moduleDefId: "weapon-cannon-c4",  parentPlacedId: "mc-s1",   parentSideIndex: 1,    ownSideIndex: 0 },
       { placedId: "mc-w2",   moduleDefId: "weapon-cannon-c4",  parentPlacedId: "mc-s1",   parentSideIndex: 2,    ownSideIndex: 0 },
       { placedId: "mc-w3",   moduleDefId: "weapon-torpedo-c4", parentPlacedId: "mc-s1",   parentSideIndex: 3,    ownSideIndex: 0 },
+      // Shield projector cluster on weapon arm
+      { placedId: "mc-ps1",  moduleDefId: "ext-proj-shield-c4",parentPlacedId: "mc-s1",   parentSideIndex: 4,    ownSideIndex: 0 },
+      { placedId: "mc-pa1",  moduleDefId: "ext-proj-amp-c4",   parentPlacedId: "mc-s1",   parentSideIndex: 5,    ownSideIndex: 0 },
       // Direct weapons
       { placedId: "mc-w4",   moduleDefId: "weapon-cannon-c4",  parentPlacedId: "mc-core", parentSideIndex: 1,    ownSideIndex: 0 },
       { placedId: "mc-w5",   moduleDefId: "weapon-torpedo-c4", parentPlacedId: "mc-core", parentSideIndex: 2,    ownSideIndex: 0 },
-      // Shields
+      // Shields (2 ext-shield, kept within 4E budget: proj-shield + amp + shield×2 = 4E)
       { placedId: "mc-e1",   moduleDefId: "ext-shield-c4",     parentPlacedId: "mc-core", parentSideIndex: 3,    ownSideIndex: 0 },
       { placedId: "mc-e2",   moduleDefId: "ext-shield-c4",     parentPlacedId: "mc-core", parentSideIndex: 4,    ownSideIndex: 0 },
-      { placedId: "mc-e3",   moduleDefId: "ext-armor-c4",      parentPlacedId: "mc-core", parentSideIndex: 5,    ownSideIndex: 0 },
       // Utility
-      { placedId: "mc-i1",   moduleDefId: "int-factory-c4",    parentPlacedId: "mc-core", parentSideIndex: 6,    ownSideIndex: 0 },
-      { placedId: "mc-i2",   moduleDefId: "int-power-c4",      parentPlacedId: "mc-core", parentSideIndex: 7,    ownSideIndex: 0 },
+      { placedId: "mc-i1",   moduleDefId: "int-factory-c4",    parentPlacedId: "mc-core", parentSideIndex: 5,    ownSideIndex: 0 },
+      { placedId: "mc-i2",   moduleDefId: "int-power-c4",      parentPlacedId: "mc-core", parentSideIndex: 6,    ownSideIndex: 0 },
+      { placedId: "mc-pr1",  moduleDefId: "int-proj-regen-c4", parentPlacedId: "mc-i2",   parentSideIndex: 1,    ownSideIndex: 0 },
     ],
   },
 

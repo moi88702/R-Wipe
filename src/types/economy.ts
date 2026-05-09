@@ -42,6 +42,8 @@ export interface ShopRenderData {
   readonly economyType: EconomyType;
   readonly entries: ReadonlyArray<ShopRenderEntry>;
   readonly selectedIndex: number;
+  readonly scrollOffset: number;
+  readonly searchText: string;
   readonly playerCredits: number;
   readonly statusMsg: string | null;
 }

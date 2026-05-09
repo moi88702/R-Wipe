@@ -314,11 +314,16 @@ const ALL_MODULES: ReadonlyArray<SolarModuleDefinition> = [
   external("int-engine-c1",  1, "thruster",  "Thruster",          3, { thrustMs2: 2_000 },          300),
   internal("int-power-c1",   1, "reactor",   "Power Core",        4, { powerOutput: 100 },          300),
   internal("int-crew-c1",    1, "crew-quarters", "Crew Quarters",  5, {},                            200),
+  internal("int-cargo-c1",   1, "cargo-hold", "Cargo Bay",        4, { cargoSlots: 8 },             500),
 
   // ── Internal systems: class 2 ─────────────────────────────────────────────
   external("int-engine-c2",  2, "thruster",  "Fusion Thruster",   3, { thrustMs2: 4_500 },          900),
   internal("int-power-c2",   2, "reactor",   "Reactor Cell",      4, { powerOutput: 250 },          900),
   internal("int-crew-c2",    2, "crew-quarters", "Officer Quarters", 5, {},                          600),
+  internal("int-cargo-c2",   2, "cargo-hold", "Expanded Cargo Bay",  4, { cargoSlots: 20 },       1_500),
+
+  // ── Cargo hold: class 3 ───────────────────────────────────────────────────
+  internal("int-cargo-c3",   3, "cargo-hold", "Deep Storage Module", 4, { cargoSlots: 40 },       3_500),
 
   // ── Structure: class 1 ────────────────────────────────────────────────────
   structure("struct-tri-c1",  1, "Tri-Frame",   3,  50),
@@ -529,6 +534,80 @@ const ALL_MODULES: ReadonlyArray<SolarModuleDefinition> = [
   // ── Electronic warfare suite (internal, capital+) ─────────────────────────
   internal("int-ew-c4", 4, "scrambler", "E-War Suite",    5, { specialEffect: "electronic-warfare" }, 12_000),
   internal("int-ew-c6", 6, "scrambler", "E-War Platform", 5, { specialEffect: "electronic-warfare" }, 50_000),
+
+  // ── Shield Projector (external, capital+ only) ────────────────────────────
+  // Projects a large shield bubble. Max 1 per ship. Boosts do not require a projector — they add
+  // capacity/recharge to whatever projector is installed.
+  // Capacity is large by design: a station shield must withstand sustained multi-capital
+  // assault for 10-20 min before collapsing. Radius is roughly 2× ship-scale projectors.
+  external("ext-proj-shield-c4", 4, "shield", "Shield Projector Alpha",  4, { projectedShieldRadius:  56, projectedShieldCapacity:   60_000 },   20_000),
+  external("ext-proj-shield-c5", 5, "shield", "Shield Projector Beta",   4, { projectedShieldRadius:  72, projectedShieldCapacity:   80_000 },   45_000),
+  external("ext-proj-shield-c6", 6, "shield", "Shield Projector I",      4, { projectedShieldRadius:  92, projectedShieldCapacity:  100_000 },   80_000),
+  external("ext-proj-shield-c7", 7, "shield", "Shield Projector II",     4, { projectedShieldRadius: 116, projectedShieldCapacity:  200_000 },  160_000),
+  external("ext-proj-shield-c8", 8, "shield", "Shield Projector III",    4, { projectedShieldRadius: 148, projectedShieldCapacity:  375_000 },  320_000),
+  external("ext-proj-shield-c9", 9, "shield", "Shield Projector IV",     4, { projectedShieldRadius: 190, projectedShieldCapacity:  700_000 },  640_000),
+
+  // ── Shield Amplifier — raises max projected shield HP ─────────────────────
+  external("ext-proj-amp-c4", 4, "shield", "Shield Amplifier Alpha",  4, { projectedShieldCapacity:  35_000 },  14_000),
+  external("ext-proj-amp-c5", 5, "shield", "Shield Amplifier Beta",   4, { projectedShieldCapacity:  50_000 },  30_000),
+  external("ext-proj-amp-c6", 6, "shield", "Shield Amplifier I",      4, { projectedShieldCapacity:  60_000 },  55_000),
+  external("ext-proj-amp-c7", 7, "shield", "Shield Amplifier II",     4, { projectedShieldCapacity: 125_000 }, 110_000),
+  external("ext-proj-amp-c8", 8, "shield", "Shield Amplifier III",    4, { projectedShieldCapacity: 250_000 }, 220_000),
+  external("ext-proj-amp-c9", 9, "shield", "Shield Amplifier IV",     4, { projectedShieldCapacity: 450_000 }, 440_000),
+
+  // ── Shield Regenerator — increases projected shield recharge rate ──────────
+  internal("int-proj-regen-c4", 4, "shield", "Projector Regen Alpha",  4, { projectedShieldRechargeRate:   160 },  15_000),
+  internal("int-proj-regen-c5", 5, "shield", "Projector Regen Beta",   4, { projectedShieldRechargeRate:   240 },  35_000),
+  internal("int-proj-regen-c6", 6, "shield", "Projector Regen I",      4, { projectedShieldRechargeRate:   320 },  60_000),
+  internal("int-proj-regen-c7", 7, "shield", "Projector Regen II",     4, { projectedShieldRechargeRate:   720 }, 120_000),
+  internal("int-proj-regen-c8", 8, "shield", "Projector Regen III",    4, { projectedShieldRechargeRate: 1_400 }, 240_000),
+  internal("int-proj-regen-c9", 9, "shield", "Projector Regen IV",     4, { projectedShieldRechargeRate: 2_400 }, 480_000),
+
+  // ── Bond Armor — transfers HP bonus to directly connected modules ─────────
+  // High own HP; each neighbour gains connectedHpBonus to their max HP.
+  internal("ext-armor-bond-c1", 1, "armor", "Bonded Plate I",     4, { hp:   60, connectedHpBonus:   30 },      400),
+  internal("ext-armor-bond-c2", 2, "armor", "Bonded Plate II",    4, { hp:  130, connectedHpBonus:   60 },    1_200),
+  internal("ext-armor-bond-c3", 3, "armor", "Bonded Plate III",   4, { hp:  240, connectedHpBonus:  110 },    3_000),
+  internal("ext-armor-bond-c4", 4, "armor", "Bonded Plate IV",    4, { hp:  380, connectedHpBonus:  170 },    8_000),
+  internal("ext-armor-bond-c5", 5, "armor", "Bonded Plate V",     4, { hp:  560, connectedHpBonus:  250 },   19_000),
+  internal("ext-armor-bond-c6", 6, "armor", "Bonded Frame I",     4, { hp:  800, connectedHpBonus:  360 },   40_000),
+  internal("ext-armor-bond-c7", 7, "armor", "Bonded Frame II",    4, { hp: 1_100, connectedHpBonus:  500 },  80_000),
+  internal("ext-armor-bond-c8", 8, "armor", "Bonded Frame III",   4, { hp: 1_600, connectedHpBonus:  720 }, 160_000),
+  internal("ext-armor-bond-c9", 9, "armor", "Bonded Frame IV",    4, { hp: 2_400, connectedHpBonus: 1_050 }, 320_000),
+
+  // ── Repair Bot — restores HP to damaged modules over time ────────────────
+  // Requires power; repairs the most-damaged surviving module each tick.
+  internal("int-repair-c1", 1, "armor", "Repair Drone I",     4, { repairRatePerSec:   8, repairPowerCost:  10 },    600),
+  internal("int-repair-c2", 2, "armor", "Repair Drone II",    4, { repairRatePerSec:  18, repairPowerCost:  22 },  1_800),
+  internal("int-repair-c3", 3, "armor", "Repair Drone III",   4, { repairRatePerSec:  35, repairPowerCost:  40 },  4_500),
+  internal("int-repair-c4", 4, "armor", "Repair Drone IV",    4, { repairRatePerSec:  60, repairPowerCost:  65 }, 12_000),
+  internal("int-repair-c5", 5, "armor", "Repair Suite I",     4, { repairRatePerSec: 100, repairPowerCost: 100 }, 28_000),
+  internal("int-repair-c6", 6, "armor", "Repair Suite II",    4, { repairRatePerSec: 160, repairPowerCost: 150 }, 58_000),
+  internal("int-repair-c7", 7, "armor", "Repair Suite III",   4, { repairRatePerSec: 250, repairPowerCost: 220 }, 115_000),
+  internal("int-repair-c8", 8, "armor", "Repair Suite IV",    4, { repairRatePerSec: 380, repairPowerCost: 320 }, 230_000),
+  internal("int-repair-c9", 9, "armor", "Repair Suite V",     4, { repairRatePerSec: 580, repairPowerCost: 460 }, 460_000),
+
+  // ── Targeting Computer — extends target lock range ────────────────────────
+  external("ext-targeting-c1", 1, "lidar", "Targeting Array I",    3, { lockRangeBoostKm:   150 },     350),
+  external("ext-targeting-c2", 2, "lidar", "Targeting Array II",   3, { lockRangeBoostKm:   350 },   1_050),
+  external("ext-targeting-c3", 3, "lidar", "Targeting Array III",  3, { lockRangeBoostKm:   700 },   2_800),
+  external("ext-targeting-c4", 4, "lidar", "Targeting Array IV",   3, { lockRangeBoostKm: 1_200 },   7_500),
+  external("ext-targeting-c5", 5, "lidar", "Target Forge I",       3, { lockRangeBoostKm: 2_000 },  18_000),
+  external("ext-targeting-c6", 6, "lidar", "Target Forge II",      3, { lockRangeBoostKm: 3_200 },  38_000),
+  external("ext-targeting-c7", 7, "lidar", "Target Forge III",     3, { lockRangeBoostKm: 5_000 },  75_000),
+  external("ext-targeting-c8", 8, "lidar", "Target Forge IV",      3, { lockRangeBoostKm: 7_500 }, 150_000),
+  external("ext-targeting-c9", 9, "lidar", "Target Forge V",       3, { lockRangeBoostKm:11_000 }, 300_000),
+
+  // ── Multi-Lock Array — additional simultaneous target lock slots ──────────
+  external("ext-multi-scan-c1", 1, "lidar", "Multi-Lock Array I",   3, { additionalTargetSlots: 1 },     500),
+  external("ext-multi-scan-c2", 2, "lidar", "Multi-Lock Array II",  3, { additionalTargetSlots: 1 },   1_500),
+  external("ext-multi-scan-c3", 3, "lidar", "Multi-Lock Array III", 3, { additionalTargetSlots: 2 },   3_800),
+  external("ext-multi-scan-c4", 4, "lidar", "Multi-Lock Array IV",  3, { additionalTargetSlots: 2 },  10_000),
+  external("ext-multi-scan-c5", 5, "lidar", "Multi-Lock Suite I",   3, { additionalTargetSlots: 3 },  24_000),
+  external("ext-multi-scan-c6", 6, "lidar", "Multi-Lock Suite II",  3, { additionalTargetSlots: 3 },  50_000),
+  external("ext-multi-scan-c7", 7, "lidar", "Multi-Lock Suite III", 3, { additionalTargetSlots: 4 }, 100_000),
+  external("ext-multi-scan-c8", 8, "lidar", "Multi-Lock Suite IV",  3, { additionalTargetSlots: 4 }, 200_000),
+  external("ext-multi-scan-c9", 9, "lidar", "Multi-Lock Suite V",   3, { additionalTargetSlots: 5 }, 400_000),
 ];
 
 // ── Index ─────────────────────────────────────────────────────────────────────

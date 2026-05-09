@@ -194,15 +194,52 @@ const SOL_STATIONS: ReadonlyArray<SolarStationDefinition> = [
     },
     spawn: {
       roster: [
-        { name: "TF Sentinel",  typeIdx: 0, sizeClass: 1 },
-        { name: "TF Falcon",    typeIdx: 1, sizeClass: 1 },
-        { name: "TF Vanguard",  typeIdx: 4, sizeClass: 2 },
-        { name: "TF Enforcer",  typeIdx: 3, sizeClass: 2 },
-        { name: "TF Bastion",   typeIdx: 6, sizeClass: 3 },
+        { name: "TF Sentinel",      typeIdx: 0, sizeClass: 1 },
+        { name: "TF Falcon",        typeIdx: 1, sizeClass: 1 },
+        { name: "TF Vanguard",      typeIdx: 4, sizeClass: 2 },
+        { name: "TF Enforcer",      typeIdx: 3, sizeClass: 2 },
+        { name: "TF Bastion",       typeIdx: 6, sizeClass: 3 },
+        { name: "TF Missile Boat",  typeIdx: 7, sizeClass: 3 }, // Titan — nuclear/antimatter siege
+        { name: "TF Siege Cruiser", typeIdx: 4, sizeClass: 3 }, // Heavy Destroyer laying siege
       ],
-      intervalMs: 4000,
-      maxShips: 10,
+      intervalMs: 3500,
+      maxShips: 14,
       radiusKm: 60,
+    },
+  },
+
+  // ── Lunar Garrison ───────────────────────────────────────────────────────
+  // Capital-class forward operating base on Earth's Moon.  Positioned between
+  // Earth and the Pirate Stronghold — the front line of the TF–pirate war.
+  {
+    id: "earth-moon-garrison",
+    name: "Lunar Garrison",
+    faction: "earth",
+    systemId: "sol",
+    // Moon at (900, 300), station offset +60/+40
+    position: { x: 960, y: 340 },
+    health: 8000,
+    alertRadiusKm: 300,
+    defenseRadiusKm: 400,
+    startInCombat: true,
+    sizeClass: 4,
+    blueprintId: "earth-c4-moon-garrison",
+    turret: {
+      rangeKm: 200,
+      damage: 100,
+      cooldownMs: 1100,
+      weaponIdx: 3, // Nuclear Missile
+    },
+    spawn: {
+      roster: [
+        { name: "TF Interceptor",    typeIdx: 1, sizeClass: 1 },
+        { name: "TF Destroyer",      typeIdx: 4, sizeClass: 2 },
+        { name: "TF Missile Cruiser",typeIdx: 7, sizeClass: 3 }, // Titan siege platform
+        { name: "TF Hunter",         typeIdx: 2, sizeClass: 2 },
+      ],
+      intervalMs: 5500,
+      maxShips: 8,
+      radiusKm: 55,
     },
   },
 

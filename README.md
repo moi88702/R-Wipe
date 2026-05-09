@@ -757,3 +757,95 @@ ShopRegistry.getAllShopIds()                → string[]
 **`ShopItem`** fields: `id`, `name`, `category` (`"weapon"|"ability"|"equipment"|"consumable"`), `priceCredits`, `description`.
 
 Shop ids match the `Location.shops` array in `LocationRegistry`.
+
+## Dev cheats (dev only)
+
+URL query params — active in `pnpm dev` builds only, tree-shaken from prod. All params are optional and can be combined freely.
+
+| Param | Values | Effect |
+|---|---|---|
+| `god` | `1` / `0` | Invulnerability |
+| `lives` | integer | Starting lives count |
+| `shield` | `1` | Activate shield immediately |
+| `speed` | number | Ship speed multiplier |
+| `weapon` | `spread` / `laser` / `bomb` / … | Force weapon type |
+| `weaponLevel` | 1–5 | Force weapon upgrade level |
+| `megaLaserMs` | integer | Pre-charge mega-laser by N ms |
+| `startLevel` | integer | Skip to level N |
+| `autostart` | `1` | Skip title screen, start immediately |
+| `unlockParts` | `1` | Unlock all ship parts in shipyard |
+| `credits` | integer | Set credit balance |
+
+**Arcade mode god-run (quick testing / shipyard)**
+```
+http://localhost:5173/?god=1&weapon=spread&weaponLevel=5&lives=99&shield=1&speed=2&autostart=1
+```
+
+**Shipyard / parts testing with full credits**
+```
+http://localhost:5173/?unlockParts=1&credits=99999
+```
+
+**Full-power arcade run with no death pressure**
+```
+http://localhost:5173/?god=1&weapon=spread&weaponLevel=5&lives=99&shield=1&speed=2&autostart=0&unlockParts=1&credits=99999
+```
+
+---
+
+## E2E test scenes (dev only)
+
+Available in **dev builds only** (`pnpm dev`). Append query params to the dev server URL. All save/load is suppressed while any `e2e` param is active — the session is fully ephemeral.
+
+### Named presets
+
+| URL | What it tests |
+|-----|---------------|
+| `?e2e=1&e2e_scene=10v1` | 10 fighters ringed around the player — basic combat stress test |
+| `?e2e=1&e2e_scene=5v20` | 20 scouts vs player — enemy death, break-up, and loot drops |
+| `?e2e=1&e2e_scene=death` | 1 gunship 100 km away — quick death/respawn sequence check |
+| `?e2e=1&e2e_scene=station` | Pirate station at (300,0) + 5 fighters — station shield, docking, and turrets |
+
+### Custom scenes
+
+Build any scene from individual params:
+
+```
+?e2e=1
+  &e2e_pos=0,0                      player start in km (default: 0,0)
+  &e2e_ship=starter                 blueprint name hint
+  &e2e_enemies=fighter:10           type:count  (sizeClass defaults to 1)
+  &e2e_enemies=titan:1:4            type:count:sizeClass
+  &e2e_enemies=scout:5@100,0        type:count@cx,cy  (ring centre override)
+  &e2e_enemies=fighter:3;scout:2    multiple types, ;-separated
+  &e2e_station=pirate@300,0         faction@x,y
+  &e2e_station=earth@-200,0;mars@0,400
+```
+
+Enemy type names (case-insensitive): `scout` `interceptor` `fighter` `gunship` `destroyer` `predator` `wraith` `titan` `spectre` `ravager`
+
+Station factions: `pirate` `earth` `mars`
+
+### Example URLs
+
+**Capital carrier vs battle-cruiser fleet**
+```
+http://localhost:5173/?e2e=1&e2e_pos=0,0&e2e_enemies=titan:1:4@800,0&e2e_enemies=destroyer:6:3@550,0&e2e_enemies=gunship:4:2@600,100
+```
+You fly a capital-class carrier; the enemy fleet is a heavy destroyer screen with gunship escort.
+
+**Same fleet with a pirate station behind enemy lines**
+```
+http://localhost:5173/?e2e=1&e2e_pos=0,0&e2e_enemies=titan:1:4@900,0&e2e_enemies=destroyer:6:3@650,0&e2e_enemies=gunship:4:2@700,80&e2e_station=pirate@1100,0
+```
+Adds a pirate stronghold at (1100, 0) — tests station shields under combined arms assault.
+
+**Quick death + respawn check**
+```
+http://localhost:5173/?e2e=1&e2e_scene=death
+```
+
+**Loot + enemy break-up stress test**
+```
+http://localhost:5173/?e2e=1&e2e_scene=5v20
+```

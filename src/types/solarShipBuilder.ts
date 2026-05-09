@@ -41,6 +41,8 @@ export type PartKind =
   | "shield" | "armor" | "cloak" | "warp-stabilizer"
   // Support
   | "reactor" | "crew-quarters" | "factory-bay" | "converter-unit"
+  // Cargo
+  | "cargo-hold"
   // Structure / Core
   | "frame" | "core";
 
@@ -86,8 +88,26 @@ export interface ModuleStats {
   shipFactoryMaxClass?: number;
   /** Shield recharger: shield points restored per second. */
   shieldRechargeRatePerSec?: number;
+  /** Cargo hold: additional module slots this part contributes to the ship's cargo capacity. */
+  cargoSlots?: number;
   /** E-war/special effect tag. */
   specialEffect?: string;
+  /** Projected shield: radius of the bubble in km. Presence signals this module is a projector. */
+  projectedShieldRadius?: number;
+  /** Projected shield: base or bonus HP capacity. */
+  projectedShieldCapacity?: number;
+  /** Projected shield: HP per second recharge rate bonus. */
+  projectedShieldRechargeRate?: number;
+  /** HP-transfer armor: bonus HP added to each directly-connected neighbour at spawn. */
+  connectedHpBonus?: number;
+  /** Repair bot: HP per second restored across damaged modules. */
+  repairRatePerSec?: number;
+  /** Repair bot: power units per second consumed while repairing. */
+  repairPowerCost?: number;
+  /** Targeting sensor: additional km added to target lock range. */
+  lockRangeBoostKm?: number;
+  /** Multi-lock sensor: additional simultaneous target lock slots. */
+  additionalTargetSlots?: number;
 }
 
 export interface SolarModuleDefinition {
@@ -159,7 +179,7 @@ export interface BudgetState {
 
 export type PlaceResult =
   | { ok: true }
-  | { ok: false; reason: "budget" | "size-mismatch" | "side-occupied" | "part-limit" | "no-such-parent" };
+  | { ok: false; reason: "budget" | "size-mismatch" | "side-occupied" | "part-limit" | "no-such-parent" | "unique-module" };
 
 // ── Snap points (runtime, never persisted) ────────────────────────────────────
 
@@ -244,6 +264,7 @@ export interface SolarBuilderPaletteItem {
 export interface CorePickerItem {
   readonly defId: string;
   readonly name: string;
+  readonly sizeClass: number;
   readonly weaponPoints: number;
   readonly externalPoints: number;
   readonly internalPoints: number;
@@ -286,6 +307,9 @@ export interface SolarShipBuilderRenderData {
   readonly savedBlueprints: ReadonlyArray<SavedBlueprintSummary>;
   /** Non-null when the "new ship" core picker is open. */
   readonly corePicker: ReadonlyArray<CorePickerItem> | null;
+  readonly corePickerScrollOffset: number;
+  readonly corePickerSearch: string;
+  readonly corePickerShowAll: boolean;
   /** True when the ship name is being edited. */
   readonly renameMode: boolean;
   /** Current contents of the rename input buffer. */

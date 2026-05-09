@@ -270,8 +270,13 @@ export interface SolarSystemRenderData {
       readonly moduleType: string;
       readonly partKind: string;
       readonly grade: number;
+      readonly placedId?: string;
     }>;
     readonly blueprintCoreRadius?: number;
+    /** placedId → hp/maxHp fraction (0–1). Absent = full HP. */
+    readonly moduleHpFractions?: ReadonlyMap<string, number>;
+    /** Set of destroyed module placedIds to skip during rendering. */
+    readonly destroyedModuleIds?: ReadonlySet<string>;
   }>;
   readonly playerBlueprintModules?: ReadonlyArray<{
     readonly vertices: ReadonlyArray<{ readonly x: number; readonly y: number }>;
@@ -280,18 +285,35 @@ export interface SolarSystemRenderData {
     readonly moduleType: string;
     readonly partKind: string;
     readonly grade: number;
+    readonly placedId?: string;
   }>;
+  readonly playerModuleHpFractions?: ReadonlyMap<string, number>;
+  readonly playerDestroyedModuleIds?: ReadonlySet<string>;
   readonly playerBlueprintCoreRadius?: number;
   readonly playerSizeClass?: number;
   readonly enemyProjectiles: ReadonlyArray<{
     readonly id: string;
     readonly position: { x: number; y: number };
     readonly color: number;
+    readonly dirX?: number;
+    readonly dirY?: number;
+    readonly isHoming?: boolean;
+    readonly trailPoints?: ReadonlyArray<{ readonly x: number; readonly y: number }>;
+    readonly trailColor?: number;
   }>;
   readonly playerHealth: number;
   readonly playerMaxHealth: number;
   readonly playerShield: number;
   readonly playerMaxShield: number;
+  readonly projectedShield: { readonly radiusKm: number; readonly hp: number; readonly maxHp: number } | null;
+  /** Friendly station projected shields to render as large bubbles at their world positions. */
+  readonly stationShields?: ReadonlyArray<{
+    readonly worldX: number;
+    readonly worldY: number;
+    readonly radiusKm: number;
+    readonly hp: number;
+    readonly maxHp: number;
+  }>;
   readonly damageFlash: number;
   readonly enemyStations: ReadonlyArray<{
     readonly id: string;
@@ -310,6 +332,7 @@ export interface SolarSystemRenderData {
       readonly moduleType: string;
       readonly partKind: string;
       readonly grade: number;
+      readonly placedId?: string;
     }>;
     readonly blueprintCoreRadius?: number;
   }>;
@@ -343,6 +366,7 @@ export interface SolarSystemRenderData {
     readonly locationName: string;
     readonly menuItems: ReadonlyArray<string>;
     readonly menuSelection: number;
+    readonly menuScrollOffset: number;
     readonly activeNpc: NPCDefinition | undefined;
   };
   /** Populated when screen === "solar-npc-talk". */
@@ -392,6 +416,8 @@ export interface SolarSystemRenderData {
     readonly lifetimeFrac: number; // 0-1 used for alpha
     readonly dirX: number;  // normalised velocity direction
     readonly dirY: number;
+    readonly missileLevel?: number;
+    readonly trailPoints?: ReadonlyArray<{ readonly x: number; readonly y: number }>;
   }>;
   /** Active explosions in world space. */
   readonly solarExplosions?: ReadonlyArray<{
@@ -409,6 +435,29 @@ export interface SolarSystemRenderData {
     readonly fraction: number; // 0 = min zoom, 1 = max zoom (log scale)
     readonly label: string;    // e.g. "1.5x"
   };
+  /** Per-faction palette overrides — e.g. the active pirate faction variant chosen at game start. */
+  readonly factionPalettes?: Readonly<Partial<Record<string, FactionColors>>>;
+  /** Roll-ability afterimage streaks in world space. */
+  readonly rollFx?: ReadonlyArray<{
+    readonly x: number;
+    readonly y: number;
+    readonly dx: number; // normalized roll direction x
+    readonly dy: number; // normalized roll direction y
+    readonly ageFrac: number; // 0–1
+  }>;
+  /** 0–1 roll cooldown fraction (0 = ready, 1 = just used). For HUD indicator. */
+  readonly rollCooldownFrac?: number;
+  /** Salvageable items floating in world space. */
+  readonly worldItems?: ReadonlyArray<{
+    readonly id: string;
+    readonly position: { x: number; y: number };
+    readonly ageFrac: number; // 0–1 used for alpha pulse
+    readonly moduleDefId: string;
+  }>;
+  /** Cargo capacity (total slots available). */
+  readonly cargoCapacity?: number;
+  /** Cargo used (total items in inventory). */
+  readonly cargoUsed?: number;
 }
 
 export interface GalaxyMapData {
@@ -425,6 +474,25 @@ export interface GalaxyMapData {
     readonly toSystemId: string;
   }>;
 }
+
+// Missile trail + core colors indexed by sizeClass - 1 (c1=0 … c9=8).
+// Drawn on the additive-blend missileFxGfx layer, so these are the amounts
+// of light added — keep saturation high, avoid near-white to prevent over-blow.
+const MISSILE_TRAIL_COLORS = [
+  0x33dd77, // c1 — green
+  0x33bbee, // c2 — cyan
+  0x3366dd, // c3 — blue
+  0x7733ee, // c4 — violet
+  0xdd3399, // c5 — pink
+  0xee7733, // c6 — orange
+  0xee3333, // c7 — red
+  0xcc1111, // c8 — deep red
+  0xeeddcc, // c9 — near-white
+] as const;
+const MISSILE_CORE_COLORS = [
+  0x88ffbb, 0x88ddff, 0x6699ff, 0xaa66ff, 0xff66bb,
+  0xffaa66, 0xff6666, 0xff4444, 0xffffff,
+] as const;
 
 const COLOR = {
   bg: 0x0a0a14,
@@ -588,6 +656,8 @@ export class GameRenderer {
   private warpBubbleTimeMs = 0;
   private warpFilter: Filter | null = null;
   private readonly solarSystemGfx: Graphics;
+  /** Additive-blend overlay for missile trails and warhead glows. Cleared each solar frame. */
+  private readonly missileFxGfx: Graphics;
   // Solar-system label pools — bodies, stations, gates, enemy ships/bases.
   private readonly solarBodyLabels: Text[] = [];
   private readonly solarLocationLabels: Text[] = [];
@@ -617,6 +687,7 @@ export class GameRenderer {
   private readonly solarBuilderTitleText: Text;
   private readonly solarBuilderHintText: Text;
   private readonly solarBuilderStatusText: Text;
+  private readonly solarBuilderZoomText: Text;
   private readonly solarBuilderBudgetLabels: Text[] = [];
   private readonly solarBuilderPaletteLabels: Text[] = [];
 
@@ -626,6 +697,7 @@ export class GameRenderer {
   private readonly solarShopHintText: Text;
   private readonly solarShopCreditsText: Text;
   private readonly solarShopStatusText: Text;
+  private readonly solarShopSearchText: Text;
   private readonly solarShopRowLabels: Text[] = []; // column header row
   private readonly solarShopNameLabels: Text[] = [];
   private readonly solarShopTypeLabels: Text[] = [];
@@ -965,6 +1037,11 @@ export class GameRenderer {
 
     this.solarSystemGfx.filterArea = new Rectangle(0, 0, width, height);
 
+    // Additive-blend overlay for missile trails/glows — sits above solarSystemGfx
+    this.missileFxGfx = new Graphics();
+    this.missileFxGfx.blendMode = "add";
+    this.menuLayer.addChild(this.missileFxGfx);
+
     // Solar ship-builder overlay
     this.solarBuilderGfx = new Graphics();
     this.menuLayer.addChild(this.solarBuilderGfx);
@@ -995,6 +1072,13 @@ export class GameRenderer {
     this.solarBuilderStatusText.visible = false;
     this.menuLayer.addChild(this.solarBuilderStatusText);
 
+    this.solarBuilderZoomText = new Text({
+      text: "1.00x",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 11, fill: 0x5599cc }),
+    });
+    this.solarBuilderZoomText.visible = false;
+    this.menuLayer.addChild(this.solarBuilderZoomText);
+
     // Solar shop overlay
     this.solarShopGfx = new Graphics();
     this.menuLayer.addChild(this.solarShopGfx);
@@ -1016,7 +1100,7 @@ export class GameRenderer {
     this.menuLayer.addChild(this.solarShopCreditsText);
 
     this.solarShopHintText = new Text({
-      text: "[↑↓] Select  •  [Enter] Buy  •  [R-Click] Sell  •  [ESC] Exit",
+      text: "[↑↓] Select  •  [Enter] Buy  •  [R-Click] Sell  •  type to filter  •  [ESC] Back",
       style: hudStyle(COLOR.hudWhite, 13),
     });
     this.solarShopHintText.anchor.set(0.5, 1);
@@ -1032,6 +1116,14 @@ export class GameRenderer {
     this.solarShopStatusText.anchor.set(0.5, 0.5);
     this.solarShopStatusText.visible = false;
     this.menuLayer.addChild(this.solarShopStatusText);
+
+    this.solarShopSearchText = new Text({
+      text: "",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 14, fill: 0xffffff }),
+    });
+    this.solarShopSearchText.anchor.set(0, 0.5);
+    this.solarShopSearchText.visible = false;
+    this.menuLayer.addChild(this.solarShopSearchText);
 
     // System-name banner (top-centre while flying in solar mode)
     this.solarSystemNameText = new Text({
@@ -1372,7 +1464,10 @@ export class GameRenderer {
     for (const t of this.starmapNodeLabels) t.visible = isStarmap;
     if (!isStarmap) this.starmapGfx.clear();
     // Solar system overlay toggles
-    if (!isSolarSystem && !isAnyDockedScreen) this.solarSystemGfx.clear();
+    if (!isSolarSystem && !isAnyDockedScreen) {
+      this.solarSystemGfx.clear();
+      this.missileFxGfx.clear();
+    }
     // Shipyard overlay toggles
     this.shipyardTitle.visible = isShipyard;
     this.shipyardStatsText.visible = isShipyard;
@@ -1389,6 +1484,7 @@ export class GameRenderer {
     // Solar ship-builder overlay toggles
     this.solarBuilderTitleText.visible = isSolarShipBuilder;
     this.solarBuilderHintText.visible = isSolarShipBuilder;
+    this.solarBuilderZoomText.visible = isSolarShipBuilder;
     if (!isSolarShipBuilder) {
       this.solarBuilderStatusText.visible = false;
       for (const t of this.solarBuilderBudgetLabels) t.visible = false;
@@ -1399,6 +1495,7 @@ export class GameRenderer {
     this.solarShopTitleText.visible = isSolarShop;
     this.solarShopHintText.visible = isSolarShop;
     this.solarShopCreditsText.visible = isSolarShop;
+    this.solarShopSearchText.visible = isSolarShop;
     if (!isSolarShop) {
       this.solarShopStatusText.visible = false;
       for (const t of this.solarShopRowLabels) t.visible = false;
@@ -2884,6 +2981,8 @@ export class GameRenderer {
   private drawSolarSystem(data: SolarSystemRenderData): void {
     const g = this.solarSystemGfx;
     g.clear();
+    const mg = this.missileFxGfx; // additive-blend layer for missile glow
+    mg.clear();
 
     // Background
     this.drawNebulaBackground(g);
@@ -3053,7 +3152,12 @@ export class GameRenderer {
       const label = this.solarEnemyStationLabels[i]!;
       const p = w2s(base.position.x, base.position.y);
 
-      if (offscreen(p.x, p.y, 40)) {
+      // Stations render as large blueprint ships (3× ship scale for the same sizeClass)
+      const stationSzClass = base.sizeClass ?? 4;
+      const stationScreenR = Math.max(16, (4 + stationSzClass * 2) * enemyScale * 3);
+
+      // Cull based on the full hull extent (modules can protrude ~3× beyond the core).
+      if (offscreen(p.x, p.y, stationScreenR * 3 + 40)) {
         // Off-screen indicator
         const dx2 = p.x - cx;
         const dy2 = p.y - cy;
@@ -3076,13 +3180,9 @@ export class GameRenderer {
           ? 0xff8800
           : 0xaa4444;
 
-      // Stations render as large blueprint ships (3× ship scale for the same sizeClass)
-      const stationSzClass = base.sizeClass ?? 4;
-      const stationScreenR = Math.max(16, (4 + stationSzClass * 2) * enemyScale * 3);
-
       if (base.blueprintModules && base.blueprintModules.length > 0 && base.blueprintCoreRadius) {
         const bpScale = stationScreenR / base.blueprintCoreRadius;
-        this.drawBlueprintShip(g, p.x, p.y, base.heading ?? 0, base.blueprintModules, bpScale, getFactionColors(base.faction));
+        this.drawBlueprintShip(g, p.x, p.y, base.heading ?? 0, base.blueprintModules, bpScale, data.factionPalettes?.[base.faction ?? ""] ?? getFactionColors(base.faction), undefined, undefined);
         // Alert ring around the station hull
         g.circle(p.x, p.y, stationScreenR * 1.15).stroke({ color: alertColor, width: 1.5, alpha: 0.55 });
       } else {
@@ -3125,16 +3225,17 @@ export class GameRenderer {
       const label = this.solarEnemyLabels[i]!;
       const p = w2s(ship.position.x, ship.position.y);
 
-      if (offscreen(p.x, p.y)) {
+      // Screen radius of the ship hull — needed for the culling pad.
+      const screenR = Math.max(4, (4 + ship.sizeClass * 2) * enemyScale);
+
+      // Cull based on the full hull extent (modules can protrude ~3× beyond the core).
+      if (offscreen(p.x, p.y, screenR * 3 + 40)) {
         label.visible = false;
         continue;
       }
-
-      // Screen radius of the ship hull — drives both bpScale and bar placement
-      const screenR = Math.max(4, (4 + ship.sizeClass * 2) * enemyScale);
       if (ship.blueprintModules && ship.blueprintModules.length > 0 && ship.blueprintCoreRadius) {
         const bpScale = screenR / ship.blueprintCoreRadius;
-        this.drawBlueprintShip(g, p.x, p.y, ship.heading, ship.blueprintModules, bpScale, getFactionColors(ship.faction));
+        this.drawBlueprintShip(g, p.x, p.y, ship.heading, ship.blueprintModules, bpScale, data.factionPalettes?.[ship.faction ?? ""] ?? getFactionColors(ship.faction), ship.destroyedModuleIds, ship.moduleHpFractions);
       } else {
         this.drawDeltaWing(g, p.x, p.y, ship.heading, ship.color, screenR / 16);
       }
@@ -3195,12 +3296,47 @@ export class GameRenderer {
     for (const proj of data.enemyProjectiles) {
       const p = w2s(proj.position.x, proj.position.y);
       if (offscreen(p.x, p.y, 14)) continue;
-      // Glow halo
-      g.circle(p.x, p.y, 7).fill({ color: proj.color, alpha: 0.18 });
-      // Mid ring
-      g.circle(p.x, p.y, 4.5).fill({ color: proj.color, alpha: 0.45 });
-      // Bright core
-      g.circle(p.x, p.y, 2.5).fill({ color: 0xffffff, alpha: 0.85 });
+
+      if (proj.isHoming) {
+        const tc = proj.trailColor ?? 0xff6633;
+        const edx = proj.dirX ?? 0;
+        const edy = proj.dirY ?? 0;
+
+        // ── Normal layer: opaque missile body ──────────────────────────
+        const bodyLen = 10;
+        if (Math.abs(edx) > 0.01 || Math.abs(edy) > 0.01) {
+          g.moveTo(p.x - edx * bodyLen, p.y - edy * bodyLen)
+           .lineTo(p.x, p.y)
+           .stroke({ color: tc, width: 2.5, alpha: 0.95 });
+          const perpX = -edy; const perpY = edx;
+          const fx = p.x - edx * bodyLen * 0.55; const fy = p.y - edy * bodyLen * 0.55;
+          g.moveTo(fx + perpX * 3, fy + perpY * 3).lineTo(fx - perpX * 3, fy - perpY * 3)
+           .stroke({ color: tc, width: 1.5, alpha: 0.85 });
+        }
+        g.circle(p.x, p.y, 2).fill({ color: 0xffffff, alpha: 0.95 });
+
+        // ── Additive layer: trail + warhead bloom ──────────────────────
+        if (proj.trailPoints && proj.trailPoints.length > 1) {
+          for (let ti = 1; ti < proj.trailPoints.length; ti++) {
+            const tp0 = w2s(proj.trailPoints[ti - 1]!.x, proj.trailPoints[ti - 1]!.y);
+            const tp1 = w2s(proj.trailPoints[ti]!.x, proj.trailPoints[ti]!.y);
+            const f = ti / proj.trailPoints.length;
+            mg.moveTo(tp0.x, tp0.y).lineTo(tp1.x, tp1.y)
+              .stroke({ color: tc, width: Math.max(0.5, f * 3), alpha: f * 0.5 });
+          }
+        } else if (Math.abs(edx) > 0.01 || Math.abs(edy) > 0.01) {
+          mg.moveTo(p.x - edx * 14, p.y - edy * 14)
+            .lineTo(p.x, p.y)
+            .stroke({ color: tc, width: 2, alpha: 0.4 });
+        }
+        mg.circle(p.x, p.y, 10).fill({ color: tc, alpha: 0.15 });
+        mg.circle(p.x, p.y, 5).fill({ color: tc, alpha: 0.45 });
+      } else {
+        // Non-homing: body in normal layer, subtle glow additive
+        g.circle(p.x, p.y, 2.5).fill({ color: 0xffffff, alpha: 0.9 });
+        g.circle(p.x, p.y, 4).fill({ color: proj.color, alpha: 0.5 });
+        mg.circle(p.x, p.y, 7).fill({ color: proj.color, alpha: 0.25 });
+      }
     }
 
     // ── Lock lines + crosshairs ───────────────────────────────────────────
@@ -3246,36 +3382,56 @@ export class GameRenderer {
         const dx = proj.dirX;
         const dy = proj.dirY;
         if (proj.weaponKind === "cannon") {
-          // Pulsing plasma orb with trailing glow
-          g.circle(p.x, p.y, 7).fill({ color: 0xff4400, alpha: alpha * 0.3 });
-          g.circle(p.x, p.y, 5).fill({ color: 0xff8800, alpha: alpha * 0.6 });
+          // Body in normal layer
           g.circle(p.x, p.y, 3).fill({ color: 0xffdd00, alpha });
-          // Trailing tail
           g.moveTo(p.x - dx * 10, p.y - dy * 10)
            .lineTo(p.x, p.y)
-           .stroke({ color: 0xff6600, width: 2.5, alpha: alpha * 0.5 });
+           .stroke({ color: 0xff8800, width: 2, alpha });
+          // Glow on additive layer
+          mg.circle(p.x, p.y, 7).fill({ color: 0xff4400, alpha: alpha * 0.5 });
+          mg.circle(p.x, p.y, 4).fill({ color: 0xff8800, alpha: alpha * 0.7 });
         } else if (proj.weaponKind === "torpedo") {
-          // Elongated missile body
-          const bodyLen = 14;
+          const lvl = Math.max(1, Math.min(9, proj.missileLevel ?? 1));
+          const trailColor = MISSILE_TRAIL_COLORS[lvl - 1] ?? 0x33dd77;
+          const coreColor  = MISSILE_CORE_COLORS[lvl - 1]  ?? 0x88ffbb;
+
+          const bodyLen = 12 + lvl * 1.5;
           const tailX = p.x - dx * bodyLen;
           const tailY = p.y - dy * bodyLen;
           const perpX = -dy;
           const perpY = dx;
-          // Engine exhaust trail
-          g.moveTo(tailX - dx * 8, tailY - dy * 8).lineTo(tailX, tailY)
-           .stroke({ color: 0x44ff88, width: 2, alpha: alpha * 0.35 });
-          // Missile body
+
+          // ── Normal layer: opaque missile body + fins ──────────────────
           g.moveTo(tailX, tailY).lineTo(p.x, p.y)
-           .stroke({ color: 0x88ff44, width: 3, alpha });
-          // Fins at tail
-          const midX = p.x - dx * (bodyLen * 0.55);
-          const midY = p.y - dy * (bodyLen * 0.55);
-          g.moveTo(midX + perpX * 4, midY + perpY * 4)
-           .lineTo(midX - perpX * 4, midY - perpY * 4)
-           .stroke({ color: 0x44cc44, width: 1.5, alpha: alpha * 0.8 });
-          // Warhead glow
-          g.circle(p.x, p.y, 3.5).fill({ color: 0xffffff, alpha });
-          g.circle(p.x, p.y, 6).fill({ color: 0x44ff88, alpha: alpha * 0.4 });
+           .stroke({ color: coreColor, width: 2 + lvl * 0.22, alpha });
+          const finX = p.x - dx * (bodyLen * 0.6);
+          const finY = p.y - dy * (bodyLen * 0.6);
+          const finSpread = 2.5 + lvl * 0.35;
+          g.moveTo(finX + perpX * finSpread, finY + perpY * finSpread)
+           .lineTo(finX - perpX * finSpread, finY - perpY * finSpread)
+           .stroke({ color: coreColor, width: 1.5, alpha: alpha * 0.9 });
+          // Hard warhead tip
+          g.circle(p.x, p.y, 1.5 + lvl * 0.2).fill({ color: 0xffffff, alpha });
+
+          // ── Additive layer: trail sparkle + warhead glow ──────────────
+          if (proj.trailPoints && proj.trailPoints.length > 1) {
+            for (let ti = 1; ti < proj.trailPoints.length; ti++) {
+              const tp0 = w2s(proj.trailPoints[ti - 1]!.x, proj.trailPoints[ti - 1]!.y);
+              const tp1 = w2s(proj.trailPoints[ti]!.x, proj.trailPoints[ti]!.y);
+              const trailFrac = ti / proj.trailPoints.length;
+              mg.moveTo(tp0.x, tp0.y)
+                .lineTo(tp1.x, tp1.y)
+                .stroke({ color: trailColor, width: Math.max(0.5, trailFrac * 3), alpha: trailFrac * alpha * 0.55 });
+            }
+          } else {
+            mg.moveTo(p.x - dx * 18, p.y - dy * 18)
+              .lineTo(p.x, p.y)
+              .stroke({ color: trailColor, width: 2, alpha: alpha * 0.45 });
+          }
+          // Warhead bloom (additive — gets brighter with overlapping missiles)
+          const glowR = 3 + lvl * 0.5;
+          mg.circle(p.x, p.y, glowR * 2.5).fill({ color: trailColor, alpha: alpha * 0.18 });
+          mg.circle(p.x, p.y, glowR).fill({ color: coreColor, alpha: alpha * 0.7 });
         }
       }
     }
@@ -3327,6 +3483,14 @@ export class GameRenderer {
           anyAligned = true;
         }
 
+        // Per-partKind exhaust visual parameters: [idleOuter, idleMid, idleTip, fireCore, firePlume1, firePlume2]
+        const EV: Record<string, readonly [number, number, number, number, number, number]> = {
+          "thruster":      [0xff4400, 0xff6600, 0xffaa44, 0x66aaff, 0x4488ff, 0x2266ff],
+          "ion-engine":    [0x002288, 0x0044cc, 0x44aaff, 0x00ffcc, 0x00ccaa, 0x008888],
+          "warp-nacelle":  [0x440088, 0x6600cc, 0xcc88ff, 0xff88ff, 0xcc44ff, 0x8800ff],
+          "gravity-drive": [0x004466, 0x0088cc, 0xaaeeff, 0xffffff, 0xaaddff, 0x44aaff],
+        };
+
         for (const eng of engineMods) {
           const ex = cx + (eng.worldX * cosH - eng.worldY * sinH) * bpScale;
           const ey = cy + (eng.worldX * sinH + eng.worldY * cosH) * bpScale;
@@ -3363,18 +3527,23 @@ export class GameRenderer {
             if (bl > 0.01) { gimX = bx / bl; gimY = by / bl; }
           }
 
-          g.circle(ex, ey, 9 * gs).fill({ color: 0xff4400, alpha: 0.12 });
-          g.circle(ex, ey, 5 * gs).fill({ color: 0xff6600, alpha: 0.28 });
-          g.circle(ex, ey, 3 * gs).fill({ color: 0xffaa44, alpha: 0.55 });
+          const ev = EV[eng.partKind] ?? EV["thruster"]!;
+          g.circle(ex, ey, 9 * gs).fill({ color: ev[0], alpha: 0.12 });
+          g.circle(ex, ey, 5 * gs).fill({ color: ev[1], alpha: 0.28 });
+          g.circle(ex, ey, 3 * gs).fill({ color: ev[2], alpha: 0.55 });
           g.circle(ex, ey, 1.5 * gs).fill({ color: 0xffffff, alpha: 0.8 });
           if (firing) {
-            g.circle(ex, ey, 5 * gs).fill({ color: 0x66aaff, alpha: 0.9 * intensity });
-            g.circle(ex + gimX * 8 * gs, ey + gimY * 8 * gs, 4 * gs).fill({ color: 0x4488ff, alpha: 0.6 * intensity });
-            g.circle(ex + gimX * 14 * gs, ey + gimY * 14 * gs, 2 * gs).fill({ color: 0x2266ff, alpha: 0.3 * intensity });
+            g.circle(ex, ey, 5 * gs).fill({ color: ev[3], alpha: 0.9 * intensity });
+            g.circle(ex + gimX * 8 * gs, ey + gimY * 8 * gs, 4 * gs).fill({ color: ev[4], alpha: 0.6 * intensity });
+            g.circle(ex + gimX * 14 * gs, ey + gimY * 14 * gs, 2 * gs).fill({ color: ev[5], alpha: 0.3 * intensity });
+            // Gravity drive: extra ring distortion effect
+            if (eng.partKind === "gravity-drive") {
+              g.circle(ex, ey, 12 * gs).stroke({ color: ev[4], width: 0.8, alpha: 0.4 * intensity });
+            }
           }
         }
       } else {
-        // Fallback: no engine modules — single glow at stern
+        // Fallback: no engine modules — single thruster glow at stern
         const backX = cx - sinH * gs * 18;
         const backY = cy + cosH * gs * 18;
         g.circle(backX, backY, 9 * gs).fill({ color: 0xff4400, alpha: 0.12 });
@@ -3511,14 +3680,43 @@ export class GameRenderer {
       this.warpFilter.enabled = false;
     }
 
+    // ── Friendly station shield bubbles (world space) ────────────────────
+    if (data.stationShields) {
+      for (const ss of data.stationShields) {
+        if (ss.hp <= 0) continue;
+        const sp = w2s(ss.worldX, ss.worldY);
+        const shieldPx = ss.radiusKm * kmToPx;
+        const hpFrac = ss.hp / ss.maxHp;
+        const bubbleColor = hpFrac > 0.25 ? 0x22aaff : 0xff9900;
+        const alpha = 0.05 + 0.06 * hpFrac;
+        g.circle(sp.x, sp.y, shieldPx).fill({ color: bubbleColor, alpha });
+        g.circle(sp.x, sp.y, shieldPx).stroke({ color: bubbleColor, width: 1.5, alpha: 0.25 + 0.35 * hpFrac });
+        g.circle(sp.x, sp.y, shieldPx * 0.97).stroke({ color: 0xffffff, width: 0.5, alpha: 0.06 * hpFrac });
+      }
+    }
+
     // ── Player ship at view centre ────────────────────────────────────────
+    // ── Projected shield bubble ───────────────────────────────────────────
+    if (data.projectedShield && data.projectedShield.hp > 0) {
+      const ps = data.projectedShield;
+      const shieldPx = ps.radiusKm * kmToPx;
+      const hpFrac = ps.hp / ps.maxHp;
+      // Fade color: cyan at full → amber as it drops below 25%.
+      const bubbleColor = hpFrac > 0.25 ? 0x22aaff : 0xff9900;
+      const alpha = 0.07 + 0.08 * hpFrac;
+      g.circle(cx, cy, shieldPx).fill({ color: bubbleColor, alpha });
+      g.circle(cx, cy, shieldPx).stroke({ color: bubbleColor, width: 1.5, alpha: 0.35 + 0.45 * hpFrac });
+      // Inner shimmer ring
+      g.circle(cx, cy, shieldPx * 0.93).stroke({ color: 0xffffff, width: 0.5, alpha: 0.08 * hpFrac });
+    }
+
     // Same logic as enemies: always use blueprint when available; fall back to
     // chevron only when there are no blueprint modules. LOD is handled purely
     // by bpScale — the polygon gets tiny when zoomed out, just like enemies.
     if (!data.solarPlayerDead) {
       if (data.playerBlueprintModules && data.playerBlueprintModules.length > 0 && data.playerBlueprintCoreRadius) {
         const bpScale = playerTargetR / data.playerBlueprintCoreRadius;
-        this.drawBlueprintShip(g, cx, cy, data.playerHeading, data.playerBlueprintModules, bpScale, getFactionColors("player"));
+        this.drawBlueprintShip(g, cx, cy, data.playerHeading, data.playerBlueprintModules, bpScale, getFactionColors("player"), data.playerDestroyedModuleIds, data.playerModuleHpFractions);
       } else {
         this.drawDeltaWing(g, cx, cy, data.playerHeading, 0x00ffff, playerTargetR / 16);
       }
@@ -3561,6 +3759,45 @@ export class GameRenderer {
       }
     }
 
+    // ── World items (salvage drops) ───────────────────────────────────────
+    if (data.worldItems && data.worldItems.length > 0) {
+      for (const wi of data.worldItems) {
+        const wp = w2s(wi.position.x, wi.position.y);
+        // Pulse: brighten briefly near the start, then fade out in the last 20%
+        const pulse = wi.ageFrac < 0.1
+          ? 0.6 + wi.ageFrac * 4         // quick fade-in
+          : wi.ageFrac > 0.8
+            ? 1 - (wi.ageFrac - 0.8) * 5 // fade out at end
+            : 1;
+        const alpha = Math.max(0, pulse);
+        const size = Math.max(1.5, 5 * kmToPx);
+        // Diamond shape
+        g.moveTo(wp.x, wp.y - size)
+          .lineTo(wp.x + size, wp.y)
+          .lineTo(wp.x, wp.y + size)
+          .lineTo(wp.x - size, wp.y)
+          .closePath()
+          .fill({ color: 0x88ffaa, alpha: alpha * 0.5 })
+          .stroke({ color: 0xaaffcc, width: 1, alpha: alpha * 0.85 });
+      }
+    }
+
+    // ── Roll afterimage streaks ───────────────────────────────────────────
+    if (data.rollFx && data.rollFx.length > 0) {
+      for (const rfx of data.rollFx) {
+        const rp = w2s(rfx.x, rfx.y);
+        const t = rfx.ageFrac;
+        const alpha = Math.max(0, 1 - t * t * 2);
+        const radius = Math.max(0.5, (5 - t * 3) * kmToPx * 3);
+        g.circle(rp.x, rp.y, radius).fill({ color: 0x88ddff, alpha: alpha * 0.7 });
+        // Short directional tail
+        const tailLen = (1 - t) * 8 * kmToPx;
+        g.moveTo(rp.x, rp.y)
+          .lineTo(rp.x - rfx.dx * tailLen, rp.y - rfx.dy * tailLen)
+          .stroke({ color: 0xaaeeff, width: Math.max(0.5, radius * 0.6), alpha: alpha * 0.5 });
+      }
+    }
+
     // ── Damage flash overlay ──────────────────────────────────────────────
     if (data.damageFlash > 0) {
       g.rect(0, 0, this.width, this.height)
@@ -3592,6 +3829,54 @@ export class GameRenderer {
       g.rect(hudX, hudY + barH + 4, barW, barH).fill({ color: 0x113311, alpha: 0.75 });
       g.rect(hudX, hudY + barH + 4, barW * healthRatio, barH).fill({ color: healthColor, alpha: 0.9 });
       g.rect(hudX, hudY + barH + 4, barW, barH).stroke({ color: healthColor, width: 1, alpha: 0.5 });
+
+      // Roll cooldown pip (small square, right of health bar)
+      const rollCd = data.rollCooldownFrac ?? 0;
+      const pipX = hudX + barW + 8;
+      const pipY = hudY + 4;
+      const pipSize = barH + 8;
+      g.rect(pipX, pipY, pipSize, pipSize).fill({ color: 0x111122, alpha: 0.75 });
+      if (rollCd < 1) {
+        const fillH = pipSize * (1 - rollCd);
+        g.rect(pipX, pipY + pipSize - fillH, pipSize, fillH).fill({ color: rollCd < 0.01 ? 0x88ddff : 0x334466, alpha: 0.9 });
+      }
+      g.rect(pipX, pipY, pipSize, pipSize).stroke({ color: 0x4499cc, width: 1, alpha: 0.6 });
+
+      // Projected shield bar (cyan, below health bar)
+      if (data.projectedShield) {
+        const ps = data.projectedShield;
+        const psRatio = ps.maxHp > 0 ? ps.hp / ps.maxHp : 0;
+        const psColor = psRatio > 0.25 ? 0x22aaff : 0xff9900;
+        const psY = hudY + (barH + 4) * 2;
+        g.rect(hudX, psY, barW, barH).fill({ color: 0x001133, alpha: 0.75 });
+        g.rect(hudX, psY, barW * psRatio, barH).fill({ color: psColor, alpha: 0.85 });
+        g.rect(hudX, psY, barW, barH).stroke({ color: psColor, width: 1, alpha: 0.4 });
+      }
+      // Station shield bars (teal, compact, one per friendly station with a projector).
+      if (data.stationShields && data.stationShields.length > 0) {
+        const ssBarW = barW * 0.7;
+        data.stationShields.forEach((ss, i) => {
+          const ssRatio = ss.maxHp > 0 ? ss.hp / ss.maxHp : 0;
+          const ssColor = ssRatio > 0.25 ? 0x00ccaa : 0xff9900;
+          const rowOffset = data.projectedShield ? 3 : 2;
+          const ssY = hudY + (barH + 4) * (rowOffset + i);
+          g.rect(hudX, ssY, ssBarW, barH).fill({ color: 0x001a16, alpha: 0.75 });
+          g.rect(hudX, ssY, ssBarW * ssRatio, barH).fill({ color: ssColor, alpha: 0.8 });
+          g.rect(hudX, ssY, ssBarW, barH).stroke({ color: ssColor, width: 1, alpha: 0.35 });
+        });
+      }
+
+      // Cargo bar (yellow, right of roll pip)
+      const cap = data.cargoCapacity ?? 0;
+      const used = data.cargoUsed ?? 0;
+      if (cap > 0) {
+        const cargoX = pipX + pipSize + 8;
+        const cargoRatio = Math.min(1, used / cap);
+        const cargoColor = cargoRatio >= 1 ? 0xff6633 : 0xffcc44;
+        g.rect(cargoX, hudY, barW * 0.6, barH).fill({ color: 0x222200, alpha: 0.75 });
+        g.rect(cargoX, hudY, barW * 0.6 * cargoRatio, barH).fill({ color: cargoColor, alpha: 0.9 });
+        g.rect(cargoX, hudY, barW * 0.6, barH).stroke({ color: cargoColor, width: 1, alpha: 0.5 });
+      }
     }
 
     // ── HUD: system name banner + approach prompt ─────────────────────────
@@ -3921,9 +4206,12 @@ export class GameRenderer {
       moduleType: string;
       partKind: string;
       grade: number;
+      placedId?: string;
     }>,
     bpScale: number,
     palette?: FactionColors,
+    destroyedIds?: ReadonlySet<string>,
+    hpFractions?: ReadonlyMap<string, number>,
   ): void {
     const p = palette ?? getFactionColors();
     const h = (headingDeg * Math.PI) / 180;
@@ -3934,14 +4222,29 @@ export class GameRenderer {
       y: cy + (v.x * sinH + v.y * cosH) * bpScale,
     });
 
-    // Hull base colors by broad type — faction tinted
+    // Darken a 24-bit RGB color by factor f (0=black, 1=unchanged).
+    const dk = (c: number, f: number): number => {
+      const r = Math.min(255, Math.round(((c >> 16) & 0xff) * f));
+      const gv = Math.min(255, Math.round(((c >> 8) & 0xff) * f));
+      const b = Math.min(255, Math.round((c & 0xff) * f));
+      return (r << 16) | (gv << 8) | b;
+    };
+    // All module types derive from the faction hull color — each tier is slightly darker.
     const hullByType: Record<string, number> = {
-      core: p.hull.fill, weapon: 0x170e08, external: 0x060f1a,
-      internal: 0x0c1005, structure: 0x0d1218, converter: 0x0d0818, factory: 0x0c1005,
+      core:      p.hull.fill,
+      weapon:    dk(p.hull.fill, 0.78),
+      external:  dk(p.hull.fill, 0.72),
+      internal:  dk(p.hull.fill, 0.66),
+      structure: dk(p.hull.fill, 0.60),
+      converter: dk(p.hull.fill, 0.55),
+      factory:   dk(p.hull.fill, 0.62),
     };
 
     for (const mod of modules) {
       if (mod.vertices.length < 3) continue;
+      // Skip destroyed modules entirely
+      if (mod.placedId && destroyedIds?.has(mod.placedId)) continue;
+
       const pts = mod.vertices.map(rot);
       const N = pts.length;
 
@@ -3951,6 +4254,9 @@ export class GameRenderer {
 
       // Average circumradius
       const R = pts.reduce((s, p) => s + Math.hypot(p.x - mx, p.y - my), 0) / N;
+
+      // Damage state: HP fraction drives tint overlay
+      const hpFrac = mod.placedId ? (hpFractions?.get(mod.placedId) ?? 1) : 1;
 
       // Outward direction: from ship center (cx,cy) to module centroid
       const ddx = mx - cx, ddy = my - cy, ddist = Math.hypot(ddx, ddy);
@@ -3969,6 +4275,15 @@ export class GameRenderer {
       g.moveTo(pts[0]!.x, pts[0]!.y);
       for (let i = 1; i < N; i++) g.lineTo(pts[i]!.x, pts[i]!.y);
       g.closePath().stroke({ color: p.hull.edge, width: 0.7, alpha: 0.85 });
+
+      // Damage tint overlay: orange below 40%, deep red below 15%
+      if (hpFrac < 0.4) {
+        const tintColor = hpFrac < 0.15 ? 0xff2200 : 0xff6600;
+        const tintAlpha = hpFrac < 0.15 ? 0.55 : 0.30 + (0.4 - hpFrac) * 0.5;
+        g.moveTo(pts[0]!.x, pts[0]!.y);
+        for (let i = 1; i < N; i++) g.lineTo(pts[i]!.x, pts[i]!.y);
+        g.closePath().fill({ color: tintColor, alpha: tintAlpha });
+      }
 
       // ── Per-kind detail ────────────────────────────────────────────────
 
@@ -4729,19 +5044,34 @@ export class GameRenderer {
     this.dockedTitle.anchor.set(0.5, 0);
     this.dockedTitle.visible = true;
 
-    this.ensureTextPool(this.dockedMenuLabels, items.length, 24);
     const itemStartY  = 200;
     const itemSpacing = 80;
-    for (let i = 0; i < items.length; i++) {
-      const t     = this.dockedMenuLabels[i]!;
-      const isSel = i === sel;
-      const btnY  = itemStartY + i * itemSpacing;
-      const btnW  = menuWidth - 40;
-      const btnH  = 56;
+    const DOCK_MAX_VISIBLE = 6;
+    const scrollOffset = docked?.menuScrollOffset ?? 0;
+    const visibleCount = Math.min(items.length - scrollOffset, DOCK_MAX_VISIBLE);
+
+    // Scroll indicator
+    if (items.length > DOCK_MAX_VISIBLE) {
+      const barX = this.width - 28;
+      const barH = DOCK_MAX_VISIBLE * itemSpacing;
+      g.rect(barX, itemStartY, 6, barH).fill({ color: 0x112233, alpha: 0.8 });
+      const thumbH = Math.max(20, barH * DOCK_MAX_VISIBLE / items.length);
+      const thumbY = itemStartY + (barH - thumbH) * scrollOffset / (items.length - DOCK_MAX_VISIBLE);
+      g.rect(barX, thumbY, 6, thumbH).fill({ color: 0x3366aa, alpha: 1 });
+    }
+
+    this.ensureTextPool(this.dockedMenuLabels, visibleCount, 24);
+    const btnW  = menuWidth - 40;
+    const btnH  = 56;
+    for (let vi = 0; vi < visibleCount; vi++) {
+      const absIdx = scrollOffset + vi;
+      const t     = this.dockedMenuLabels[vi]!;
+      const isSel = absIdx === sel;
+      const btnY  = itemStartY + vi * itemSpacing;
       g.roundRect(menuStartX - 10, btnY - 10, btnW + 20, btnH + 20, 8)
         .fill({ color: isSel ? 0x003366 : 0x001122, alpha: 0.85 })
         .stroke({ color: isSel ? 0xffcc33 : 0x334455, width: isSel ? 3 : 1 });
-      t.text = isSel ? `▶  ${items[i]}` : `   ${items[i]}`;
+      t.text = isSel ? `▶  ${items[absIdx]}` : `   ${items[absIdx]}`;
       t.x = menuStartX + 10;
       t.y = btnY;
       t.anchor.set(0, 0);
@@ -4749,7 +5079,7 @@ export class GameRenderer {
       t.style.fontSize = 24;
       t.visible = true;
     }
-    for (let i = items.length; i < this.dockedMenuLabels.length; i++) {
+    for (let i = visibleCount; i < this.dockedMenuLabels.length; i++) {
       this.dockedMenuLabels[i]!.visible = false;
     }
 
@@ -5465,6 +5795,21 @@ export class GameRenderer {
       }
     };
 
+    // ── Zoom bar (left edge of canvas, mirrors solar system zoom bar) ──────
+    {
+      const zb = { x: 8, top: 120, bottom: 560, w: 18 };
+      const zbH = zb.bottom - zb.top;
+      const zoomFrac = Math.log(data.zoom / 0.2) / Math.log(5.0 / 0.2);
+      const knobY = zb.bottom - zbH * Math.max(0, Math.min(1, zoomFrac));
+      g.rect(zb.x + zb.w / 2 - 1, zb.top, 2, zbH).fill({ color: 0x223344, alpha: 0.8 });
+      g.rect(zb.x, knobY - 6, zb.w, 12).fill({ color: 0x2a6699, alpha: 0.9 })
+        .stroke({ color: 0x88ccff, width: 1, alpha: 0.7 });
+      const zLabel = data.zoom >= 2 ? `${data.zoom.toFixed(1)}x` : `${data.zoom.toFixed(2)}x`;
+      this.solarBuilderZoomText.text = zLabel;
+      this.solarBuilderZoomText.x = zb.x + zb.w + 2;
+      this.solarBuilderZoomText.y = zb.top - 14;
+    }
+
     // World → screen transform
     const w2sx = (wx: number) => wx * data.zoom + CX + data.panX;
     const w2sy = (wy: number) => wy * data.zoom + CY + data.panY;
@@ -5805,77 +6150,117 @@ export class GameRenderer {
     g.rect(0, 58, SPLIT, 2).fill({ color: 0x2a466b, alpha: 1 });
 
     const ROW_H = 60;
-    const LIST_Y = 120;
+    const LIST_Y = 160; // pushed down to make room for search bar
+    const MAX_VISIBLE = Math.floor((H - LIST_Y - 60) / ROW_H);
+    const scrollOffset = data.corePickerScrollOffset;
+    const visibleCount = Math.min(picker.length - scrollOffset, MAX_VISIBLE);
 
-    // Hint header
-    g.rect(0, 62, SPLIT, 56).fill({ color: 0x081420, alpha: 0.95 });
-    g.rect(0, 116, SPLIT, 2).fill({ color: 0x1a3350, alpha: 0.8 });
+    // Header background + search bar area
+    g.rect(0, 62, SPLIT, 96).fill({ color: 0x081420, alpha: 0.95 });
+    g.rect(0, 156, SPLIT, 2).fill({ color: 0x1a3350, alpha: 0.8 });
 
-    for (let i = 0; i < picker.length; i++) {
-      const item = picker[i]!;
-      const ty = LIST_Y + i * ROW_H;
-      if (ty + ROW_H > H - 20) break;
+    // Search box
+    const hasSearch = data.corePickerSearch.length > 0;
+    const showAll = data.corePickerShowAll;
+    g.roundRect(16, 72, 400, 24, 3)
+      .fill({ color: hasSearch ? 0x081830 : 0x050e1a, alpha: 1 })
+      .stroke({ color: hasSearch ? 0x3399ff : 0x1e3a60, width: hasSearch ? 2 : 1 });
+    // "show all" toggle pill
+    g.roundRect(424, 72, 120, 24, 3)
+      .fill({ color: showAll ? 0x0d3060 : 0x050e1a, alpha: 1 })
+      .stroke({ color: showAll ? 0x3399ff : 0x1e3a60, width: 1 });
+
+    for (let vi = 0; vi < visibleCount; vi++) {
+      const item = picker[scrollOffset + vi]!;
+      const ty = LIST_Y + vi * ROW_H;
       const hasStock = item.quantity > 0;
-      const rowBg = hasStock ? (i % 2 === 0 ? 0x0e2040 : 0x081428) : 0x080c14;
-      g.rect(0, ty, SPLIT, ROW_H - 1).fill({ color: rowBg, alpha: 0.95 });
+      const rowBg = hasStock ? (vi % 2 === 0 ? 0x0e2040 : 0x081428) : 0x080c14;
+      g.rect(0, ty, SPLIT - 12, ROW_H - 1).fill({ color: rowBg, alpha: 0.95 });
       if (hasStock) {
         g.rect(0, ty, 3, ROW_H - 1).fill({ color: 0x2266aa, alpha: 0.9 });
       }
-      g.rect(0, ty + ROW_H - 1, SPLIT, 1).fill({ color: 0x1a2a40, alpha: 0.7 });
+      g.rect(0, ty + ROW_H - 1, SPLIT - 12, 1).fill({ color: 0x1a2a40, alpha: 0.7 });
+    }
+
+    // Scroll bar
+    if (picker.length > MAX_VISIBLE) {
+      const barX = SPLIT - 10;
+      const barH = MAX_VISIBLE * ROW_H;
+      g.rect(barX, LIST_Y, 6, barH).fill({ color: 0x0d1e38, alpha: 1 });
+      const thumbH = Math.max(20, barH * MAX_VISIBLE / picker.length);
+      const thumbY = LIST_Y + (barH - thumbH) * scrollOffset / (picker.length - MAX_VISIBLE);
+      g.rect(barX, thumbY, 6, thumbH).fill({ color: 0x2a5090, alpha: 1 });
     }
 
     // Hint at bottom
     g.rect(0, H - 40, SPLIT, 40).fill({ color: 0x050e1a, alpha: 0.95 });
     g.rect(0, H - 40, SPLIT, 1).fill({ color: 0x1a2a40, alpha: 0.7 });
 
-    // Text labels — reuse palette label pool
-    const needed = picker.length + 4; // rows + title + subtitle + hint + col header
+    // Text labels — reuse palette label pool (0=title, 1=search, 2=showAll, 3=colHdr, 4=hint, 5+=rows)
+    const LABEL_OFFSET = 5;
+    const needed = visibleCount + LABEL_OFFSET;
     this.ensureTextPool(this.solarBuilderPaletteLabels, needed, 12);
 
     // Title
     const tTitle = this.solarBuilderPaletteLabels[0]!;
-    tTitle.text = "SELECT A CORE";
+    tTitle.text = `SELECT A CORE  (${picker.length} shown)`;
     tTitle.x = SPLIT / 2; tTitle.y = 30;
     tTitle.anchor.set(0.5, 0.5);
     tTitle.style.fill = 0xaaddff;
     tTitle.style.fontSize = 16;
     tTitle.visible = true;
 
+    // Search text
+    const tSearch = this.solarBuilderPaletteLabels[1]!;
+    tSearch.text = hasSearch ? data.corePickerSearch + "█" : "type to filter…";
+    tSearch.x = 24; tSearch.y = 84;
+    tSearch.anchor.set(0, 0.5);
+    tSearch.style.fill = hasSearch ? 0xffffff : 0x446688;
+    tSearch.style.fontSize = 12;
+    tSearch.visible = true;
+
+    // Show-all toggle
+    const tShowAll = this.solarBuilderPaletteLabels[2]!;
+    tShowAll.text = showAll ? "SHOW ALL" : "OWNED ONLY";
+    tShowAll.x = 484; tShowAll.y = 84;
+    tShowAll.anchor.set(0.5, 0.5);
+    tShowAll.style.fill = showAll ? 0x88ccff : 0x446688;
+    tShowAll.style.fontSize = 11;
+    tShowAll.visible = true;
+
     // Column header
-    const tHdr = this.solarBuilderPaletteLabels[1]!;
-    tHdr.text = "NAME                     H    M    L    QTY";
-    tHdr.x = 20; tHdr.y = 89;
+    const tHdr = this.solarBuilderPaletteLabels[3]!;
+    tHdr.text = "CL  NAME                         H    M    L    QTY";
+    tHdr.x = 20; tHdr.y = 148;
     tHdr.anchor.set(0, 0.5);
     tHdr.style.fill = 0x446688;
     tHdr.style.fontSize = 10;
     tHdr.visible = true;
 
     // Hint
-    const tHint = this.solarBuilderPaletteLabels[2]!;
-    tHint.text = "CLICK TO SELECT   |   ESC CANCEL";
+    const tHint = this.solarBuilderPaletteLabels[4]!;
+    tHint.text = "[↑↓] Scroll  •  [Tab] Toggle owned/all  •  Click to select  •  [ESC] Cancel";
     tHint.x = SPLIT / 2; tHint.y = H - 20;
     tHint.anchor.set(0.5, 0.5);
     tHint.style.fill = 0x446688;
     tHint.style.fontSize = 11;
     tHint.visible = true;
 
-    const LABEL_OFFSET = 3;
-    for (let i = 0; i < picker.length; i++) {
-      const item = picker[i]!;
-      const ty = LIST_Y + i * ROW_H;
-      if (ty + ROW_H > H - 20) break;
+    for (let vi = 0; vi < visibleCount; vi++) {
+      const item = picker[scrollOffset + vi]!;
+      const ty = LIST_Y + vi * ROW_H;
       const hasStock = item.quantity > 0;
-      const tRow = this.solarBuilderPaletteLabels[LABEL_OFFSET + i]!;
+      const tRow = this.solarBuilderPaletteLabels[LABEL_OFFSET + vi]!;
       const slots = `${String(item.weaponPoints).padStart(2, " ")}H  ${String(item.externalPoints).padStart(2, " ")}M  ${String(item.internalPoints).padStart(2, " ")}L`;
-      tRow.text = `${item.name.toUpperCase().padEnd(30, " ")}${slots}    ×${item.quantity}`;
+      const clLabel = `C${item.sizeClass}`.padEnd(4, " ");
+      tRow.text = `${clLabel}${item.name.toUpperCase().padEnd(28, " ")}${slots}    ×${item.quantity}`;
       tRow.x = 20; tRow.y = ty + ROW_H / 2;
       tRow.anchor.set(0, 0.5);
       tRow.style.fill = hasStock ? 0xaaccee : 0x3a5570;
       tRow.style.fontSize = 12;
       tRow.visible = true;
     }
-    // Hide any remaining labels past what we just rendered
-    for (let i = LABEL_OFFSET + picker.length; i < this.solarBuilderPaletteLabels.length; i++) {
+    for (let i = LABEL_OFFSET + visibleCount; i < this.solarBuilderPaletteLabels.length; i++) {
       this.solarBuilderPaletteLabels[i]!.visible = false;
     }
   }
@@ -6019,17 +6404,37 @@ export class GameRenderer {
     g.rect(LIST_X, COL_H_Y, LIST_W, 28).fill({ color: 0x0d1e38, alpha: 1 });
     g.rect(LIST_X, COL_H_Y + 28, LIST_W, 1).fill({ color: 0x1e3a60, alpha: 1 });
 
-    // Title
+    // Title (shifted up to leave room for search on bottom row of header)
     this.solarShopTitleText.text = `◈  ${data.locationName.toUpperCase()}  —  ${data.economyType.toUpperCase()} ECONOMY`;
     this.solarShopTitleText.x = W / 2;
-    this.solarShopTitleText.y = HEADER_H / 2;
+    this.solarShopTitleText.y = 20;
     this.solarShopTitleText.visible = true;
 
     // Credits
     this.solarShopCreditsText.text = `CREDITS: ${data.playerCredits.toLocaleString()} ¢`;
     this.solarShopCreditsText.x = W - 24;
-    this.solarShopCreditsText.y = HEADER_H / 2;
+    this.solarShopCreditsText.y = 20;
     this.solarShopCreditsText.visible = true;
+
+    // Search box (bottom of header bar)
+    const SEARCH_Y = 47;
+    const SEARCH_X = LIST_X;
+    const SEARCH_W = Math.min(400, LIST_W * 0.45);
+    const hasSearch = data.searchText.length > 0;
+    g.roundRect(SEARCH_X, SEARCH_Y - 11, SEARCH_W, 22, 3)
+      .fill({ color: hasSearch ? 0x081830 : 0x050e1a, alpha: 1 })
+      .stroke({ color: hasSearch ? 0x3399ff : 0x1e3a60, width: hasSearch ? 2 : 1 });
+    const countSuffix = hasSearch
+      ? `  (${data.entries.length} result${data.entries.length !== 1 ? "s" : ""})`
+      : "";
+    const searchDisplay = hasSearch
+      ? data.searchText + "█" + countSuffix
+      : "type to filter…";
+    this.solarShopSearchText.text = searchDisplay;
+    this.solarShopSearchText.x = SEARCH_X + 8;
+    this.solarShopSearchText.y = SEARCH_Y;
+    this.solarShopSearchText.style.fill = hasSearch ? 0xffffff : 0x446688;
+    this.solarShopSearchText.visible = true;
 
     // Status message
     if (data.statusMsg) {
@@ -6069,6 +6474,19 @@ export class GameRenderer {
 
     // Row data — separate pools per column
     const maxVisible = Math.min(data.entries.length, Math.floor((H - ROWS_START_Y - 48) / ROW_H));
+    const scrollOffset = data.scrollOffset;
+    const totalEntries = data.entries.length;
+
+    // Scroll indicator bar (right edge, only when list overflows)
+    if (totalEntries > maxVisible) {
+      const barX = W - 12;
+      const barH = H - ROWS_START_Y - 48;
+      g.rect(barX, ROWS_START_Y, 6, barH).fill({ color: 0x0d1e38, alpha: 1 });
+      const thumbH = Math.max(20, barH * maxVisible / totalEntries);
+      const thumbY = ROWS_START_Y + (barH - thumbH) * scrollOffset / (totalEntries - maxVisible);
+      g.rect(barX, thumbY, 6, thumbH).fill({ color: 0x2a5090, alpha: 1 });
+    }
+
     this.ensureTextPool(this.solarShopNameLabels,   maxVisible, 13);
     this.ensureTextPool(this.solarShopTypeLabels,   maxVisible, 12);
     this.ensureTextPool(this.solarShopDemandLabels, maxVisible, 12);
@@ -6085,7 +6503,7 @@ export class GameRenderer {
     };
 
     for (let i = 0; i < maxVisible; i++) {
-      const entry = data.entries[i];
+      const entry = data.entries[scrollOffset + i];
       if (!entry) {
         this.solarShopNameLabels[i]!.visible   = false;
         this.solarShopTypeLabels[i]!.visible   = false;

@@ -152,6 +152,16 @@ export interface InputState {
    * (solar-system mode). Absent in classic arcade mode; always false when not held.
    */
   strafeRight?: boolean;
+  /**
+   * Double-tap ArrowLeft — trigger a quick roll burst to the left.
+   * One-frame pulse; cleared by InputHandler.endFrame().
+   */
+  strafeRollLeft?: boolean;
+  /**
+   * Double-tap ArrowRight — trigger a quick roll burst to the right.
+   * One-frame pulse; cleared by InputHandler.endFrame().
+   */
+  strafeRollRight?: boolean;
 
   // ── Solar-system combat ability keys ──────────────────────────────────────
   /**

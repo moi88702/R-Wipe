@@ -113,6 +113,15 @@ export class BlueprintEngine {
       return { ok: false, reason: "size-mismatch" };
     }
 
+    // Unique-module constraint: max 1 projected shield projector per ship.
+    if (def.stats.projectedShieldRadius !== undefined) {
+      const alreadyHasProjector = this.blueprint.modules.some(m => {
+        const d = this.defs.get(m.moduleDefId);
+        return d?.stats.projectedShieldRadius !== undefined;
+      });
+      if (alreadyHasProjector) return { ok: false, reason: "unique-module" };
+    }
+
     const budget = this.computeBudget();
 
     if (budget.partsUsed >= budget.partsMax) return { ok: false, reason: "part-limit" };

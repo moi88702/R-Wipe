@@ -45,6 +45,12 @@ export class InputHandler {
   // ── Solar-system dock / gate key (F) ────────────────────────────────────
   private dockPulse = false;
 
+  // ── Strafe double-tap roll pulses ─────────────────────────────────────────
+  private lastStrafeLeftMs = 0;
+  private lastStrafeRightMs = 0;
+  private strafeRollLeftPulse = false;
+  private strafeRollRightPulse = false;
+
   // ── Text input capture ───────────────────────────────────────────────────
   private pendingTypedText = "";
   private pendingBackspacePulse = false;
@@ -99,6 +105,27 @@ export class InputHandler {
       }
       if (e.code === "KeyM") this.mapTogglePulse = true;
       if (e.code === "KeyF") this.dockPulse = true;
+
+      // Strafe double-tap roll detection
+      if (e.code === "ArrowLeft") {
+        const now = performance.now();
+        if (now - this.lastStrafeLeftMs < DOUBLE_TAP_MS) {
+          this.strafeRollLeftPulse = true;
+          this.lastStrafeLeftMs = 0;
+        } else {
+          this.lastStrafeLeftMs = now;
+        }
+      }
+      if (e.code === "ArrowRight") {
+        const now = performance.now();
+        if (now - this.lastStrafeRightMs < DOUBLE_TAP_MS) {
+          this.strafeRollRightPulse = true;
+          this.lastStrafeRightMs = 0;
+        } else {
+          this.lastStrafeRightMs = now;
+        }
+      }
+
       if (e.code === "Backspace") this.pendingBackspacePulse = true;
       if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
         this.pendingTypedText += e.key;
@@ -322,6 +349,8 @@ export class InputHandler {
       turnRight: this.keysPressed.has("KeyD"),
       strafeLeft: this.keysPressed.has("ArrowLeft"),
       strafeRight: this.keysPressed.has("ArrowRight"),
+      strafeRollLeft: this.strafeRollLeftPulse,
+      strafeRollRight: this.strafeRollRightPulse,
 
       // ── Solar-system combat ability keys (pulse per keydown) ─────────────
       // B reuses the existing `bomb` field above.
@@ -409,6 +438,9 @@ export class InputHandler {
     this.swipeDownPulse = false;
     // Solar-system dock key pulse
     this.dockPulse = false;
+    // Strafe roll pulses
+    this.strafeRollLeftPulse = false;
+    this.strafeRollRightPulse = false;
     // Text input capture
     this.pendingTypedText = "";
     this.pendingBackspacePulse = false;
