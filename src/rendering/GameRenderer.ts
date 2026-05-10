@@ -209,6 +209,16 @@ export interface StarmapRenderData {
   readonly selectedMissionLabel: string | null;
 }
 
+interface InventoryDisplayItem {
+  readonly defId: string;
+  readonly name: string;
+  readonly type: string;
+  readonly quantity: number;
+  readonly shopCost: number;
+  /** True for section-divider rows (not selectable). */
+  readonly isHeader?: boolean;
+}
+
 export interface SolarSystemRenderData {
   readonly playerPosition: { x: number; y: number };
   readonly playerVelocity: { x: number; y: number };
@@ -400,13 +410,21 @@ export interface SolarSystemRenderData {
   readonly lockedTargets?: ReadonlyArray<{ readonly id: string; readonly position: { x: number; y: number } }>;
   /** Focused (primary attack) target id. */
   readonly focusedTargetId?: string;
-  /** Friendly escort ships. */
+  /** True when all player engine modules are destroyed (no thrust possible). */
+  readonly playerStranded?: boolean;
+  /** True when a rescue ship has been dispatched and is en route or towing. */
+  readonly rescuePending?: boolean;
+  /** Friendly escort / rescue ships. */
   readonly friendlyShips?: ReadonlyArray<{
     readonly id: string;
     readonly position: { x: number; y: number };
     readonly heading: number;
     readonly health: number;
     readonly maxHealth: number;
+    /** True for rescue ships (distinct visual). */
+    readonly isRescue?: boolean;
+    /** True when the rescue ship has reached the player and is actively towing. */
+    readonly rescueTowing?: boolean;
   }>;
   /** Player projectiles (cannon / torpedo). */
   readonly playerProjectiles?: ReadonlyArray<{
@@ -458,6 +476,23 @@ export interface SolarSystemRenderData {
   readonly cargoCapacity?: number;
   /** Cargo used (total items in inventory). */
   readonly cargoUsed?: number;
+  /** Inventory screen data — only populated when screen === "solar-inventory". */
+  readonly weaponStaggerActive?: boolean;
+  readonly inventoryScreen?: {
+    readonly stationItems: ReadonlyArray<InventoryDisplayItem>;
+    readonly shipItems: ReadonlyArray<InventoryDisplayItem>;
+    readonly activePanel: "station" | "ship";
+    readonly stationSel: number;
+    readonly shipSel: number;
+    readonly stationScroll: number;
+    readonly shipScroll: number;
+    readonly contextMenu: null | { readonly options: ReadonlyArray<string>; readonly selection: number };
+    readonly isDocked: boolean;
+    readonly locationName: string;
+    readonly playerCredits: number;
+    readonly shipCargoUsed: number;
+    readonly shipCargoCapacity: number;
+  };
 }
 
 export interface GalaxyMapData {
@@ -673,6 +708,7 @@ export class GameRenderer {
   private readonly solarApproachText: Text;
   private readonly solarSpeedBarLabel: Text;
   private readonly solarPauseSoundText: Text;
+  private readonly solarRescueText: Text;
   // Docked screen elements.
   private readonly dockedTitle: Text;
   private readonly dockedHint: Text;
@@ -688,6 +724,7 @@ export class GameRenderer {
   private readonly solarBuilderHintText: Text;
   private readonly solarBuilderStatusText: Text;
   private readonly solarBuilderZoomText: Text;
+  private readonly solarBuilderRepairText: Text;
   private readonly solarBuilderBudgetLabels: Text[] = [];
   private readonly solarBuilderPaletteLabels: Text[] = [];
 
@@ -717,6 +754,10 @@ export class GameRenderer {
   private readonly shipyardSavedLabels: Text[] = [];
   private readonly shipyardSavedHeader: Text;
   private readonly shipyardStatusText: Text;
+
+  // Inventory screen overlay.
+  private readonly solarInventoryGfx: Graphics = new Graphics();
+  private readonly inventoryLabels: Text[] = [];
 
   private readonly isTouchDevice: boolean =
     typeof window !== "undefined" &&
@@ -1079,6 +1120,14 @@ export class GameRenderer {
     this.solarBuilderZoomText.visible = false;
     this.menuLayer.addChild(this.solarBuilderZoomText);
 
+    this.solarBuilderRepairText = new Text({
+      text: "",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 13, fill: 0x00ee55, fontWeight: "bold" }),
+    });
+    this.solarBuilderRepairText.anchor.set(0.5, 0.5);
+    this.solarBuilderRepairText.visible = false;
+    this.menuLayer.addChild(this.solarBuilderRepairText);
+
     // Solar shop overlay
     this.solarShopGfx = new Graphics();
     this.menuLayer.addChild(this.solarShopGfx);
@@ -1169,6 +1218,17 @@ export class GameRenderer {
     this.solarPauseSoundText.anchor.set(0.5, 0.5);
     this.solarPauseSoundText.visible = false;
     this.menuLayer.addChild(this.solarPauseSoundText);
+
+    this.solarRescueText = new Text({
+      text: "",
+      style: new TextStyle({ fontFamily: "monospace", fontSize: 14, fill: 0xffdd44, fontWeight: "bold" }),
+    });
+    this.solarRescueText.anchor.set(0.5, 0.5);
+    this.solarRescueText.visible = false;
+    this.menuLayer.addChild(this.solarRescueText);
+
+    // Inventory screen overlay graphics.
+    this.menuLayer.addChild(this.solarInventoryGfx);
 
     // Docked screen — title + hint. Menu items live in a pool.
     this.dockedTitle = new Text({
@@ -1401,6 +1461,7 @@ export class GameRenderer {
     const isSolarShipBuilder = screen === "solar-shipyard";
     const isSolarShop = screen === "solar-shop";
     const isSolarMyShips = screen === "solar-my-ships";
+    const isInventory = screen === "solar-inventory";
     const isNpcTalk = screen === "solar-npc-talk";
     const isMissionList = screen === "solar-missions";
     const isMissionDetail = screen === "solar-mission-detail";
@@ -1409,7 +1470,7 @@ export class GameRenderer {
     const drawsEntities = isGameplay || isPause;
 
     const isSolarPaused = screen === "solar-system-paused";
-    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isAnyDockedScreen || isSolarShipBuilder || isSolarShop || isSolarMyShips;
+    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isAnyDockedScreen || isSolarShipBuilder || isSolarShop || isSolarMyShips || isInventory;
     this.titleText.visible = isMenu;
     this.subtitleText.visible = isMenu;
     this.promptText.visible = isMenu || isPause || isSolarPaused;
@@ -1419,10 +1480,11 @@ export class GameRenderer {
     this.pauseTitle.visible = isPause || isSolarPaused;
     // Solar system view labels
     this.solarSystemNameText.visible = isSolarSystem;
-    // solarApproachText / solarSpeedBarLabel visibility set inside drawSolarSystem each frame.
+    // solarApproachText / solarSpeedBarLabel / solarRescueText visibility set inside drawSolarSystem each frame.
     if (!isSolarSystem) {
       this.solarApproachText.visible = false;
       this.solarSpeedBarLabel.visible = false;
+      this.solarRescueText.visible = false;
     }
     for (const t of this.solarBodyLabels) t.visible = isSolarSystem;
     for (const t of this.solarLocationLabels) t.visible = isSolarSystem;
@@ -1487,6 +1549,7 @@ export class GameRenderer {
     this.solarBuilderZoomText.visible = isSolarShipBuilder;
     if (!isSolarShipBuilder) {
       this.solarBuilderStatusText.visible = false;
+      this.solarBuilderRepairText.visible = false;
       for (const t of this.solarBuilderBudgetLabels) t.visible = false;
       for (const t of this.solarBuilderPaletteLabels) t.visible = false;
     }
@@ -1505,6 +1568,11 @@ export class GameRenderer {
       for (const t of this.solarShopPriceLabels) t.visible = false;
       for (const t of this.solarShopStockLabels) t.visible = false;
       for (const t of this.solarShopOwnedLabels) t.visible = false;
+    }
+    // Inventory screen overlay toggles.
+    if (!isInventory) {
+      this.solarInventoryGfx.clear();
+      for (const t of this.inventoryLabels) t.visible = false;
     }
     // Menu list items: used by main-menu (3) and pause (3); hidden on stats / starmap.
     const showList = isMenu || isPause;
@@ -1576,6 +1644,11 @@ export class GameRenderer {
 
     if (isSolarShop && extras.solarShop) {
       this.drawSolarShop(extras.solarShop);
+      return;
+    }
+
+    if (isInventory && extras.solarSystem?.inventoryScreen) {
+      this.drawInventoryScreen(extras.solarSystem.inventoryScreen);
       return;
     }
 
@@ -3897,6 +3970,36 @@ export class GameRenderer {
       this.solarApproachText.visible = false;
     }
 
+    // ── HUD: rescue button / status ──────────────────────────────────────
+    {
+      const RX = 490, RY = 648, RW = 300, RH = 36;
+      const cx = RX + RW / 2, cy = RY + RH / 2;
+      if (data.playerStranded && !data.rescuePending) {
+        // Pulse the button border
+        const pulse = 0.55 + 0.45 * Math.sin(Date.now() / 300);
+        g.roundRect(RX, RY, RW, RH, 6)
+          .fill({ color: 0x220000, alpha: 0.82 })
+          .stroke({ color: 0xff4400, width: 2, alpha: pulse });
+        this.solarRescueText.text = "⚠  ENGINES OFFLINE  —  CALL RESCUE";
+        this.solarRescueText.style.fill = 0xff6622;
+        this.solarRescueText.x = cx;
+        this.solarRescueText.y = cy;
+        this.solarRescueText.visible = true;
+      } else if (data.rescuePending) {
+        const towing = data.friendlyShips?.some(s => s.isRescue && s.rescueTowing) ?? false;
+        g.roundRect(RX, RY, RW, RH, 6)
+          .fill({ color: 0x001a22, alpha: 0.82 })
+          .stroke({ color: 0x00ccff, width: 1.5, alpha: 0.7 });
+        this.solarRescueText.text = towing ? "BEING TOWED TO STATION" : "RESCUE EN ROUTE";
+        this.solarRescueText.style.fill = 0x44ddff;
+        this.solarRescueText.x = cx;
+        this.solarRescueText.y = cy;
+        this.solarRescueText.visible = true;
+      } else {
+        this.solarRescueText.visible = false;
+      }
+    }
+
     // Galaxy map overlay (M)
     if (data.mapOpen && data.galaxyMap) {
       this.drawGalaxyMap(g, data.galaxyMap);
@@ -3915,6 +4018,24 @@ export class GameRenderer {
     // ── Speed / warp bar (bottom centre, always visible unless map/docked) ──
     if (!data.mapOpen && !data.docked) {
       this.drawSpeedWarpBar(g, data);
+    }
+
+    // ── Stagger indicator (top-right corner when active) ──────────────────
+    if (data.weaponStaggerActive) {
+      const W = this.width;
+      g.roundRect(W - 102, 6, 96, 20, 4).fill({ color: 0x0a1e10, alpha: 0.9 }).stroke({ color: 0x44ff88, width: 1 });
+      this.ensureTextPool(this.zoomBarLabel, 2, 11);
+      const staggerLbl = this.zoomBarLabel[1]!;
+      staggerLbl.text = "STAGGER ON";
+      staggerLbl.x = W - 54;
+      staggerLbl.y = 16;
+      staggerLbl.anchor.set(0.5, 0.5);
+      staggerLbl.style.fill = 0x66ffaa;
+      staggerLbl.style.fontSize = 10;
+      staggerLbl.visible = true;
+    } else {
+      const lbl = this.zoomBarLabel[1];
+      if (lbl) lbl.visible = false;
     }
 
     // ── Virtual touch controls (touch devices only) ───────────────────────
@@ -5821,7 +5942,47 @@ export class GameRenderer {
       const verts = mod.vertices;
       if (verts.length < 3) continue;
       const sv = verts.map(v => ({ x: w2sx(v.x), y: w2sy(v.y) }));
-      this.drawBuilderModuleDetail(g, sv, mod.moduleType, mod.partKind, mod.grade, shipScrX, shipScrY, 1.0, false);
+      if (mod.isDestroyed) {
+        // Draw destroyed module: dark red hollow shell with X overlay
+        g.moveTo(sv[0]!.x, sv[0]!.y);
+        for (let i = 1; i < sv.length; i++) g.lineTo(sv[i]!.x, sv[i]!.y);
+        g.closePath()
+          .fill({ color: 0x220000, alpha: 0.7 })
+          .stroke({ color: 0xff2200, width: 2, alpha: 0.9 });
+        // X cross indicator over the destroyed module
+        const cx = sv.reduce((s, v) => s + v.x, 0) / sv.length;
+        const cy = sv.reduce((s, v) => s + v.y, 0) / sv.length;
+        const xr = 6 * data.zoom;
+        g.moveTo(cx - xr, cy - xr).lineTo(cx + xr, cy + xr)
+          .stroke({ color: 0xff2200, width: 1.5, alpha: 0.85 });
+        g.moveTo(cx + xr, cy - xr).lineTo(cx - xr, cy + xr)
+          .stroke({ color: 0xff2200, width: 1.5, alpha: 0.85 });
+      } else {
+        this.drawBuilderModuleDetail(g, sv, mod.moduleType, mod.partKind, mod.grade, shipScrX, shipScrY, 1.0, false);
+      }
+    }
+
+    // ── REPAIR ALL button (only when there are broken modules) ──────────────
+    if (data.destroyedCount > 0) {
+      const RX = 16, RY = 630, RW = 250, RH = 32;
+      const canAfford = data.repairAllCost !== null;
+      const btnColor = canAfford ? 0x003311 : 0x220011;
+      const borderColor = canAfford ? 0x00ee55 : 0x882200;
+      const pulse = Math.sin(Date.now() / 300) * 0.15 + 0.85;
+      g.rect(RX, RY, RW, RH)
+        .fill({ color: btnColor, alpha: 0.92 })
+        .stroke({ color: borderColor, width: 2, alpha: pulse });
+      const costStr = data.repairAllCost === null
+        ? "PARTS UNAVAILABLE"
+        : data.repairAllCost === 0
+          ? "REPAIR ALL  (free)"
+          : `REPAIR ALL  ${data.repairAllCost.toLocaleString()} ¢`;
+      this.solarBuilderRepairText.text = costStr;
+      this.solarBuilderRepairText.x = RX + RW / 2;
+      this.solarBuilderRepairText.y = RY + RH / 2;
+      this.solarBuilderRepairText.visible = true;
+    } else {
+      this.solarBuilderRepairText.visible = false;
     }
 
     // ── Snap point markers ──────────────────────────────────────────────────
@@ -6265,6 +6426,186 @@ export class GameRenderer {
     }
   }
 
+  private drawInventoryScreen(data: NonNullable<SolarSystemRenderData["inventoryScreen"]>): void {
+    const g = this.solarInventoryGfx;
+    g.clear();
+    const W = this.width;
+    const H = this.height;
+
+    // Background
+    g.rect(0, 0, W, H).fill({ color: 0x060c16, alpha: 0.98 });
+
+    const isDocked = data.isDocked;
+    const PANEL_GAP = 12;
+    const PANEL_Y = 68;
+    const PANEL_H = H - PANEL_Y - 44;
+    const LEFT_X = 20;
+    const RIGHT_X = isDocked ? W / 2 + PANEL_GAP / 2 : LEFT_X;
+    const PANEL_W = isDocked ? W / 2 - LEFT_X - PANEL_GAP / 2 : W - 40;
+
+    const ROW_H = 28;
+    const HEADER_H = 28;
+    const ITEMS_Y = PANEL_Y + HEADER_H + 4;
+    const VISIBLE_ROWS = Math.floor((PANEL_H - HEADER_H - 4) / ROW_H);
+
+    // --- Draw a panel (station or ship) ---
+    const drawPanel = (
+      items: ReadonlyArray<InventoryDisplayItem>,
+      panelX: number,
+      panelW: number,
+      sel: number,
+      isActive: boolean,
+      title: string,
+      subtitle: string,
+    ): void => {
+      const borderColor = isActive ? 0x44aaff : 0x223355;
+      g.rect(panelX, PANEL_Y, panelW, PANEL_H).fill({ color: 0x080f1c, alpha: 0.9 }).stroke({ color: borderColor, width: isActive ? 2 : 1 });
+      // Header bar
+      g.rect(panelX, PANEL_Y, panelW, HEADER_H).fill({ color: isActive ? 0x0d2040 : 0x090e1c, alpha: 1 });
+
+      // Draw visible rows
+      for (let i = 0; i < VISIBLE_ROWS; i++) {
+        if (i >= items.length) break;
+        const rowY = ITEMS_Y + i * ROW_H;
+        const item = items[i]!;
+        if (item.isHeader) {
+          g.rect(panelX + 2, rowY + 4, panelW - 4, ROW_H - 8).fill({ color: 0x0c1e36, alpha: 0.8 });
+        } else {
+          const isSelected = isActive && i === sel;
+          if (isSelected) g.rect(panelX + 2, rowY, panelW - 4, ROW_H - 2).fill({ color: 0x1a3a66, alpha: 0.9 });
+          else if (i % 2 === 0) g.rect(panelX + 2, rowY, panelW - 4, ROW_H - 2).fill({ color: 0x0a1224, alpha: 0.6 });
+        }
+      }
+      // Unused params referenced to satisfy TS
+      void title; void subtitle;
+    };
+
+    if (isDocked) {
+      // Station panel (left)
+      drawPanel(data.stationItems, LEFT_X, PANEL_W, data.stationSel, data.activePanel === "station", data.locationName, "");
+      // Ship panel (right)
+      drawPanel(data.shipItems, RIGHT_X, PANEL_W, data.shipSel, data.activePanel === "ship", "SHIP HOLD", "");
+    } else {
+      drawPanel(data.shipItems, RIGHT_X, PANEL_W, data.shipSel, true, "SHIP HOLD", "");
+    }
+
+    // Context menu overlay
+    if (data.contextMenu) {
+      const panel = data.activePanel;
+      const selIdx = panel === "ship" ? data.shipSel : data.stationSel;
+      const panelX = (!isDocked || panel === "ship") ? RIGHT_X : LEFT_X;
+      const rowY = ITEMS_Y + selIdx * ROW_H;
+      const CTX_W = 220;
+      const CTX_ITEM_H = 28;
+      const CTX_H = data.contextMenu.options.length * CTX_ITEM_H + 8;
+      const ctxX = Math.min(panelX + 20, panelX + PANEL_W - CTX_W - 4);
+      const ctxY = Math.min(rowY + ROW_H, H - CTX_H - 8);
+      // Solid backdrop to fully occlude item labels behind the menu
+      g.rect(ctxX - 2, ctxY - 2, CTX_W + 4, CTX_H + 4).fill({ color: 0x040810, alpha: 1 });
+      g.roundRect(ctxX, ctxY, CTX_W, CTX_H, 6)
+        .fill({ color: 0x0a1830, alpha: 1 })
+        .stroke({ color: 0x2255aa, width: 2 });
+      for (let i = 0; i < data.contextMenu.options.length; i++) {
+        if (i === data.contextMenu.selection) {
+          g.rect(ctxX + 3, ctxY + 4 + i * CTX_ITEM_H, CTX_W - 6, CTX_ITEM_H - 2).fill({ color: 0x1a3a80, alpha: 0.9 });
+        }
+      }
+    }
+
+    // --- Text labels ---
+    const itemsVisible = !data.contextMenu; // hide item labels when ctx menu open (they'd bleed through)
+    const stationVisible = isDocked ? Math.min(data.stationItems.length, VISIBLE_ROWS) : 0;
+    const shipVisible = Math.min(data.shipItems.length, VISIBLE_ROWS);
+    const TOTAL_LABELS_NEEDED = 2 + // panel header titles
+      (itemsVisible ? stationVisible + shipVisible : 0) +
+      (data.contextMenu?.options.length ?? 0) +
+      3; // credits + hint + title
+    this.ensureTextPool(this.inventoryLabels, TOTAL_LABELS_NEEDED + 8, 12);
+    let li = 0;
+
+    const setLabel = (t: Text, text: string, x: number, y: number, fill: number, fontSize: number, anchorX = 0, anchorY = 0.5): void => {
+      t.text = text;
+      t.x = x; t.y = y;
+      t.anchor.set(anchorX, anchorY);
+      t.style.fill = fill;
+      t.style.fontSize = fontSize;
+      t.visible = true;
+    };
+
+    if (isDocked) {
+      // Station panel title
+      const tSta = this.inventoryLabels[li++]!;
+      setLabel(tSta, `STATION HANGAR  —  ${data.locationName.toUpperCase()}`, LEFT_X + 8, PANEL_Y + HEADER_H / 2, data.activePanel === "station" ? 0x88ccff : 0x4488aa, 11);
+
+      if (itemsVisible) {
+        for (let i = 0; i < stationVisible; i++) {
+          const item = data.stationItems[i]!;
+          const rowY = ITEMS_Y + i * ROW_H + ROW_H / 2;
+          const t = this.inventoryLabels[li++]!;
+          if (item.isHeader) {
+            setLabel(t, item.name, LEFT_X + 10, rowY, 0x4477aa, 10);
+          } else {
+            const isSel = data.activePanel === "station" && i === data.stationSel;
+            setLabel(t, `${item.name}  ×${item.quantity}`, LEFT_X + 16, rowY, isSel ? 0xffffff : 0x99bbcc, 11);
+          }
+        }
+      }
+    }
+
+    // Ship panel title
+    const tShip = this.inventoryLabels[li++]!;
+    setLabel(tShip, `SHIP HOLD  (${data.shipCargoUsed}/${data.shipCargoCapacity})`, RIGHT_X + 8, PANEL_Y + HEADER_H / 2, data.activePanel === "ship" ? 0x88ccff : 0x4488aa, 11);
+
+    if (itemsVisible) {
+      for (let i = 0; i < shipVisible; i++) {
+        const item = data.shipItems[i]!;
+        const rowY = ITEMS_Y + i * ROW_H + ROW_H / 2;
+        const t = this.inventoryLabels[li++]!;
+        if (item.isHeader) {
+          setLabel(t, item.name, RIGHT_X + 10, rowY, 0x4477aa, 10);
+        } else {
+          const isSel = data.activePanel === "ship" && i === data.shipSel;
+          setLabel(t, `${item.name}  ×${item.quantity}`, RIGHT_X + 16, rowY, isSel ? 0xffffff : 0x99bbcc, 11);
+        }
+      }
+    }
+
+    // Context menu option labels
+    if (data.contextMenu) {
+      const panel = data.activePanel;
+      const selIdx = panel === "ship" ? data.shipSel : data.stationSel;
+      const panelX = (!isDocked || panel === "ship") ? RIGHT_X : LEFT_X;
+      const rowY = ITEMS_Y + selIdx * ROW_H;
+      const CTX_W = 220;
+      const CTX_ITEM_H = 28;
+      const ctxX = Math.min(panelX + 20, panelX + PANEL_W - CTX_W - 4);
+      const ctxY = Math.min(rowY + ROW_H, H - data.contextMenu.options.length * CTX_ITEM_H - 16);
+      for (let i = 0; i < data.contextMenu.options.length; i++) {
+        const opt = data.contextMenu.options[i]!;
+        const t = this.inventoryLabels[li++]!;
+        const isSel = i === data.contextMenu.selection;
+        setLabel(t, opt, ctxX + CTX_W / 2, ctxY + 4 + i * CTX_ITEM_H + CTX_ITEM_H / 2, isSel ? 0xffffff : 0x88aacc, 12, 0.5);
+      }
+    }
+
+    // Credits
+    setLabel(this.inventoryLabels[li++]!, `CREDITS: ${data.playerCredits.toLocaleString()} ¢`, W - 20, 18, 0x88ddaa, 12, 1);
+
+    // Hint bar
+    const hintStr = isDocked
+      ? "[↑↓] Nav  [Tab] Panel  [S] Transfer  [X] Sell  [F] Buy  [M] Move All  [ESC] Back"
+      : "[↑↓] Nav  [Enter] Action  [ESC] Back";
+    setLabel(this.inventoryLabels[li++]!, hintStr, W / 2, H - 20, 0x446688, 10, 0.5);
+
+    // Title bar
+    setLabel(this.inventoryLabels[li++]!, "INVENTORY", W / 2, 18, 0xaaccee, 18, 0.5);
+
+    // Hide unused labels
+    for (let i = li; i < this.inventoryLabels.length; i++) {
+      this.inventoryLabels[i]!.visible = false;
+    }
+  }
+
   private drawSolarMyShips(ships: ReadonlyArray<SavedBlueprintSummary>): void {
     const g = this.solarSystemGfx;
     g.clear();
@@ -6340,14 +6681,22 @@ export class GameRenderer {
       g.rect(deleteX, btnY, BTN_W, 26).fill({ color: 0x220000, alpha: 0.9 });
       g.rect(deleteX, btnY, BTN_W, 26).stroke({ color: 0x882222, width: 1 });
 
+      // Condition bar (drawn before text labels for z-ordering)
+      const condition = ship.condition ?? 1;
+      const BAR_X = 16, BAR_Y = ty + ROW_H - 12, BAR_W = activeX - 32, BAR_H = 6;
+      g.rect(BAR_X, BAR_Y, BAR_W, BAR_H).fill({ color: 0x0a1020, alpha: 0.8 });
+      const barColor = condition > 0.6 ? 0x22cc55 : condition > 0.3 ? 0xddaa22 : 0xcc3322;
+      g.rect(BAR_X, BAR_Y, Math.round(BAR_W * condition), BAR_H).fill({ color: barColor, alpha: 0.9 });
+
       const base = i * LABELS_PER_ROW + 1;
 
       // Name label
       const tName = this.solarBuilderBudgetLabels[base]!;
-      tName.text = `${ship.isActive ? "★ " : ""}${ship.name.toUpperCase()}  C${ship.sizeClass}  ${ship.partCount} PARTS`;
-      tName.x = 16; tName.y = ty + ROW_H / 2;
+      const dmgSuffix = (ship.destroyedCount ?? 0) > 0 ? `  ⚠ ${ship.destroyedCount} DESTROYED` : "";
+      tName.text = `${ship.isActive ? "★ " : ""}${ship.name.toUpperCase()}  C${ship.sizeClass}  ${ship.partCount} PARTS${dmgSuffix}`;
+      tName.x = 16; tName.y = ty + ROW_H / 2 - 4;
       tName.anchor.set(0, 0.5);
-      tName.style.fill = ship.isActive ? 0xaaddff : 0x99bbcc;
+      tName.style.fill = (ship.destroyedCount ?? 0) > 0 ? 0xffaa44 : (ship.isActive ? 0xaaddff : 0x99bbcc);
       tName.style.fontSize = 12;
       tName.visible = true;
 

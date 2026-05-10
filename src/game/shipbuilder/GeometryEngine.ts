@@ -144,6 +144,7 @@ export class GeometryEngine {
     modules: readonly PlacedSolarModule[],
     defs: ReadonlyMap<string, SolarModuleDefinition>,
     coreSideCount: number,
+    coreRotationRad = 0,
   ): Map<string, ModuleGeometry> {
     // Pre-compute which sides of each module are occupied by children
     const occupiedSides = new Map<string, Set<number>>();
@@ -178,7 +179,7 @@ export class GeometryEngine {
       if (placed.parentPlacedId === null) {
         worldX = 0;
         worldY = 0;
-        rotationRad = 0;
+        rotationRad = coreRotationRad;
       } else {
         const parentGeom = result.get(placed.parentPlacedId);
         if (!parentGeom) continue; // should never happen in a valid tree

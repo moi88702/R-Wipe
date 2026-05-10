@@ -1,23 +1,91 @@
 /**
  * SolarModuleRegistry — static definitions for all solar-system ship modules.
  *
- * Modules are organised by type and sizeClass. Phase 1 covers class-1 (frigate)
- * fully; higher classes are stubs for future expansion.
+ * Modules are organised by type and sizeClass (1–9). Classes pair into 5 size tiers:
+ *   Tier 1 (Small):    C1 Frigate (light)  / C2 Destroyer (heavy)
+ *   Tier 2 (Medium):   C3 Cruiser (light)  / C4 Heavy Cruiser (heavy)
+ *   Tier 3 (Large):    C5 Battleship (light) / C6 Battlecruiser (heavy)
+ *   Tier 4 (Capital):  C7 Capital (light)  / C8 Heavy Capital (heavy)
+ *   Tier 5 (Supercap): C9 Supercap (heavy)
  *
  * Side-length scale per class (px):
  *   1=60  2=80  3=110  4=145  5=185  6=225  7=225  8=270  9=270
  *
- * Core shape.sides is a placeholder (6) — the actual polygon side count is
- * supplied by SolarShipBlueprint.coreSideCount at runtime.
+ * See docs/design/ship-system.md for full mass, budget, and physics tables.
  */
 
 import type {
   SolarModuleDefinition,
   CoreDefinition,
   ShipClass,
+  ShipTier,
+  HullVariant,
   PartKind,
   PolygonShape,
 } from "../../types/solarShipBuilder";
+
+// ── Tier / hull classification ─────────────────────────────────────────────────
+
+/** Physical size tier from ship class: C1-2 → T1, C3-4 → T2, C5-6 → T3, C7-8 → T4, C9 → T5. */
+export function classToTier(cls: ShipClass): ShipTier {
+  return Math.ceil(cls / 2) as ShipTier;
+}
+
+const HULL_INFO_BY_CLASS: Record<ShipClass, { hullVariant: HullVariant; hullName: string }> = {
+  1: { hullVariant: "light", hullName: "Frigate" },
+  2: { hullVariant: "heavy", hullName: "Destroyer" },
+  3: { hullVariant: "light", hullName: "Cruiser" },
+  4: { hullVariant: "heavy", hullName: "Heavy Cruiser" },
+  5: { hullVariant: "light", hullName: "Battleship" },
+  6: { hullVariant: "heavy", hullName: "Battlecruiser" },
+  7: { hullVariant: "light", hullName: "Capital" },
+  8: { hullVariant: "heavy", hullName: "Heavy Capital" },
+  9: { hullVariant: "heavy", hullName: "Supercap" },
+};
+
+// ── Module physics constants ───────────────────────────────────────────────────
+
+/** Maximum module mass (kg) for the heaviest part kind at each tier. */
+export const TIER_BASE_MASS_KG: Record<ShipTier, number> = {
+  1: 500, 2: 2_500, 3: 12_500, 4: 60_000, 5: 300_000,
+};
+
+/** Hull structural mass before any modules are fitted (kg). Equal to 10 × TIER_BASE_MASS_KG. */
+export const HULL_BASE_MASS_KG: Record<ShipTier, number> = {
+  1: 5_000, 2: 25_000, 3: 125_000, 4: 600_000, 5: 3_000_000,
+};
+
+/**
+ * Mass fraction per part kind relative to TIER_BASE_MASS_KG.
+ *   physicalMassKg = TIER_BASE_MASS_KG[classToTier(cls)] × KIND_MASS_FACTOR[partKind]
+ *
+ * Tier-1 range: 100 kg (crew-quarters/cargo) → 500 kg (core/armor).
+ */
+export const KIND_MASS_FACTOR: Record<PartKind, number> = {
+  "core":            1.00,
+  "armor":           1.00,
+  "reactor":         0.90,
+  "cannon":          0.70,
+  "torpedo":         0.60,
+  "plasma":          0.60,
+  "factory-bay":     0.60,
+  "shield":          0.45,
+  "laser":           0.50,
+  "warp-nacelle":    0.50,
+  "gravity-drive":   0.50,
+  "ion-engine":      0.40,
+  "thruster":        0.40,
+  "warp-stabilizer": 0.40,
+  "converter-unit":  0.34,
+  "cloak":           0.30,
+  "radar":           0.28,
+  "lidar":           0.28,
+  "frame":           0.26,
+  "scrambler":       0.24,
+  "webber":          0.24,
+  "crew-quarters":   0.20,
+  "cargo-hold":      0.20,
+};
 
 // ── Class side lengths ────────────────────────────────────────────────────────
 
@@ -130,13 +198,16 @@ function core(
   hp: number,
   cost: number,
 ): CoreDefinition {
+  const { hullVariant, hullName } = HULL_INFO_BY_CLASS[cls];
   return {
     id,
-    name: `${cls === 1 ? "Frigate" : cls === 2 ? "Destroyer" : cls === 3 ? "Cruiser" : `Class-${cls}`} Core — ${variant.charAt(0).toUpperCase() + variant.slice(1)}`,
+    name: `${hullName} Core — ${variant.charAt(0).toUpperCase() + variant.slice(1)}`,
     type: "core",
     partKind: "core",
     sizeClass: cls,
     variant,
+    hullVariant,
+    hullName,
     shape: { sides: 6, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: null },
     budgetCost: 0,
     stats: { hp, sensorRangeKm: CORE_SENSOR_RANGE_KM[cls], shieldRechargeRatePerSec: CORE_SHIELD_REGEN_PER_SEC[cls] },
@@ -158,13 +229,14 @@ function weapon(
   damage: number,
   rateHz: number,
   cost: number,
+  rangeKm: number,
 ): SolarModuleDefinition {
   const verts = WEAPON_VERTS[kind];
   return {
     id, name, type: "weapon", partKind: kind, sizeClass: cls,
     shape: { sides, sideLengthPx: SIDE_PX[cls], attachmentSideIndices: [], ...(verts ? { verts } : {}) },
     budgetCost: 1,
-    stats: { damagePerShot: damage, fireRateHz: rateHz },
+    stats: { damagePerShot: damage, fireRateHz: rateHz, rangeKm },
     shopCost: cost,
   };
 }
@@ -291,14 +363,14 @@ const ALL_MODULES: ReadonlyArray<SolarModuleDefinition> = [
   core("core-c3-balanced", 3, "balanced", 4, 4, 4, 280, 9_500),
 
   // ── Weapons: class 1 ──────────────────────────────────────────────────────
-  weapon("weapon-cannon-c1",  1, "cannon",  "Light Cannon",  3, 25, 0.8, 300),
-  weapon("weapon-laser-c1",   1, "laser",   "Pulse Laser",   4, 10, 3.0, 400),
-  weapon("weapon-torpedo-c1", 1, "torpedo", "Mini Torpedo",  3, 60, 0.3, 500),
+  weapon("weapon-cannon-c1",  1, "cannon",  "Light Cannon",  3, 25, 0.8, 300,    120),
+  weapon("weapon-laser-c1",   1, "laser",   "Pulse Laser",   4, 10, 3.0, 400,     60),
+  weapon("weapon-torpedo-c1", 1, "torpedo", "Mini Torpedo",  3, 60, 0.3, 500,    250),
 
   // ── Weapons: class 2 ──────────────────────────────────────────────────────
-  weapon("weapon-cannon-c2",  2, "cannon",  "Heavy Cannon",  3,  50, 0.8,   900),
-  weapon("weapon-laser-c2",   2, "laser",   "Beam Laser",    4,  20, 3.0, 1_200),
-  weapon("weapon-torpedo-c2", 2, "torpedo", "Torpedo Bay",   3, 120, 0.3, 1_500),
+  weapon("weapon-cannon-c2",  2, "cannon",  "Heavy Cannon",  3,  50, 0.8,   900, 175),
+  weapon("weapon-laser-c2",   2, "laser",   "Beam Laser",    4,  20, 3.0, 1_200,  90),
+  weapon("weapon-torpedo-c2", 2, "torpedo", "Torpedo Bay",   3, 120, 0.3, 1_500, 360),
 
   // ── External systems: class 1 ─────────────────────────────────────────────
   external("ext-shield-c1",  1, "shield", "Shield Module",   4, { shieldCapacity: 80 },         350),
@@ -360,70 +432,70 @@ const ALL_MODULES: ReadonlyArray<SolarModuleDefinition> = [
   converter("conv-i-to-w-c1-l3", 1, "internal", "weapon",   3, 1_200),
   converter("conv-i-to-e-c1-l3", 1, "internal", "external", 3, 1_200),
 
-  // ── Cores: class 4 (battlecruiser) ───────────────────────────────────────
+  // ── Cores: class 4 (heavy cruiser — tier 2 heavy) ────────────────────────────────────────────────────────────────
   core("core-c4-armor",    4, "armor",     5, 4, 4,   500, 20_000),
   core("core-c4-power",    4, "power",     4, 5, 5,   300, 20_000),
   core("core-c4-balanced", 4, "balanced",  5, 5, 5,   400, 24_000),
 
-  // ── Cores: class 5 (battleship) ──────────────────────────────────────────
+  // ── Cores: class 5 (battleship — tier 3 light) ──────────────────────────────────────────────────────────────────────
   core("core-c5-armor",    5, "armor",     6, 5, 5,   750, 45_000),
   core("core-c5-power",    5, "power",     5, 6, 6,   450, 45_000),
   core("core-c5-balanced", 5, "balanced",  6, 6, 6,   600, 54_000),
 
-  // ── Cores: class 6 (dreadnought) ─────────────────────────────────────────
+  // ── Cores: class 6 (battlecruiser — tier 3 heavy) ──────────────────────────────────────────────────────────────────
   core("core-c6-armor",    6, "armor",     7, 6, 6, 1_100, 90_000),
   core("core-c6-power",    6, "power",     6, 7, 7,   660, 90_000),
   core("core-c6-balanced", 6, "balanced",  7, 7, 7,   880, 110_000),
 
-  // ── Cores: class 7 (carrier) ─────────────────────────────────────────────
+  // ── Cores: class 7 (capital — tier 4 light) ────────────────────────────────────────────────────────────────────────────
   core("core-c7-armor",    7, "armor",     6, 7, 8, 1_500, 180_000),
   core("core-c7-power",    7, "power",     5, 8, 9,   900, 180_000),
   core("core-c7-balanced", 7, "balanced",  6, 8, 8, 1_200, 220_000),
 
-  // ── Cores: class 8 (super-dreadnought) ───────────────────────────────────
+  // ── Cores: class 8 (heavy capital — tier 4 heavy) ────────────────────────────────────────────────────────────
   core("core-c8-armor",    8, "armor",     9, 7, 7, 2_000, 360_000),
   core("core-c8-power",    8, "power",     8, 8, 8, 1_200, 360_000),
   core("core-c8-balanced", 8, "balanced",  9, 8, 8, 1_600, 440_000),
 
-  // ── Cores: class 9 (titan) ───────────────────────────────────────────────
+  // ── Cores: class 9 (supercap — tier 5) ───────────────────────────────────────────────────────────────────────────────────
   core("core-c9-armor",    9, "armor",    10, 8, 8, 3_000, 720_000),
   core("core-c9-power",    9, "power",     9, 9, 9, 1_800, 720_000),
   core("core-c9-balanced", 9, "balanced", 10, 9, 9, 2_400, 880_000),
 
   // ── Weapons: class 3 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c3",  3, "cannon",  "Auto-Cannon",    3,  80, 0.8,   2_500),
-  weapon("weapon-laser-c3",   3, "laser",   "Strike Laser",   4,  35, 3.0,   3_000),
-  weapon("weapon-torpedo-c3", 3, "torpedo", "Heavy Torpedo",  3, 200, 0.3,   4_000),
+  weapon("weapon-cannon-c3",  3, "cannon",  "Auto-Cannon",    3,  80, 0.8,   2_500,  250),
+  weapon("weapon-laser-c3",   3, "laser",   "Strike Laser",   4,  35, 3.0,   3_000,  130),
+  weapon("weapon-torpedo-c3", 3, "torpedo", "Heavy Torpedo",  3, 200, 0.3,   4_000,  520),
 
   // ── Weapons: class 4 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c4",  4, "cannon",  "Mass Driver",    3, 130, 0.8,   7_000),
-  weapon("weapon-laser-c4",   4, "laser",   "Focused Beam",   4,  55, 3.0,   9_000),
-  weapon("weapon-torpedo-c4", 4, "torpedo", "Siege Torpedo",  3, 320, 0.3,  12_000),
+  weapon("weapon-cannon-c4",  4, "cannon",  "Mass Driver",    3, 130, 0.8,   7_000,  320),
+  weapon("weapon-laser-c4",   4, "laser",   "Focused Beam",   4,  55, 3.0,   9_000,  165),
+  weapon("weapon-torpedo-c4", 4, "torpedo", "Siege Torpedo",  3, 320, 0.3,  12_000,  680),
 
   // ── Weapons: class 5 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c5",  5, "cannon",  "Railgun",        3, 200, 0.8,  18_000),
-  weapon("weapon-laser-c5",   5, "laser",   "Beam Array",     4,  80, 3.0,  22_000),
-  weapon("weapon-torpedo-c5", 5, "torpedo", "Barrage Bay",    3, 500, 0.3,  30_000),
+  weapon("weapon-cannon-c5",  5, "cannon",  "Railgun",        3, 200, 0.8,  18_000,  400),
+  weapon("weapon-laser-c5",   5, "laser",   "Beam Array",     4,  80, 3.0,  22_000,  200),
+  weapon("weapon-torpedo-c5", 5, "torpedo", "Barrage Bay",    3, 500, 0.3,  30_000,  850),
 
   // ── Weapons: class 6 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c6",  6, "cannon",  "Gauss Cannon",   3,   300, 0.8,  40_000),
-  weapon("weapon-laser-c6",   6, "laser",   "Lance Array",    4,   120, 3.0,  50_000),
-  weapon("weapon-torpedo-c6", 6, "torpedo", "Siege Rack",     3,   750, 0.3,  65_000),
+  weapon("weapon-cannon-c6",  6, "cannon",  "Gauss Cannon",   3,   300, 0.8,  40_000,  490),
+  weapon("weapon-laser-c6",   6, "laser",   "Lance Array",    4,   120, 3.0,  50_000,  245),
+  weapon("weapon-torpedo-c6", 6, "torpedo", "Siege Rack",     3,   750, 0.3,  65_000, 1_020),
 
   // ── Weapons: class 7 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c7",  7, "cannon",  "Macro Cannon",   3,   450, 0.8,  80_000),
-  weapon("weapon-laser-c7",   7, "laser",   "Spinal Laser",   4,   180, 3.0, 100_000),
-  weapon("weapon-torpedo-c7", 7, "torpedo", "Broadside Bay",  3, 1_100, 0.3, 130_000),
+  weapon("weapon-cannon-c7",  7, "cannon",  "Macro Cannon",   3,   450, 0.8,  80_000,  580),
+  weapon("weapon-laser-c7",   7, "laser",   "Spinal Laser",   4,   180, 3.0, 100_000,  290),
+  weapon("weapon-torpedo-c7", 7, "torpedo", "Broadside Bay",  3, 1_100, 0.3, 130_000, 1_180),
 
   // ── Weapons: class 8 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c8",  8, "cannon",  "Void Cannon",    3,   650, 0.8, 160_000),
-  weapon("weapon-laser-c8",   8, "laser",   "Annihilator",    4,   260, 3.0, 200_000),
-  weapon("weapon-torpedo-c8", 8, "torpedo", "Doomsday Rack",  3, 1_600, 0.3, 260_000),
+  weapon("weapon-cannon-c8",  8, "cannon",  "Void Cannon",    3,   650, 0.8, 160_000,  680),
+  weapon("weapon-laser-c8",   8, "laser",   "Annihilator",    4,   260, 3.0, 200_000,  340),
+  weapon("weapon-torpedo-c8", 8, "torpedo", "Doomsday Rack",  3, 1_600, 0.3, 260_000, 1_380),
 
   // ── Weapons: class 9 ─────────────────────────────────────────────────────
-  weapon("weapon-cannon-c9",  9, "cannon",  "World-Breaker",  3, 1_000, 0.8, 320_000),
-  weapon("weapon-laser-c9",   9, "laser",   "Titan Beam",     4,   400, 3.0, 400_000),
-  weapon("weapon-torpedo-c9", 9, "torpedo", "Armageddon Bay", 3, 2_500, 0.3, 520_000),
+  weapon("weapon-cannon-c9",  9, "cannon",  "World-Breaker",  3, 1_000, 0.8, 320_000,  780),
+  weapon("weapon-laser-c9",   9, "laser",   "Titan Beam",     4,   400, 3.0, 400_000,  390),
+  weapon("weapon-torpedo-c9", 9, "torpedo", "Armageddon Bay", 3, 2_500, 0.3, 520_000, 1_550),
 
   // ── External systems: class 3 ────────────────────────────────────────────
   external("ext-shield-c3",  3, "shield", "Battle Shield",     4, { shieldCapacity: 300 },          3_000),

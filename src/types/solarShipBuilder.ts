@@ -17,8 +17,19 @@
 
 // ── Class + type enums ────────────────────────────────────────────────────────
 
-/** 1 = frigate … 9 = titan. */
+/** 1 = frigate … 9 = supercap (internal class numbers; see docs/design/ship-system.md). */
 export type ShipClass = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+
+/**
+ * Physical size tier — maps from ShipClass by ceiling-division.
+ *   Class 1-2 → Tier 1 (Small)    Class 3-4 → Tier 2 (Medium)
+ *   Class 5-6 → Tier 3 (Large)    Class 7-8 → Tier 4 (Capital)
+ *   Class 9   → Tier 5 (Supercap)
+ */
+export type ShipTier = 1 | 2 | 3 | 4 | 5;
+
+/** Hull variant within a size tier — determines budget slot count only. */
+export type HullVariant = "light" | "heavy";
 
 export type SolarModuleType =
   | "core"
@@ -27,7 +38,8 @@ export type SolarModuleType =
   | "internal"
   | "structure"
   | "converter"
-  | "factory";
+  | "factory"
+  | "ammo";
 
 /** Semantic function kind — drives visual design and grade-color selection. */
 export type PartKind =
@@ -128,6 +140,10 @@ export interface SolarModuleDefinition {
 export interface CoreDefinition extends SolarModuleDefinition {
   readonly type: "core";
   readonly variant: "armor" | "power" | "balanced" | "pathfinder" | "raptor" | "wolfpack" | "providence";
+  /** Light = fewer slots (frigate/cruiser/battleship), heavy = more slots (destroyer/heavy cruiser/battlecruiser). */
+  readonly hullVariant: HullVariant;
+  /** Display name of the hull class, e.g. "Frigate", "Destroyer", "Battlecruiser". */
+  readonly hullName: string;
   readonly weaponPoints: number;
   readonly externalPoints: number;
   readonly internalPoints: number;
@@ -156,6 +172,8 @@ export interface SolarShipBlueprint {
   readonly sizeClass: ShipClass;
   /** Chosen at creation; immutable. Range 3–20. */
   readonly coreSideCount: number;
+  /** Core polygon rotation in radians [0, 2π). 0 = default flat-bottom. Q/E keys in builder. */
+  readonly coreRotationRad?: number;
   /** modules[0] is always the core (parentPlacedId === null). */
   readonly modules: readonly PlacedSolarModule[];
 }
@@ -231,6 +249,8 @@ export interface SolarBuilderModuleData {
   readonly moduleType: SolarModuleType;
   readonly partKind: PartKind;
   readonly grade: number;
+  /** True when this module was destroyed in combat and needs repair. */
+  readonly isDestroyed: boolean;
 }
 
 export interface SolarBuilderSnapPointData {
@@ -288,6 +308,10 @@ export interface SavedBlueprintSummary {
   readonly coreSideCount: number;
   readonly partCount: number;
   readonly isActive: boolean;
+  /** 0–1 average HP fraction across all modules. 1 = fully intact. */
+  readonly condition?: number;
+  /** Number of destroyed modules requiring repair. */
+  readonly destroyedCount?: number;
 }
 
 export interface SolarShipBuilderRenderData {
@@ -304,6 +328,8 @@ export interface SolarShipBuilderRenderData {
   readonly contextMenu: SolarBuilderContextMenu | null;
   readonly playerCredits: number;
   readonly coreSideCount: number;
+  /** Core rotation in degrees [0, 360), for display in the builder UI. */
+  readonly coreRotationDeg: number;
   readonly savedBlueprints: ReadonlyArray<SavedBlueprintSummary>;
   /** Non-null when the "new ship" core picker is open. */
   readonly corePicker: ReadonlyArray<CorePickerItem> | null;
@@ -314,4 +340,12 @@ export interface SolarShipBuilderRenderData {
   readonly renameMode: boolean;
   /** Current contents of the rename input buffer. */
   readonly renameBuf: string;
+  /** Number of modules currently destroyed (needs repair). */
+  readonly destroyedCount: number;
+  /**
+   * Total credit cost to auto-repair all destroyed modules from shop.
+   * 0 = all can be sourced from inventory (free).
+   * null = one or more modules are unavailable in shop (can't auto-repair).
+   */
+  readonly repairAllCost: number | null;
 }

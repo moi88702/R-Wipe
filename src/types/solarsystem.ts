@@ -259,6 +259,8 @@ export interface SolarSystemSessionState {
   solarCredits: number;
   /** Modules owned by the player: moduleDefId → quantity. */
   moduleInventory: Map<string, number>;
+  /** Per-station item storage: locationId → (moduleDefId → quantity). */
+  stationHangars: Map<string, Map<string, number>>;
   /** Trade goods and mission items: itemType → quantity. */
   carriedItems: Map<string, number>;
   /** Cumulative real-time elapsed (ms) used to pace economy refresh cycles. */

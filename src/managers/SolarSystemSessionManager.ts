@@ -35,6 +35,7 @@ export class SolarSystemSessionManager {
   private targetingState: TargetingState;
   private _lastThrustActive = false;
   private _playerAngularVelocity = 0;
+  private _shipConfig: ShipControlConfig = DEFAULT_SHIP_CONTROL_CONFIG;
 
   constructor(system: SolarSystemState, blueprint: CapitalShipBlueprint) {
     this.sessionState = this.initializeSessionState(system);
@@ -90,6 +91,7 @@ export class SolarSystemSessionManager {
       discoveredLocations: new Set(),
       solarCredits: 100_000,
       moduleInventory: new Map(),
+      stationHangars: new Map(),
       carriedItems: new Map(),
       gameTimeMs: 0,
     };
@@ -154,11 +156,17 @@ export class SolarSystemSessionManager {
    * Update ship movement based on input and gravity.
    * Called once per frame from the solar system game loop.
    */
+  /** Replace the ship physics config (called when blueprint or module HP changes). */
+  setShipConfig(config: ShipControlConfig): void {
+    this._shipConfig = config;
+  }
+
   updateShipPhysics(input: InputState, deltaMs: number, skipGravity = false, speedMultiplier = 1): void {
-    const baseMax = DEFAULT_SHIP_CONTROL_CONFIG.maxSpeedMs ?? 10000;
+    const base = this._shipConfig;
+    const baseMax = base.maxSpeedMs ?? 10000;
     const config: ShipControlConfig = (skipGravity || speedMultiplier !== 1)
-      ? { ...DEFAULT_SHIP_CONTROL_CONFIG, maxSpeedMs: baseMax * speedMultiplier }
-      : DEFAULT_SHIP_CONTROL_CONFIG;
+      ? { ...base, maxSpeedMs: baseMax * speedMultiplier }
+      : base;
     const primaryBody = skipGravity ? null : this.getPrimaryGravitySource();
 
     if (!skipGravity && !primaryBody) return;

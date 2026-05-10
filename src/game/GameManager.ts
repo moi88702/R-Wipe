@@ -21,7 +21,7 @@ import { SolarBlueprintStore } from "../managers/SolarBlueprintStore";
 import { SolarSystemSessionManager } from "../managers/SolarSystemSessionManager";
 import { ShipBuilderManager } from "../managers/ShipBuilderManager";
 import { ShopManager } from "../managers/ShopManager";
-import { SolarModuleRegistry } from "./data/SolarModuleRegistry";
+import { SolarModuleRegistry, classToTier, TIER_BASE_MASS_KG, HULL_BASE_MASS_KG, KIND_MASS_FACTOR } from "./data/SolarModuleRegistry";
 import { NPCRegistry } from "./data/NPCRegistry";
 import { SystemGateRegistry } from "./data/SystemGateRegistry";
 import { GateTeleportSystem } from "./solarsystem/GateTeleportSystem";
@@ -45,12 +45,20 @@ import { computeShipStats } from "./parts/stats";
 import { layoutBlueprint, type Placement } from "./parts/geometry";
 import { canSnap } from "./parts/assembly";
 import { soundManager } from "../audio/SoundManager";
-import { getPirateBlueprint, PIRATE_BLUEPRINTS } from "./data/PirateBlueprintRegistry";
-import { getEarthBlueprint, EARTH_BLUEPRINTS } from "./data/EarthBlueprintRegistry";
-import { getMarsBlueprint, MARS_BLUEPRINTS } from "./data/MarsBlueprintRegistry";
+import {
+  getPirateBlueprint, PIRATE_BLUEPRINTS,
+  getEarthBlueprint, EARTH_BLUEPRINTS,
+  getMarsBlueprint, MARS_BLUEPRINTS,
+  makePlayerStarterBlueprint,
+} from "./data/blueprints/FactionBlueprintRegistry";
 import { SolarStationRegistry, type StationFaction } from "./data/SolarStationRegistry";
-import { makePlayerStarterBlueprint } from "./data/MercenaryBlueprintRegistry";
-import type { SolarShipBlueprint, SavedBlueprintSummary } from "../types/solarShipBuilder";
+import { SolarInventoryHandler } from "./handlers/SolarInventoryHandler";
+import { SolarShopHandler } from "./handlers/SolarShopHandler";
+import { SolarMyShipsHandler } from "./handlers/SolarMyShipsHandler";
+import { NpcTalkMissionHandler } from "./handlers/NpcTalkMissionHandler";
+import type { SolarShipBlueprint, SavedBlueprintSummary, ShipTier } from "../types/solarShipBuilder";
+import type { ShipControlConfig } from "./solarsystem/ShipControlManager";
+import { DEFAULT_SHIP_CONTROL_CONFIG } from "../managers/SolarSystemSessionManager";
 import { GeometryEngine } from "./shipbuilder/GeometryEngine";
 import { PIRATE_FACTION_TEMPLATES } from "./data/FactionColors";
 import type { FactionColors } from "./data/FactionColors";
@@ -75,6 +83,8 @@ interface SolarEnemyBase {
   turretCooldownMs: number;
   turretWeaponIdx: number;
   lastTurretFireMs: number;
+  /** Current barrel direction in degrees (0–360). Rotates toward target each frame. */
+  turretAimAngleDeg: number;
   sizeClass: number;
   blueprintId: string;
 }
@@ -143,6 +153,13 @@ interface SolarFriendlyShip {
   weaponCooldownMs: number;
   bravery: number;
   retreating: boolean;
+  role: "escort" | "rescue";
+  /** Station world position to tow the player toward (rescue only). */
+  rescueStationPos?: { x: number; y: number };
+  /** Location ID to auto-dock at when towing completes (rescue only). */
+  rescueLocationId?: string;
+  /** True once the rescue ship has reached the player and is actively towing. */
+  rescueTowing: boolean;
 }
 
 interface SolarPlayerProjectile {
@@ -151,6 +168,8 @@ interface SolarPlayerProjectile {
   velocity: { x: number; y: number };
   damage: number;
   weaponKind: "cannon" | "laser" | "torpedo";
+  /** Size class of the weapon that fired this — used for accuracy roll vs target class. */
+  weaponSizeClass: number;
   lifetimeMs: number;
   maxLifetimeMs: number;
   missileTargetId?: string;
@@ -178,9 +197,34 @@ interface WorldItem {
   ageMs: number;
 }
 
+interface InventoryDisplayItem {
+  defId: string;
+  name: string;
+  type: import("../types/solarShipBuilder").SolarModuleType | string;
+  quantity: number;
+  shopCost: number;
+  isHeader?: boolean;
+}
+
+interface InventoryScreenData {
+  readonly stationItems: ReadonlyArray<InventoryDisplayItem>;
+  readonly shipItems: ReadonlyArray<InventoryDisplayItem>;
+  readonly activePanel: "station" | "ship";
+  readonly stationSel: number;
+  readonly shipSel: number;
+  readonly stationScroll: number;
+  readonly shipScroll: number;
+  readonly contextMenu: null | { options: ReadonlyArray<string>; selection: number };
+  readonly isDocked: boolean;
+  readonly locationName: string;
+  readonly playerCredits: number;
+  readonly shipCargoUsed: number;
+  readonly shipCargoCapacity: number;
+}
+
 const CARGO_BASE_SLOTS = 8;
 const CARGO_PICKUP_RADIUS_KM = 6;
-const WORLD_ITEM_MAX_AGE_MS = 90_000;
+const WORLD_ITEM_MAX_AGE_MS = 600_000; // 10 minutes
 /** Module ids that can drop from enemy ships. */
 const WORLD_ITEM_DROP_POOL = [
   "weapon-cannon-c1", "weapon-laser-c1", "weapon-torpedo-c1",
@@ -215,17 +259,23 @@ const SOLAR_ENEMY_TYPES = [
 ] as const;
 
 // Per-level missile stats. Index 0 = class-1 (Mini Torpedo), index 8 = class-9.
+// Larger missiles are faster at top speed but less maneuverable (lower accel, lower turn rate).
+// Speeds in km/s (same unit as PROJECTILE_SPEED_KM_S). Turn rates in rad/s.
+// Turn-rate values match design doc §8 converted from °/s → rad/s.
 const MISSILE_LEVEL_STATS = [
-  { accel:  800, maxSpeed: 22_000, turnRateRadS: 0.55 }, // c1
-  { accel: 1050, maxSpeed: 27_000, turnRateRadS: 0.80 }, // c2
-  { accel: 1350, maxSpeed: 33_000, turnRateRadS: 1.05 }, // c3
-  { accel: 1700, maxSpeed: 39_000, turnRateRadS: 1.30 }, // c4
-  { accel: 2100, maxSpeed: 45_000, turnRateRadS: 1.55 }, // c5
-  { accel: 2550, maxSpeed: 51_000, turnRateRadS: 1.80 }, // c6
-  { accel: 3050, maxSpeed: 57_000, turnRateRadS: 2.05 }, // c7
-  { accel: 3600, maxSpeed: 63_000, turnRateRadS: 2.30 }, // c8
-  { accel: 4200, maxSpeed: 70_000, turnRateRadS: 2.55 }, // c9
+  { accel: 800, maxSpeed:   650, turnRateRadS: 1.571 }, // c1  — nimble, barely faster than bullets
+  { accel: 640, maxSpeed:   780, turnRateRadS: 1.309 }, // c2
+  { accel: 510, maxSpeed:   950, turnRateRadS: 1.082 }, // c3
+  { accel: 400, maxSpeed: 1_150, turnRateRadS: 0.873 }, // c4
+  { accel: 310, maxSpeed: 1_400, turnRateRadS: 0.698 }, // c5
+  { accel: 240, maxSpeed: 1_700, turnRateRadS: 0.559 }, // c6
+  { accel: 180, maxSpeed: 2_050, turnRateRadS: 0.436 }, // c7
+  { accel: 135, maxSpeed: 2_450, turnRateRadS: 0.349 }, // c8
+  { accel: 100, maxSpeed: 2_900, turnRateRadS: 0.279 }, // c9  — fast, barely turns
 ] as const;
+
+/** Speed fraction lost per radian turned per second (missile turn drag). */
+const MISSILE_TURN_DRAG = 0.30;
 
 const SOLAR_WEAPONS = [
   { name: "X-Ray Laser",       damage: 12, range: 80,  cooldownMs: 1400, speed: 80000, color: 0x88ffff },
@@ -291,11 +341,7 @@ export class GameManager {
   private readonly solarBlueprintStore = new SolarBlueprintStore();
   private readonly solarShipBuilderMgr = new ShipBuilderManager();
   private readonly shopManager = new ShopManager();
-  private shopMenuSelection = 0;
-  private shopScrollOffset = 0;
-  private shopSearchText = "";
-  private shopStatusMsg: string | null = null;
-  private shopStatusMs = 0;
+  private readonly shopHandler = new SolarShopHandler();
   private dockedMenuScrollOffset = 0;
   private solarSystem: SolarSystemSessionManager | null = null;
   private mapOpen = false;
@@ -334,10 +380,14 @@ export class GameManager {
   private solarFocusedId: string | null = null;
   /** Friendly escort ships. */
   private solarFriendlyShips: SolarFriendlyShip[] = [];
+  /** True when a rescue ship has been dispatched and hasn't completed the tow yet. */
+  private solarRescuePending = false;
   /** Player projectiles (cannon / torpedo kinds). */
   private solarPlayerProjectiles: SolarPlayerProjectile[] = [];
   /** Per-weapon cooldowns (moduleDefId → remaining ms). */
   private solarWeaponCooldowns = new Map<string, number>();
+  /** When true, weapons fire in sequence 300 ms apart instead of simultaneously. */
+  private solarWeaponStagger = false;
   /** Auto-incrementing id counter for player projectiles and friendly ships. */
   private solarPlayerNextId = 0;
   /** Player health in solar system mode (separate from arcade health). */
@@ -468,10 +518,8 @@ export class GameManager {
   /** Selection in the solar-system pause overlay (0=Resume, 1=Quit). */
   private solarPauseSelection = 0;
   private readonly missionLog = new MissionLogManager();
-  /** NPC currently being talked to (persists across npc-talk → missions → mission-detail) */
-  private activeTalkNpcId: string | null = null;
-  /** Mission id selected in mission-detail screen */
-  private activeMissionDetailId: string | null = null;
+  private readonly npcHandler = new NpcTalkMissionHandler();
+  private readonly invHandler = new SolarInventoryHandler();
 
   private safeTimerMs = 0;
   private menuDebounceMs = 0;
@@ -654,6 +702,8 @@ export class GameManager {
       this.updateMissionList(clamped);
     } else if (screen === "solar-mission-detail") {
       this.updateMissionDetail(clamped);
+    } else if (screen === "solar-inventory") {
+      this.updateSolarInventory(clamped);
     }
 
     this.renderFrame(clamped);
@@ -1407,6 +1457,12 @@ export class GameManager {
         }
         const savedCredits = this.solarBlueprintStore.getCredits();
         if (savedCredits !== null) sessionState.solarCredits = savedCredits;
+        // Restore station hangars
+        for (const [locId, rec] of Object.entries(this.solarBlueprintStore.getStationHangars())) {
+          const bag = new Map<string, number>();
+          for (const [k, v] of Object.entries(rec)) if (v > 0) bag.set(k, v);
+          if (bag.size > 0) sessionState.stationHangars.set(locId, bag);
+        }
       } else {
         // First-time starter kit — a handful of basic parts to get going.
         const starterKit: Array<[string, number]> = [
@@ -1487,6 +1543,7 @@ export class GameManager {
       turretCooldownMs: def.turret.cooldownMs,
       turretWeaponIdx: def.turret.weaponIdx,
       lastTurretFireMs: 0,
+      turretAimAngleDeg: 0,
       sizeClass: def.sizeClass,
       blueprintId: def.blueprintId,
     }));
@@ -1509,6 +1566,7 @@ export class GameManager {
     this.solarLockedIds = new Set();
     this.solarFocusedId = null;
     this.solarFriendlyShips = [];
+    this.solarRescuePending = false;
     this.solarPlayerProjectiles = [];
     this.solarWeaponCooldowns = new Map();
     this.solarPlayerNextId = 0;
@@ -1787,6 +1845,26 @@ export class GameManager {
       this.mapOpen = !this.mapOpen;
     }
 
+    // Inventory (I) — opens ship hold screen in flight
+    if (this.input.wasPressed("KeyI") && !this.mapOpen && this.menuDebounceMs === 0) {
+      this.invHandler.fromScreen = "solar-system";
+      this.invHandler.panel = "ship";
+      this.invHandler.shipSel = 0;
+      this.invHandler.stationSel = 0;
+      this.invHandler.shipScroll = 0;
+      this.invHandler.stationScroll = 0;
+      this.invHandler.ctxOpen = false;
+      this.invHandler.ctxSel = 0;
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      this.state.setScreen("solar-inventory");
+      return;
+
+    // Weapon stagger toggle (G) — staggers each weapon 300 ms apart
+    } else if (this.input.wasPressed("KeyG") && !this.mapOpen && this.menuDebounceMs === 0) {
+      this.solarWeaponStagger = !this.solarWeaponStagger;
+      if (this.solarWeaponStagger) this.initWeaponStagger();
+    }
+
     // While the galaxy map is open, don't drive ship physics — just allow
     // the player to read and close it again.
     if (!this.mapOpen) {
@@ -1794,7 +1872,11 @@ export class GameManager {
       const skipGrav = this.antiGravActive || this.warpDecayMs > 0;
       const decayT = this.warpDecayMs / GameManager.WARP_DECAY_DURATION_MS; // 1→0
       const speedMult = this.antiGravActive ? 10 : (1 + decayT * 9); // 10x→1x during decay
-      this.solarSystem.updateShipPhysics(input, deltaMs, skipGrav, speedMult);
+      // Block thrust input when all engine modules are destroyed (stranded)
+      const physicsInput = this.isPlayerStranded()
+        ? { ...input, thrustForward: false, thrustReverse: false, strafeLeft: false, strafeRight: false }
+        : input;
+      this.solarSystem.updateShipPhysics(physicsInput, deltaMs, skipGrav, speedMult);
       soundManager.setThrusterActive(this.solarSystem.getLastThrustActive() || this.antiGravActive);
       soundManager.tickThruster(deltaMs);
       // Record directional inputs for engine exhaust FX
@@ -1931,6 +2013,19 @@ export class GameManager {
       }
     }
 
+    // ── CALL RESCUE button (screen-space, bottom center) ──────────────────
+    if (input.pointerDownPulse && !this.mapOpen) {
+      const { x: bx, y: by } = input.pointerDownPulse;
+      if (bx >= GameManager.RESCUE_BTN_X && bx < GameManager.RESCUE_BTN_X + GameManager.RESCUE_BTN_W &&
+          by >= GameManager.RESCUE_BTN_Y && by < GameManager.RESCUE_BTN_Y + GameManager.RESCUE_BTN_H) {
+        if (this.isPlayerStranded() && !this.solarRescuePending) {
+          this.callRescue();
+          this.menuDebounceMs = 350;
+          return;
+        }
+      }
+    }
+
     // Click = select (white ring).  Meta/ctrl+click = weapon-lock the ship.
     const clickPulse = input.pointerDownPulse ?? input.pointerMetaDownPulse;
     const isMetaClick = !input.pointerDownPulse && !!input.pointerMetaDownPulse;
@@ -2007,11 +2102,11 @@ export class GameManager {
 
     this.laserFlashMs = Math.max(0, this.laserFlashMs - deltaMs);
 
-    // Tick weapon cooldowns.
-    for (const [defId, cd] of this.solarWeaponCooldowns) {
+    // Tick weapon cooldowns (keyed by placedId for per-instance tracking).
+    for (const [key, cd] of this.solarWeaponCooldowns) {
       const next = Math.max(0, cd - deltaMs);
-      if (next === 0) this.solarWeaponCooldowns.delete(defId);
-      else this.solarWeaponCooldowns.set(defId, next);
+      if (next === 0) this.solarWeaponCooldowns.delete(key);
+      else this.solarWeaponCooldowns.set(key, next);
     }
 
     if (input.zoomDelta) {
@@ -2061,21 +2156,37 @@ export class GameManager {
     }
   }
 
-  private getActiveWeapons(): Array<{ defId: string; damage: number; rateHz: number; kind: "cannon" | "laser" | "torpedo"; sizeClass: number }> {
+  private getActiveWeapons(): Array<{ placedId: string; defId: string; damage: number; rateHz: number; kind: "cannon" | "laser" | "torpedo"; sizeClass: number }> {
     const bp = this.solarActiveBlueprintId ? this.solarSavedBlueprints.get(this.solarActiveBlueprintId) : null;
     if (!bp) {
-      return [{ defId: "default-laser", damage: 34, rateHz: 1.5, kind: "laser", sizeClass: 1 }];
+      return [{ placedId: "default-laser", defId: "default-laser", damage: 34, rateHz: 1.5, kind: "laser", sizeClass: 1 }];
     }
     return bp.modules
-      .map(m => SolarModuleRegistry.getModule(m.moduleDefId))
-      .filter((d): d is NonNullable<typeof d> => !!d && d.type === "weapon")
-      .map(d => ({
-        defId: d.id,
-        damage: d.stats.damagePerShot ?? 20,
-        rateHz: d.stats.fireRateHz ?? 1.0,
-        kind: (d.id.includes("cannon") ? "cannon" : d.id.includes("torpedo") ? "torpedo" : "laser") as "cannon" | "laser" | "torpedo",
-        sizeClass: d.sizeClass as number,
-      }));
+      .filter(m => {
+        const d = SolarModuleRegistry.getModule(m.moduleDefId);
+        return d?.type === "weapon";
+      })
+      .map(m => {
+        const d = SolarModuleRegistry.getModule(m.moduleDefId)!;
+        return {
+          placedId: m.placedId,
+          defId: d.id,
+          damage: d.stats.damagePerShot ?? 20,
+          rateHz: d.stats.fireRateHz ?? 1.0,
+          kind: (d.id.includes("cannon") ? "cannon" : d.id.includes("torpedo") ? "torpedo" : "laser") as "cannon" | "laser" | "torpedo",
+          sizeClass: d.sizeClass as number,
+        };
+      });
+  }
+
+  private initWeaponStagger(): void {
+    const weapons = this.getActiveWeapons();
+    const STAGGER_MS = 300;
+    for (let i = 1; i < weapons.length; i++) {
+      const w = weapons[i]!;
+      const cur = this.solarWeaponCooldowns.get(w.placedId) ?? 0;
+      this.solarWeaponCooldowns.set(w.placedId, Math.max(cur, i * STAGGER_MS));
+    }
   }
 
   private fireWeaponsAtTarget(from: { x: number; y: number }, target: { x: number; y: number }): void {
@@ -2094,10 +2205,10 @@ export class GameManager {
       const weaponRangeKm = this.getWeaponRangeKm(w.defId);
       if (dist > weaponRangeKm) continue;
 
-      const cooldown = this.solarWeaponCooldowns.get(w.defId) ?? 0;
+      const cooldown = this.solarWeaponCooldowns.get(w.placedId) ?? 0;
       if (cooldown > 0) continue;
       const intervalMs = 1000 / w.rateHz;
-      this.solarWeaponCooldowns.set(w.defId, intervalMs);
+      this.solarWeaponCooldowns.set(w.placedId, intervalMs);
 
       // Spawn origin: use blueprint weapon position if available, else ship centre.
       const spawnPos = weaponPositions[wi] ?? { ...from };
@@ -2106,12 +2217,15 @@ export class GameManager {
         soundManager.solarShoot();
         this.laserFlashTarget = { ...target };
         this.laserFlashMs = 200;
-        // Instant hit
+        // Instant hit — accuracy roll: large weapons can miss small targets.
         const ship = this.solarEnemyShips.find(s =>
           Math.hypot(s.position.x - target.x, s.position.y - target.y) < SOLAR_COMBAT_CONFIG.LASER_HIT_RADIUS_KM
         );
         if (ship) {
-          this.damageEnemyShip(ship, w.damage);
+          const miss = GameManager.calcMissChance(w.sizeClass, ship.sizeClass);
+          if (miss === 0 || Math.random() >= miss) {
+            this.damageEnemyShip(ship, w.damage);
+          }
         }
       } else {
         // Cannon / torpedo — create projectile; lifetime derived from weapon range
@@ -2124,6 +2238,7 @@ export class GameManager {
           velocity: { x: vx, y: vy },
           damage: w.damage,
           weaponKind: w.kind,
+          weaponSizeClass: w.sizeClass,
           lifetimeMs: lifetime,
           maxLifetimeMs: lifetime,
         };
@@ -2265,6 +2380,7 @@ export class GameManager {
       totalThrustMs2: 0, scannerRangeKm: ship.scannerRangeKm,
       lockRangeBoostKm: 0, additionalTargetSlots: 0,
       damageReduction: 0, repairRatePerSec: 0, repairPowerCost: 0,
+      turnRateBoostFrac: 0,
     };
 
     const { entries, newlyDestroyed } = ModuleHpSystem.applyHit(
@@ -2374,11 +2490,15 @@ export class GameManager {
           while (diff > Math.PI) diff -= Math.PI * 2;
           while (diff < -Math.PI) diff += Math.PI * 2;
           const maxTurn = (proj.missileTurnRateRadS ?? 1) * dtS;
-          const newAngle = curAngle + Math.max(-maxTurn, Math.min(maxTurn, diff));
+          const actualTurn = Math.max(-maxTurn, Math.min(maxTurn, diff));
+          const newAngle = curAngle + actualTurn;
           const curSpeed = Math.hypot(proj.velocity.x, proj.velocity.y);
+          // Turn drag: speed penalty proportional to how hard the missile is turning.
+          const turnFrac = Math.abs(actualTurn) / (maxTurn || 1);
+          const dragPenalty = curSpeed * MISSILE_TURN_DRAG * turnFrac * dtS;
           const newSpeed = Math.min(
-            proj.missileMaxSpeed ?? 30_000,
-            curSpeed + (proj.missileAccel ?? 1000) * dtS,
+            proj.missileMaxSpeed ?? 650,
+            Math.max(50, curSpeed + (proj.missileAccel ?? 800) * dtS - dragPenalty),
           );
           proj.velocity.x = Math.cos(newAngle) * newSpeed;
           proj.velocity.y = Math.sin(newAngle) * newSpeed;
@@ -2415,6 +2535,9 @@ export class GameManager {
             const dmx = proj.position.x - wox;
             const dmy = proj.position.y - woy;
             if (dmx * dmx + dmy * dmy <= mr * mr) {
+              // Accuracy roll: large weapons miss small targets more often.
+              const miss = GameManager.calcMissChance(proj.weaponSizeClass, ship.sizeClass);
+              if (miss > 0 && Math.random() < miss) { hit = true; break; }
               this.damageEnemyShipModule(ship, mod.placedId, proj.damage, bpForHit, geomCache, "player", playerPos);
               hit = true;
               break;
@@ -2423,7 +2546,10 @@ export class GameManager {
         } else {
           // Fallback sphere for ships without module HP
           if (Math.hypot(ship.position.x - proj.position.x, ship.position.y - proj.position.y) < SOLAR_COMBAT_CONFIG.PROJECTILE_HIT_RADIUS_KM) {
-            this.damageEnemyShip(ship, proj.damage, "player", playerPos);
+            const miss = GameManager.calcMissChance(proj.weaponSizeClass, ship.sizeClass);
+            if (miss === 0 || Math.random() >= miss) {
+              this.damageEnemyShip(ship, proj.damage, "player", playerPos);
+            }
             hit = true;
           }
         }
@@ -2443,17 +2569,88 @@ export class GameManager {
     ];
     const dtS = deltaMs / 1000;
     const MAX_SPEED = 5000; // m/s
+    const session = this.solarSystem!.getSessionState();
 
-    for (let i = 0; i < this.solarFriendlyShips.length; i++) {
+    let escortIdx = 0;
+    for (let i = this.solarFriendlyShips.length - 1; i >= 0; i--) {
       const ship = this.solarFriendlyShips[i]!;
 
+      // ── Rescue ship AI ────────────────────────────────────────────────────
+      if (ship.role === "rescue") {
+        // Cancel rescue if engines came back online (repair bot / docked repair)
+        if (!this.isPlayerStranded()) {
+          this.solarFriendlyShips.splice(i, 1);
+          this.solarRescuePending = false;
+          continue;
+        }
+
+        const stPos = ship.rescueStationPos!;
+        const locId = ship.rescueLocationId ?? "station-earth-orbit";
+
+        if (!ship.rescueTowing) {
+          // Phase 1 — fly toward player at high speed
+          const dx = playerPos.x - ship.position.x;
+          const dy = playerPos.y - ship.position.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist <= 8) {
+            ship.rescueTowing = true;
+          } else {
+            const spd = Math.min(8000, dist * 3000);
+            ship.velocity.x = (dx / dist) * spd;
+            ship.velocity.y = (dy / dist) * spd;
+            ship.heading = (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
+            ship.position.x += ship.velocity.x * dtS / 1000;
+            ship.position.y += ship.velocity.y * dtS / 1000;
+          }
+        } else {
+          // Phase 2 — tow player toward station
+          const dx = stPos.x - ship.position.x;
+          const dy = stPos.y - ship.position.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist > 2) {
+            const spd = Math.min(2500, dist * 1500);
+            ship.velocity.x = (dx / dist) * spd;
+            ship.velocity.y = (dy / dist) * spd;
+            ship.heading = (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
+            ship.position.x += ship.velocity.x * dtS / 1000;
+            ship.position.y += ship.velocity.y * dtS / 1000;
+          } else {
+            ship.velocity = { x: 0, y: 0 };
+          }
+          // Drag the player with the rescue ship
+          session.playerPosition = { ...ship.position };
+          session.playerVelocity = { x: 0, y: 0 };
+
+          // Auto-dock when close enough to the station
+          const distToStation = Math.hypot(stPos.x - ship.position.x, stPos.y - ship.position.y);
+          const loc = session.currentSystem.locations.find(l => l.id === locId);
+          const dockRadius = loc?.dockingRadius ?? 40;
+          if (distToStation < dockRadius) {
+            session.playerPosition = { ...stPos };
+            session.playerVelocity = { x: 0, y: 0 };
+            session.dockedLocationId = locId;
+            session.nearbyLocations = [locId];
+            this.solarFriendlyShips.splice(i, 1);
+            this.solarRescuePending = false;
+            this.dockedMenuSelection = 0;
+            this.dockedMenuScrollOffset = 0;
+            this.menuDebounceMs = 350;
+            this.state.setScreen("docked");
+            return;
+          }
+        }
+        continue; // rescue ships don't use escort formation or auto-fire
+      }
+
+      // ── Escort ship AI ────────────────────────────────────────────────────
       // Bravery: trigger retreat when health drops below threshold
       if (!ship.retreating && ship.health / ship.maxHealth < (1 - ship.bravery)) {
         ship.retreating = true;
       }
 
       const offsets = ship.retreating ? RETREAT_OFFSETS : FORMATION_OFFSETS;
-      const formOff = offsets[i % 3]!;
+      const formOff = offsets[escortIdx % 3]!;
+      escortIdx++;
       const targetPos = { x: playerPos.x + formOff.x, y: playerPos.y + formOff.y };
       const dx = targetPos.x - ship.position.x;
       const dy = targetPos.y - ship.position.y;
@@ -2564,12 +2761,8 @@ export class GameManager {
         base.lastSpawnMs = nowMs;
       }
 
-      // ── Station turrets — fire at nearest enemy-faction ship ─────────────
-      if (nowMs - base.lastTurretFireMs >= base.turretCooldownMs) {
-        // Turrets fire at ships of enemy factions within range.
-        // Pirates fire at Earth ships (and player).
-        // Earth fires at pirates.
-        // Mars fires only when provoked.
+      // ── Station turrets: track target barrel then fire within cone ────────
+      {
         let turretTarget: { x: number; y: number } | null = null;
         let turretDist = base.turretRangeKm;
 
@@ -2578,14 +2771,28 @@ export class GameManager {
           const d = Math.hypot(ship.position.x - base.position.x, ship.position.y - base.position.y);
           if (d < turretDist) { turretDist = d; turretTarget = ship.position; }
         }
-        // Pirate turrets also fire at the player.
         if (base.faction === "pirate" || (base.faction === "mars" && this.marsProvokedFactions.has("player"))) {
           const pd = Math.hypot(playerPos.x - base.position.x, playerPos.y - base.position.y);
           if (pd < turretDist && !this.solarPlayerDead) { turretDist = pd; turretTarget = playerPos; }
         }
 
         if (turretTarget) {
-          this.fireTurretAt(base, turretTarget, nowMs);
+          // Rotate barrel toward target.
+          const targetAngle = (Math.atan2(turretTarget.y - base.position.y, turretTarget.x - base.position.x) * 180) / Math.PI;
+          const turnRate = GameManager.TURRET_TURN_RATE_DEG_S[base.sizeClass] ?? 120;
+          const cone = GameManager.TURRET_FIRE_CONE_DEG[base.sizeClass] ?? 6;
+          const maxStep = turnRate * (deltaMs / 1000);
+          let diff = ((targetAngle - base.turretAimAngleDeg + 540) % 360) - 180;
+          if (Math.abs(diff) <= maxStep) {
+            base.turretAimAngleDeg = targetAngle;
+          } else {
+            base.turretAimAngleDeg = (base.turretAimAngleDeg + Math.sign(diff) * maxStep + 360) % 360;
+          }
+          // Fire only when barrel is on target.
+          const aimDiff = Math.abs(((targetAngle - base.turretAimAngleDeg + 540) % 360) - 180);
+          if (aimDiff <= cone && nowMs - base.lastTurretFireMs >= base.turretCooldownMs) {
+            this.fireTurretAt(base, turretTarget, nowMs);
+          }
         }
       }
     }
@@ -2877,6 +3084,7 @@ export class GameManager {
               this.playerEffectiveStats = ModuleHpSystem.computeEffectiveStats(
                 activeBp, this.playerModuleHp, defs, this.solarPlayerScannerRangeKm,
               );
+              this.updatePlayerShipConfig();
             }
             // Sync health from core HP
             const coreId = activeBp.modules[0]?.placedId;
@@ -2885,6 +3093,7 @@ export class GameManager {
               this.solarPlayerHealth = (coreEntry.hp / Math.max(1, coreEntry.maxHp)) * this.solarPlayerMaxHealth;
             }
           }
+          this.persistShipHpState();
         } else {
           this.solarPlayerHealth = Math.max(0, this.solarPlayerHealth - dmg);
         }
@@ -2954,17 +3163,19 @@ export class GameManager {
       sourceFaction: ship.faction,
       position: { x: ship.position.x, y: ship.position.y },
       velocity: { x: dirX * wDef.speed, y: dirY * wDef.speed },
-      lifeMs: (wDef.range / wDef.speed) * 1_000_000, // life = range / speed (km/(m/s) * 1000 * 1000)
+      lifeMs: (wDef.range / wDef.speed) * 1_000_000,
       damage: wDef.damage,
     };
     if (HOMING_WEAPON_INDICES.has(weaponIdx)) {
       ep.isHoming = true;
       ep.homingTargetId = targetId ?? "player";
-      const lvl = weaponIdx === 4 ? 3 : 2;
+      // Use ship's sizeClass as missile level so bigger enemies fire faster missiles.
+      // MISSILE_LEVEL_STATS are in km/s; multiply by 1000 to match enemy velocity units (m/s).
+      const lvl = Math.max(1, Math.min(9, ship.sizeClass));
       const mstats = MISSILE_LEVEL_STATS[lvl - 1]!;
-      ep.homingAccel = mstats.accel * 0.8;
-      ep.homingMaxSpeed = mstats.maxSpeed * 0.85;
-      ep.homingTurnRateRadS = mstats.turnRateRadS * 0.9;
+      ep.homingAccel       = mstats.accel          * 0.8 * 1000;
+      ep.homingMaxSpeed    = mstats.maxSpeed        * 0.75 * 1000;
+      ep.homingTurnRateRadS = mstats.turnRateRadS   * 0.9;
       ep.trailPoints = [];
       ep.trailNextSampleMs = 60;
       ep.weaponTrailColor = weaponIdx === 3 ? 0xff6633 : weaponIdx === 4 ? 0xff44ff : 0x44ffcc;
@@ -3113,9 +3324,9 @@ export class GameManager {
     const escortItem = this.solarFriendlyShips.length < 3 ? ["Launch Escort"] : [];
     const cheatItems = isEarthStation ? ["Add 100k Credits"] : [];
     if (hasShipyard) {
-      return [...npcItems, "Repair Bay", ...cheatItems, ...escortItem, "Shop", "Shipyard", "My Ships", "Galaxy Map", "Undock"];
+      return [...npcItems, "Inventory", "Repair Bay", ...cheatItems, ...escortItem, "Shop", "Shipyard", "My Ships", "Galaxy Map", "Undock"];
     }
-    return [...npcItems, "Repair Bay", ...escortItem, "Shop", "My Ships", "Galaxy Map", "Undock"];
+    return [...npcItems, "Inventory", "Repair Bay", ...escortItem, "Shop", "My Ships", "Galaxy Map", "Undock"];
   }
 
   private getDockedNpc() {
@@ -3230,11 +3441,24 @@ export class GameManager {
     if (item === "Talk to NPC") {
       const npc = this.getDockedNpc();
       if (npc) {
-        this.activeTalkNpcId = npc.id;
+        this.npcHandler.activeTalkNpcId = npc.id;
         this.menuSelection = 0;
         this.state.setScreen("solar-npc-talk");
         this.menuDebounceMs = MENU_DEBOUNCE_MS;
       }
+      return;
+    }
+    if (item === "Inventory") {
+      this.invHandler.fromScreen = "docked";
+      this.invHandler.panel = "ship";
+      this.invHandler.shipSel = 0;
+      this.invHandler.stationSel = 0;
+      this.invHandler.shipScroll = 0;
+      this.invHandler.stationScroll = 0;
+      this.invHandler.ctxOpen = false;
+      this.invHandler.ctxSel = 0;
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      this.state.setScreen("solar-inventory");
       return;
     }
     if (item === "Add 100k Credits") {
@@ -3262,6 +3486,8 @@ export class GameManager {
           weaponCooldownMs: 1000,
           bravery: 0.6,
           retreating: false,
+          role: "escort",
+          rescueTowing: false,
         });
         this.dockedStatusMsg = `Escort launched (${this.solarFriendlyShips.length}/3)`;
         this.dockedStatusMs = 1500;
@@ -3272,7 +3498,19 @@ export class GameManager {
     if (item === "Repair Bay") {
       this.solarPlayerHealth = this.solarPlayerMaxHealth;
       this.solarPlayerShield = this.solarPlayerMaxShield;
-      this.dockedStatusMsg = "Hull repaired — shields restored.";
+      // Also repair all destroyed modules for free when docked at Repair Bay
+      const destroyedCount = this.playerModuleHp.filter(e => e.isDestroyed).length;
+      if (destroyedCount > 0) {
+        this.playerModuleHp = this.playerModuleHp.map(e =>
+          e.isDestroyed ? { ...e, hp: e.maxHp, isDestroyed: false } : e,
+        );
+        this.solarPlayerBlueprintCache = null;
+        this.applyActiveSolarBlueprint();
+        this.persistShipHpState();
+      }
+      this.dockedStatusMsg = destroyedCount > 0
+        ? `Hull repaired — ${destroyedCount} module${destroyedCount > 1 ? "s" : ""} restored.`
+        : "Hull repaired — shields restored.";
       this.dockedStatusMs = 1500;
     } else if (item === "Shop") {
       const session = this.solarSystem?.getSessionState();
@@ -3281,10 +3519,10 @@ export class GameManager {
         const system = this.solarSystem!.getCurrentSystem();
         const loc = system.locations.find((l) => l.id === dockedLocId);
         this.shopManager.ensureShop(dockedLocId, loc?.controllingFaction ?? "terran-federation");
-        this.shopMenuSelection = 0;
-        this.shopScrollOffset = 0;
-        this.shopSearchText = "";
-        this.shopStatusMsg = null;
+        this.shopHandler.menuSelection = 0;
+        this.shopHandler.scrollOffset = 0;
+        this.shopHandler.searchText = "";
+        this.shopHandler.statusMsg = null;
         this.state.setScreen("solar-shop");
         this.menuDebounceMs = MENU_DEBOUNCE_MS;
         return;
@@ -3357,14 +3595,14 @@ export class GameManager {
   }
 
   private updateNpcTalk(_deltaMs: number): void {
-    const npc = this.activeTalkNpcId ? NPCRegistry.getNPC(this.activeTalkNpcId) : undefined;
+    const npc = this.npcHandler.activeTalkNpcId ? NPCRegistry.getNPC(this.npcHandler.activeTalkNpcId) : undefined;
     if (!npc) { this.state.setScreen("docked"); return; }
 
     const items = ["Missions", "Leave"];
     this.stepMenuSelection(items.length);
 
     if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
-      this.activeTalkNpcId = null;
+      this.npcHandler.activeTalkNpcId = null;
       this.state.setScreen("docked");
       this.menuSelection = 0;
       this.menuDebounceMs = 350;
@@ -3379,7 +3617,7 @@ export class GameManager {
         this.state.setScreen("solar-missions");
         this.menuDebounceMs = MENU_DEBOUNCE_MS;
       } else {
-        this.activeTalkNpcId = null;
+        this.npcHandler.activeTalkNpcId = null;
         this.state.setScreen("docked");
         this.menuSelection = 0;
         this.menuDebounceMs = 350;
@@ -3388,7 +3626,7 @@ export class GameManager {
   }
 
   private updateMissionList(_deltaMs: number): void {
-    const npcId = this.activeTalkNpcId;
+    const npcId = this.npcHandler.activeTalkNpcId;
     if (!npcId) { this.state.setScreen("docked"); return; }
 
     const missions = this.getNpcMissions(npcId);
@@ -3414,7 +3652,7 @@ export class GameManager {
       }
       const entry = missions[this.menuSelection];
       if (entry && entry.status === "available") {
-        this.activeMissionDetailId = entry.spec.id;
+        this.npcHandler.activeMissionDetailId = entry.spec.id;
         this.menuSelection = 0;
         this.state.setScreen("solar-mission-detail");
         this.menuDebounceMs = MENU_DEBOUNCE_MS;
@@ -3423,8 +3661,8 @@ export class GameManager {
   }
 
   private updateMissionDetail(_deltaMs: number): void {
-    const missionId = this.activeMissionDetailId;
-    const npcId = this.activeTalkNpcId;
+    const missionId = this.npcHandler.activeMissionDetailId;
+    const npcId = this.npcHandler.activeTalkNpcId;
     if (!missionId || !npcId) { this.state.setScreen("solar-missions"); return; }
     const spec = this.getMissionSpec(missionId);
     if (!spec) { this.state.setScreen("solar-missions"); return; }
@@ -3433,7 +3671,7 @@ export class GameManager {
     this.stepMenuSelection(items.length);
 
     if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
-      this.activeMissionDetailId = null;
+      this.npcHandler.activeMissionDetailId = null;
       this.menuSelection = 0;
       this.state.setScreen("solar-missions");
       this.menuDebounceMs = 350;
@@ -3446,19 +3684,19 @@ export class GameManager {
         // Accept
         try {
           this.missionLog.acceptMission(spec, npcId);
-          this.activeMissionDetailId = null;
+          this.npcHandler.activeMissionDetailId = null;
           this.menuSelection = 0;
           this.state.setScreen("solar-missions");
           this.menuDebounceMs = MENU_DEBOUNCE_MS;
         } catch {
           // Already accepted or unknown — just go back
-          this.activeMissionDetailId = null;
+          this.npcHandler.activeMissionDetailId = null;
           this.menuSelection = 0;
           this.state.setScreen("solar-missions");
           this.menuDebounceMs = 350;
         }
       } else {
-        this.activeMissionDetailId = null;
+        this.npcHandler.activeMissionDetailId = null;
         this.menuSelection = 0;
         this.state.setScreen("solar-missions");
         this.menuDebounceMs = 350;
@@ -3489,6 +3727,17 @@ export class GameManager {
   private static readonly SB_USE_X = 1234;
   private static readonly SB_NEW_X = 1130;
   private static readonly SB_NEW_W = 58;
+  // REPAIR ALL button: left panel, bottom area (x=16..266, y=630..662)
+  private static readonly SB_REPAIR_X = 16;
+  private static readonly SB_REPAIR_Y = 630;
+  private static readonly SB_REPAIR_W = 250;
+  private static readonly SB_REPAIR_H = 32;
+
+  // CALL RESCUE / BEING TOWED button: bottom-center of solar system HUD
+  private static readonly RESCUE_BTN_X = 490;
+  private static readonly RESCUE_BTN_Y = 648;
+  private static readonly RESCUE_BTN_W = 300;
+  private static readonly RESCUE_BTN_H = 36;
 
   private updateSolarShipBuilder(deltaMs: number): void {
     this.solarShipBuilderMgr.tick(deltaMs);
@@ -3606,6 +3855,25 @@ export class GameManager {
     if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
       this.solarShipBuilderMgr.close();
       this.state.setScreen("docked");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+
+    // ── Core rotation: Q = CCW 5°, E = CW 5° ────────────────────────────
+    if (this.input.wasPressed("KeyQ") && this.menuDebounceMs === 0) {
+      this.solarShipBuilderMgr.rotateCore(-Math.PI / 36);
+      this.menuDebounceMs = 80;
+    }
+    if (this.input.wasPressed("KeyE") && this.menuDebounceMs === 0) {
+      this.solarShipBuilderMgr.rotateCore(Math.PI / 36);
+      this.menuDebounceMs = 80;
+    }
+
+    // ── REPAIR ALL button (left panel, bottom) ──────────────────────────
+    if (click && this.playerModuleHp.some(e => e.isDestroyed) &&
+        click.x >= GameManager.SB_REPAIR_X && click.x < GameManager.SB_REPAIR_X + GameManager.SB_REPAIR_W &&
+        click.y >= GameManager.SB_REPAIR_Y && click.y < GameManager.SB_REPAIR_Y + GameManager.SB_REPAIR_H) {
+      this.repairAllModules();
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
@@ -3737,7 +4005,7 @@ export class GameManager {
     coreRadius: number;
   } {
     const defs = SolarModuleRegistry.getModuleMap();
-    const geometries = GeometryEngine.deriveAllGeometries(bp.modules, defs, bp.coreSideCount);
+    const geometries = GeometryEngine.deriveAllGeometries(bp.modules, defs, bp.coreSideCount, bp.coreRotationRad ?? 0);
     const coreDef = defs.get(bp.modules[0]?.moduleDefId ?? "");
     const coreRadius = coreDef
       ? GeometryEngine.circumradius(bp.coreSideCount, coreDef.shape.sideLengthPx)
@@ -3936,6 +4204,7 @@ export class GameManager {
     this.solarPlayerScannerRangeKm = this.computePlayerScannerRange();
     this.solarPlayerShieldRechargeRate = this.computePlayerShieldRechargeRate();
     this.applyProjectedShieldStats();
+    this.updatePlayerShipConfig();
   }
 
   private computePlayerShieldRechargeRate(): number {
@@ -3983,6 +4252,86 @@ export class GameManager {
     this.solarProjShieldHp = Math.min(this.solarProjShieldHp || capacity, capacity);
   }
 
+  // ── Mass-based ship physics ──────────────────────────────────────────────────
+
+  private static readonly TURN_RATE_BASE_BY_TIER: Record<ShipTier, number> = {
+    1: Math.PI,            // 180°/s — nimble frigate
+    2: Math.PI * 0.70,     // 126°/s — cruiser
+    3: Math.PI * 0.50,     //  90°/s — battleship
+    4: Math.PI * 0.35,     //  63°/s — capital
+    5: Math.PI * 0.25,     //  45°/s — supercap
+  };
+
+  private static readonly MAX_SPEED_BY_TIER: Record<ShipTier, number> = {
+    1: 10_000, 2: 15_000, 3: 20_000, 4: 25_000, 5: 30_000,
+  };
+
+  /**
+   * Bridging constant: registry thrustMs2 values are raw unit thrust; multiply by
+   * this factor so a T1 ship with a single C1 thruster (thrustMs2=2000) at nominal
+   * hull mass produces ~15000 m/s² — matching the legacy DEFAULT_SHIP_CONTROL_CONFIG.
+   */
+  private static readonly THRUST_SCALE = 7.5;
+
+  /**
+   * missChance = clamp((weaponClass - targetClass) × 0.09, 0, 0.80)
+   * Returns a value in [0, 0.80] — caller compares against Math.random().
+   */
+  private static calcMissChance(weaponClass: number, targetClass: number): number {
+    return Math.min(0.80, Math.max(0, (weaponClass - targetClass) * 0.09));
+  }
+
+  /** Turret turn rate (°/s) by station size class. */
+  private static readonly TURRET_TURN_RATE_DEG_S: Record<number, number> = {
+    1: 180, 2: 180, 3: 120, 4: 120, 5: 80, 6: 80, 7: 50, 8: 50, 9: 30,
+  };
+
+  /** Half-width fire cone (°) by station size class. Turret fires only when within ±cone. */
+  private static readonly TURRET_FIRE_CONE_DEG: Record<number, number> = {
+    1: 8, 2: 8, 3: 6, 4: 6, 5: 5, 6: 5, 7: 4, 8: 4, 9: 3,
+  };
+
+  private buildPlayerShipConfig(): ShipControlConfig {
+    const bp = this.solarActiveBlueprintId
+      ? this.solarSavedBlueprints.get(this.solarActiveBlueprintId)
+      : null;
+    if (!bp) return DEFAULT_SHIP_CONTROL_CONFIG;
+
+    const defs = SolarModuleRegistry.getModuleMap();
+    const tier = classToTier(bp.sizeClass);
+
+    const hullMass = HULL_BASE_MASS_KG[tier];
+    let totalMass = hullMass;
+    for (const placed of bp.modules) {
+      const def = defs.get(placed.moduleDefId);
+      if (def) totalMass += TIER_BASE_MASS_KG[tier] * KIND_MASS_FACTOR[def.partKind];
+    }
+
+    const massFactor = hullMass / totalMass;
+    const rawThrust = this.playerEffectiveStats?.totalThrustMs2 ?? 0;
+    const thrusterPower = rawThrust > 0
+      ? rawThrust * GameManager.THRUST_SCALE * massFactor
+      : DEFAULT_SHIP_CONTROL_CONFIG.thrusterPower * massFactor;
+
+    const turnBoost = this.playerEffectiveStats?.turnRateBoostFrac ?? 0;
+    const turnRateRadPerS = GameManager.TURN_RATE_BASE_BY_TIER[tier]
+      * Math.sqrt(massFactor)
+      * (1 + turnBoost);
+
+    return {
+      hullMass: totalMass,
+      thrusterPower: Math.max(100, thrusterPower),
+      strafePower: Math.max(80, thrusterPower * 0.7),
+      turnRateRadPerS: Math.max(0.1, turnRateRadPerS),
+      turnAccelRadPerS2: turnRateRadPerS * 4,
+      maxSpeedMs: GameManager.MAX_SPEED_BY_TIER[tier],
+    };
+  }
+
+  private updatePlayerShipConfig(): void {
+    this.solarSystem?.setShipConfig(this.buildPlayerShipConfig());
+  }
+
   private static shieldStatsFromBlueprint(bp: SolarShipBlueprint): { radius: number; maxHp: number; rechargeRate: number } {
     let radius = 0; let maxHp = 0; let rechargeRate = 0;
     for (const placed of bp.modules) {
@@ -4016,7 +4365,7 @@ export class GameManager {
     return total;
   }
 
-  /** Persist current session inventory and credits to the blueprint store. */
+  /** Persist current session inventory, credits, and station hangars. */
   private persistSolarInventory(inv: Map<string, number>, credits?: number): void {
     if (this.e2eMode) return;
     const rec: Record<string, number> = {};
@@ -4026,6 +4375,24 @@ export class GameManager {
     this.solarBlueprintStore.setInventory(rec);
     const creditsToSave = credits ?? this.solarSystem?.getSessionState().solarCredits;
     if (creditsToSave !== undefined) this.solarBlueprintStore.setCredits(creditsToSave);
+    // Persist station hangars
+    const session = this.solarSystem?.getSessionState();
+    if (session) {
+      const hangarsRec: Record<string, Record<string, number>> = {};
+      for (const [locId, bag] of session.stationHangars.entries()) {
+        const bagRec: Record<string, number> = {};
+        for (const [k, v] of bag.entries()) if (v > 0) bagRec[k] = v;
+        if (Object.keys(bagRec).length > 0) hangarsRec[locId] = bagRec;
+      }
+      this.solarBlueprintStore.setStationHangars(hangarsRec);
+    }
+    this.solarBlueprintStore.save();
+  }
+
+  /** Persist the active ship's current module HP state. */
+  private persistShipHpState(): void {
+    if (!this.solarActiveBlueprintId || this.e2eMode) return;
+    this.solarBlueprintStore.setShipHpState(this.solarActiveBlueprintId, this.playerModuleHp);
     this.solarBlueprintStore.save();
   }
 
@@ -4046,19 +4413,31 @@ export class GameManager {
   }
 
   private getSavedBlueprintSummaries(): SavedBlueprintSummary[] {
-    return Array.from(this.solarSavedBlueprints.values()).map((bp) => ({
-      id: bp.id,
-      name: bp.name,
-      sizeClass: bp.sizeClass,
-      coreSideCount: bp.coreSideCount,
-      partCount: bp.modules.length,
-      isActive: bp.id === this.solarActiveBlueprintId,
-    }));
+    return Array.from(this.solarSavedBlueprints.values()).map((bp) => {
+      const isActive = bp.id === this.solarActiveBlueprintId;
+      const hpEntries = isActive
+        ? this.playerModuleHp
+        : (this.solarBlueprintStore.getShipHpState(bp.id) ?? null);
+      let condition: number | undefined;
+      let destroyedCount: number | undefined;
+      if (hpEntries && hpEntries.length > 0) {
+        const destroyed = hpEntries.filter(e => e.isDestroyed).length;
+        destroyedCount = destroyed;
+        const avgHp = hpEntries.reduce((s, e) => s + (e.isDestroyed ? 0 : e.hp / Math.max(1, e.maxHp)), 0) / hpEntries.length;
+        condition = avgHp;
+      }
+      return {
+        id: bp.id, name: bp.name, sizeClass: bp.sizeClass, coreSideCount: bp.coreSideCount,
+        partCount: bp.modules.length, isActive,
+        ...(condition !== undefined ? { condition } : {}),
+        ...(destroyedCount !== undefined ? { destroyedCount } : {}),
+      };
+    });
   }
 
-  // ── My Ships screen ───────────────────────────────────────────────────────
+  private readonly myShipsHandler = new SolarMyShipsHandler();
 
-  private myShipsSelection = 0;
+  // ── My Ships screen ───────────────────────────────────────────────────────
 
   private updateSolarMyShips(): void {
     const ships = this.getSavedBlueprintSummaries();
@@ -4068,14 +4447,14 @@ export class GameManager {
       return;
     }
     if (this.input.wasPressed("ArrowUp") && this.menuDebounceMs === 0) {
-      this.myShipsSelection = (this.myShipsSelection - 1 + Math.max(1, ships.length)) % Math.max(1, ships.length);
+      this.myShipsHandler.selection = (this.myShipsHandler.selection - 1 + Math.max(1, ships.length)) % Math.max(1, ships.length);
       this.menuDebounceMs = 150;
     }
     if (this.input.wasPressed("ArrowDown") && this.menuDebounceMs === 0) {
-      this.myShipsSelection = (this.myShipsSelection + 1) % Math.max(1, ships.length);
+      this.myShipsHandler.selection = (this.myShipsHandler.selection + 1) % Math.max(1, ships.length);
       this.menuDebounceMs = 150;
     }
-    this.myShipsSelection = Math.min(this.myShipsSelection, Math.max(0, ships.length - 1));
+    this.myShipsHandler.selection = Math.min(this.myShipsHandler.selection, Math.max(0, ships.length - 1));
 
     // Click detection: 3 buttons per row — SET ACTIVE / LOAD TO BUILDER / DELETE
     const input = this.input.poll();
@@ -4086,7 +4465,7 @@ export class GameManager {
       const rowIdx = Math.floor((click.y - LIST_Y) / ROW_H);
       const ship = ships[rowIdx];
       if (ship) {
-        this.myShipsSelection = rowIdx;
+        this.myShipsHandler.selection = rowIdx;
         const BTN_W = 110;
         const BTN_GAP = 8;
         const rightEdge = 1280 - 16;
@@ -4123,31 +4502,31 @@ export class GameManager {
   // ── Solar shop ───────────────────────────────────────────────────────────
 
   private updateSolarShop(deltaMs: number): void {
-    if (this.shopStatusMs > 0) {
-      this.shopStatusMs = Math.max(0, this.shopStatusMs - deltaMs);
-      if (this.shopStatusMs === 0) this.shopStatusMsg = null;
+    if (this.shopHandler.statusMs > 0) {
+      this.shopHandler.statusMs = Math.max(0, this.shopHandler.statusMs - deltaMs);
+      if (this.shopHandler.statusMs === 0) this.shopHandler.statusMsg = null;
     }
     const input = this.input.poll();
 
     // Text search: consume typed characters and backspace.
     const typed = input.typedText ?? "";
     if (typed) {
-      this.shopSearchText += typed;
-      this.shopMenuSelection = 0;
-      this.shopScrollOffset = 0;
+      this.shopHandler.searchText += typed;
+      this.shopHandler.menuSelection = 0;
+      this.shopHandler.scrollOffset = 0;
     }
-    if (input.backspacePulse && this.shopSearchText.length > 0) {
-      this.shopSearchText = this.shopSearchText.slice(0, -1);
-      this.shopMenuSelection = 0;
-      this.shopScrollOffset = 0;
+    if (input.backspacePulse && this.shopHandler.searchText.length > 0) {
+      this.shopHandler.searchText = this.shopHandler.searchText.slice(0, -1);
+      this.shopHandler.menuSelection = 0;
+      this.shopHandler.scrollOffset = 0;
     }
 
     // ESC: clear search first; if search already empty, go back to docked.
     if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
-      if (this.shopSearchText) {
-        this.shopSearchText = "";
-        this.shopMenuSelection = 0;
-        this.shopScrollOffset = 0;
+      if (this.shopHandler.searchText) {
+        this.shopHandler.searchText = "";
+        this.shopHandler.menuSelection = 0;
+        this.shopHandler.scrollOffset = 0;
         this.menuDebounceMs = 150;
         return;
       }
@@ -4165,8 +4544,8 @@ export class GameManager {
     if (shop.entries.length === 0) return;
 
     // Clamp selection into filtered range.
-    if (entries.length > 0 && this.shopMenuSelection >= entries.length) {
-      this.shopMenuSelection = entries.length - 1;
+    if (entries.length > 0 && this.shopHandler.menuSelection >= entries.length) {
+      this.shopHandler.menuSelection = entries.length - 1;
     }
 
     // How many rows fit on screen (matches renderer: COL_H_Y=80, ROWS_START_Y=108).
@@ -4176,19 +4555,19 @@ export class GameManager {
 
     // Navigation
     if (this.input.wasPressed("ArrowUp") && this.menuDebounceMs === 0 && entries.length > 0) {
-      this.shopMenuSelection = (this.shopMenuSelection - 1 + entries.length) % entries.length;
+      this.shopHandler.menuSelection = (this.shopHandler.menuSelection - 1 + entries.length) % entries.length;
       this.menuDebounceMs = 150;
     }
     if (this.input.wasPressed("ArrowDown") && this.menuDebounceMs === 0 && entries.length > 0) {
-      this.shopMenuSelection = (this.shopMenuSelection + 1) % entries.length;
+      this.shopHandler.menuSelection = (this.shopHandler.menuSelection + 1) % entries.length;
       this.menuDebounceMs = 150;
     }
 
     // Keep scroll window tracking the selection.
-    if (this.shopMenuSelection < this.shopScrollOffset) {
-      this.shopScrollOffset = this.shopMenuSelection;
-    } else if (this.shopMenuSelection >= this.shopScrollOffset + SHOP_MAX_VISIBLE) {
-      this.shopScrollOffset = this.shopMenuSelection - SHOP_MAX_VISIBLE + 1;
+    if (this.shopHandler.menuSelection < this.shopHandler.scrollOffset) {
+      this.shopHandler.scrollOffset = this.shopHandler.menuSelection;
+    } else if (this.shopHandler.menuSelection >= this.shopHandler.scrollOffset + SHOP_MAX_VISIBLE) {
+      this.shopHandler.scrollOffset = this.shopHandler.menuSelection - SHOP_MAX_VISIBLE + 1;
     }
 
     // Left-click: select row by pointer y, accounting for scroll offset.
@@ -4196,9 +4575,9 @@ export class GameManager {
     if (click && this.menuDebounceMs === 0) {
       const visIdx = Math.floor((click.y - SHOP_ROWS_START_Y) / SHOP_ROW_H);
       if (visIdx >= 0 && visIdx < SHOP_MAX_VISIBLE) {
-        const absIdx = this.shopScrollOffset + visIdx;
+        const absIdx = this.shopHandler.scrollOffset + visIdx;
         if (absIdx >= 0 && absIdx < entries.length) {
-          this.shopMenuSelection = absIdx;
+          this.shopHandler.menuSelection = absIdx;
           this.menuDebounceMs = 100;
         }
       }
@@ -4207,18 +4586,18 @@ export class GameManager {
     // Buy (Enter key)
     const confirm = this.wasMenuConfirmPressed() && this.menuDebounceMs === 0;
     if (confirm) {
-      const entry = entries[this.shopMenuSelection];
+      const entry = entries[this.shopHandler.menuSelection];
       if (entry && session) {
         const result = this.shopManager.buyModule(locId, entry.moduleDefId, session.solarCredits);
         if (result.ok) {
           session.solarCredits = result.newCredits;
           this.adjustModuleInventory(entry.moduleDefId, +1); // also persists
-          this.shopStatusMsg = `BOUGHT — ${result.price}¢`;
-          this.shopStatusMs = 1200;
+          this.shopHandler.statusMsg = `BOUGHT — ${result.price}¢`;
+          this.shopHandler.statusMs = 1200;
           soundManager.menuConfirm();
         } else {
-          this.shopStatusMsg = result.reason.toUpperCase().replace(/-/g, " ");
-          this.shopStatusMs = 1200;
+          this.shopHandler.statusMsg = result.reason.toUpperCase().replace(/-/g, " ");
+          this.shopHandler.statusMs = 1200;
         }
         this.menuDebounceMs = 200;
       }
@@ -4227,7 +4606,7 @@ export class GameManager {
     // Sell: right-click — sells the currently selected item
     const rClick = input.pointerRightClickPulse ?? null;
     if ((rClick) && this.menuDebounceMs === 0 && session) {
-      const entry = entries[this.shopMenuSelection];
+      const entry = entries[this.shopHandler.menuSelection];
       if (entry) {
         const owned = session.moduleInventory.get(entry.moduleDefId) ?? 0;
         if (owned > 0) {
@@ -4235,12 +4614,12 @@ export class GameManager {
           if (result.ok) {
             session.solarCredits = result.newCredits;
             this.adjustModuleInventory(entry.moduleDefId, -1); // also persists
-            this.shopStatusMsg = `SOLD — +${result.sellPrice}¢`;
-            this.shopStatusMs = 1200;
+            this.shopHandler.statusMsg = `SOLD — +${result.sellPrice}¢`;
+            this.shopHandler.statusMs = 1200;
           }
         } else {
-          this.shopStatusMsg = "NOTHING TO SELL";
-          this.shopStatusMs = 1000;
+          this.shopHandler.statusMsg = "NOTHING TO SELL";
+          this.shopHandler.statusMs = 1000;
         }
         this.menuDebounceMs = 200;
       }
@@ -4248,8 +4627,8 @@ export class GameManager {
   }
 
   private filteredShopEntries(entries: readonly ShopEntry[]): ShopEntry[] {
-    if (!this.shopSearchText) return entries as ShopEntry[];
-    const term = this.shopSearchText.toLowerCase();
+    if (!this.shopHandler.searchText) return entries as ShopEntry[];
+    const term = this.shopHandler.searchText.toLowerCase();
     const defs = SolarModuleRegistry.getModuleMap();
     return (entries as ShopEntry[]).filter(e => {
       const name = defs.get(e.moduleDefId)?.name ?? e.moduleDefId;
@@ -4278,13 +4657,307 @@ export class GameManager {
         price: e.price,
         stock: e.stock,
         owned: session.moduleInventory.get(e.moduleDefId) ?? 0,
-        isSelected: i === this.shopMenuSelection,
+        isSelected: i === this.shopHandler.menuSelection,
       })),
-      selectedIndex: this.shopMenuSelection,
-      scrollOffset: this.shopScrollOffset,
-      searchText: this.shopSearchText,
+      selectedIndex: this.shopHandler.menuSelection,
+      scrollOffset: this.shopHandler.scrollOffset,
+      searchText: this.shopHandler.searchText,
       playerCredits: session.solarCredits,
-      statusMsg: this.shopStatusMsg,
+      statusMsg: this.shopHandler.statusMsg,
+    };
+  }
+
+  // ── Inventory screen ─────────────────────────────────────────────────────
+
+  private static readonly INV_TYPE_ORDER: import("../types/solarShipBuilder").SolarModuleType[] =
+    ["weapon", "external", "internal", "structure", "converter", "factory", "ammo"];
+
+  private static readonly INV_TYPE_LABELS: Partial<Record<string, string>> = {
+    weapon: "WEAPONS", external: "EXTERNAL", internal: "INTERNAL",
+    structure: "STRUCTURE", converter: "CONVERTER", factory: "FACTORY", ammo: "AMMO",
+  };
+
+  private getInventoryItems(bag: Map<string, number>): InventoryDisplayItem[] {
+    const defs = SolarModuleRegistry.getModuleMap();
+    const flat: InventoryDisplayItem[] = [];
+    for (const [defId, qty] of bag.entries()) {
+      if (qty <= 0) continue;
+      const def = defs.get(defId);
+      if (!def) continue;
+      flat.push({ defId, name: def.name, type: def.type, quantity: qty, shopCost: def.shopCost });
+    }
+    const order = GameManager.INV_TYPE_ORDER;
+    flat.sort((a, b) => {
+      const ta = order.indexOf(a.type as import("../types/solarShipBuilder").SolarModuleType);
+      const tb = order.indexOf(b.type as import("../types/solarShipBuilder").SolarModuleType);
+      if (ta !== tb) return (ta < 0 ? 999 : ta) - (tb < 0 ? 999 : tb);
+      return a.name.localeCompare(b.name);
+    });
+    // Insert section-header rows between type groups
+    const result: InventoryDisplayItem[] = [];
+    let lastType = "";
+    for (const item of flat) {
+      if (item.type !== lastType) {
+        const label = GameManager.INV_TYPE_LABELS[item.type] ?? item.type.toUpperCase();
+        result.push({ defId: `__hdr__${item.type}`, name: label, type: item.type, quantity: 0, shopCost: 0, isHeader: true });
+        lastType = item.type;
+      }
+      result.push(item);
+    }
+    return result;
+  }
+
+
+  private getStationHangar(locationId: string): Map<string, number> {
+    const session = this.solarSystem?.getSessionState();
+    if (!session) return new Map();
+    let bag = session.stationHangars.get(locationId);
+    if (!bag) { bag = new Map(); session.stationHangars.set(locationId, bag); }
+    return bag;
+  }
+
+  private buildInventoryContextOptions(): string[] {
+    const session = this.solarSystem?.getSessionState();
+    const isDocked = !!(session?.dockedLocationId);
+    if (!isDocked) return ["Trash"];
+    const panel = this.invHandler.panel;
+    const items = panel === "ship"
+      ? this.getInventoryItems(session?.moduleInventory ?? new Map())
+      : this.getInventoryItems(this.getStationHangar(session?.dockedLocationId ?? ""));
+    const idx = panel === "ship" ? this.invHandler.shipSel : this.invHandler.stationSel;
+    const item = items[idx];
+    if (!item) return ["Trash"];
+    const opts: string[] = [];
+    if (panel === "ship") {
+      opts.push("Move to Station");
+    } else {
+      const cap = this.computeCargoCapacity();
+      const used = this.computeCargoUsed(session?.moduleInventory ?? new Map());
+      opts.push(used < cap ? "Move to Ship" : "Hold Full");
+    }
+    opts.push(`Sell (${item.shopCost.toLocaleString()} ¢)`);
+    opts.push("Trash");
+    return opts;
+  }
+
+  private updateSolarInventory(_deltaMs: number): void {
+    const session = this.solarSystem?.getSessionState();
+    const isDocked = !!(session?.dockedLocationId);
+    const input = this.input;
+
+    if (this.menuDebounceMs > 0) return;
+
+    if (this.invHandler.ctxOpen) {
+      const opts = this.buildInventoryContextOptions();
+      if (input.wasPressed("ArrowUp")) {
+        this.invHandler.ctxSel = (this.invHandler.ctxSel - 1 + opts.length) % opts.length;
+        this.menuDebounceMs = 120;
+      } else if (input.wasPressed("ArrowDown")) {
+        this.invHandler.ctxSel = (this.invHandler.ctxSel + 1) % opts.length;
+        this.menuDebounceMs = 120;
+      } else if (this.wasMenuConfirmPressed()) {
+        const chosen = opts[this.invHandler.ctxSel] ?? "";
+        this.executeInventoryAction(chosen, session);
+        this.invHandler.ctxOpen = false;
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      } else if (this.wasMenuBackPressed()) {
+        this.invHandler.ctxOpen = false;
+        this.menuDebounceMs = 200;
+      }
+      return;
+    }
+
+    const shipItems = this.getInventoryItems(session?.moduleInventory ?? new Map());
+    const stationItems = isDocked
+      ? this.getInventoryItems(this.getStationHangar(session?.dockedLocationId ?? ""))
+      : [];
+    const activeItems = this.invHandler.panel === "ship" ? shipItems : stationItems;
+
+    // Helper: advance selection skipping header rows
+    const skipHeaders = (items: InventoryDisplayItem[], from: number, dir: 1 | -1): number => {
+      let i = from + dir;
+      while (i >= 0 && i < items.length && items[i]?.isHeader) i += dir;
+      if (i < 0 || i >= items.length) return from;
+      return i;
+    };
+    // Clamp selection to a non-header item
+    const clampSel = (items: InventoryDisplayItem[], sel: number): number => {
+      if (items.length === 0) return 0;
+      if (!items[sel]?.isHeader) return sel;
+      // find first non-header
+      const idx = items.findIndex(i => !i.isHeader);
+      return idx < 0 ? 0 : idx;
+    };
+    if (this.invHandler.panel === "ship") {
+      this.invHandler.shipSel = clampSel(shipItems, this.invHandler.shipSel);
+    } else {
+      this.invHandler.stationSel = clampSel(stationItems, this.invHandler.stationSel);
+    }
+
+    const getSel = () => this.invHandler.panel === "ship" ? this.invHandler.shipSel : this.invHandler.stationSel;
+    const setSel = (v: number) => { if (this.invHandler.panel === "ship") this.invHandler.shipSel = v; else this.invHandler.stationSel = v; };
+
+    if (input.wasPressed("ArrowUp")) {
+      setSel(skipHeaders(activeItems, getSel(), -1));
+      this.menuDebounceMs = 120;
+    } else if (input.wasPressed("ArrowDown")) {
+      setSel(skipHeaders(activeItems, getSel(), 1));
+      this.menuDebounceMs = 120;
+    } else if (isDocked && (input.wasPressed("ArrowLeft") || input.wasPressed("ArrowRight") || input.wasPressed("Tab"))) {
+      this.invHandler.panel = this.invHandler.panel === "ship" ? "station" : "ship";
+      this.menuDebounceMs = 150;
+    } else if (this.wasMenuConfirmPressed()) {
+      const sel = getSel();
+      const item = activeItems[sel];
+      if (item && !item.isHeader) {
+        this.invHandler.ctxOpen = true;
+        this.invHandler.ctxSel = 0;
+        this.menuDebounceMs = 150;
+      }
+    } else if (input.wasPressed("KeyS") && isDocked) {
+      // S = transfer selected item to the other side
+      const action = this.invHandler.panel === "ship" ? "Move to Station" : "Move to Ship";
+      this.executeInventoryAction(action, session);
+      this.menuDebounceMs = 150;
+    } else if (input.wasPressed("KeyX")) {
+      // X = sell selected item
+      const sel = getSel();
+      const item = activeItems[sel];
+      if (item && !item.isHeader) {
+        this.executeInventoryAction(`Sell (${item.shopCost.toLocaleString()} ¢)`, session);
+      }
+      this.menuDebounceMs = 150;
+    } else if (input.wasPressed("KeyF") && isDocked) {
+      // F = buy one from station shop
+      this.buyFromShopDirect(session);
+      this.menuDebounceMs = 150;
+    } else if (input.wasPressed("KeyM") && isDocked) {
+      // M = move all equipment (non-ammo) to station
+      this.moveAllEquipmentToStation(session);
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+    } else if (this.wasMenuBackPressed()) {
+      this.state.setScreen(this.invHandler.fromScreen);
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+    }
+  }
+
+  private executeInventoryAction(action: string, session: import("../types/solarsystem").SolarSystemSessionState | undefined): void {
+    if (!session) return;
+    const panel = this.invHandler.panel;
+    const locId = session.dockedLocationId ?? "";
+    const shipBag = session.moduleInventory;
+    const stationBag = locId ? this.getStationHangar(locId) : new Map<string, number>();
+    const sourceBag = panel === "ship" ? shipBag : stationBag;
+    const items = this.getInventoryItems(sourceBag);
+    const sel = panel === "ship" ? this.invHandler.shipSel : this.invHandler.stationSel;
+    const item = items[sel];
+    if (!item || item.isHeader) return;
+
+    if (action === "Move to Station" && locId) {
+      const cur = sourceBag.get(item.defId) ?? 0;
+      if (cur > 0) {
+        if (cur <= 1) sourceBag.delete(item.defId); else sourceBag.set(item.defId, cur - 1);
+        stationBag.set(item.defId, (stationBag.get(item.defId) ?? 0) + 1);
+        if (panel === "ship") this.invHandler.shipSel = Math.min(this.invHandler.shipSel, Math.max(0, this.getInventoryItems(shipBag).length - 1));
+      }
+    } else if (action === "Move to Ship") {
+      const cap = this.computeCargoCapacity();
+      const used = this.computeCargoUsed(shipBag);
+      if (used < cap) {
+        const cur = sourceBag.get(item.defId) ?? 0;
+        if (cur > 0) {
+          if (cur <= 1) sourceBag.delete(item.defId); else sourceBag.set(item.defId, cur - 1);
+          shipBag.set(item.defId, (shipBag.get(item.defId) ?? 0) + 1);
+          if (panel === "station") this.invHandler.stationSel = Math.min(this.invHandler.stationSel, Math.max(0, this.getInventoryItems(stationBag).length - 1));
+        }
+      }
+    } else if (action.startsWith("Sell")) {
+      const cur = sourceBag.get(item.defId) ?? 0;
+      if (cur > 0) {
+        if (cur <= 1) sourceBag.delete(item.defId); else sourceBag.set(item.defId, cur - 1);
+        session.solarCredits += item.shopCost;
+        if (panel === "ship") this.invHandler.shipSel = Math.min(this.invHandler.shipSel, Math.max(0, this.getInventoryItems(shipBag).length - 1));
+        else this.invHandler.stationSel = Math.min(this.invHandler.stationSel, Math.max(0, this.getInventoryItems(stationBag).length - 1));
+      }
+    } else if (action === "Trash") {
+      const cur = sourceBag.get(item.defId) ?? 0;
+      if (cur > 0) {
+        if (cur <= 1) sourceBag.delete(item.defId); else sourceBag.set(item.defId, cur - 1);
+        if (panel === "ship") this.invHandler.shipSel = Math.min(this.invHandler.shipSel, Math.max(0, this.getInventoryItems(shipBag).length - 1));
+        else this.invHandler.stationSel = Math.min(this.invHandler.stationSel, Math.max(0, this.getInventoryItems(stationBag).length - 1));
+      }
+    }
+    this.persistSolarInventory(shipBag, session.solarCredits);
+  }
+
+  private buyFromShopDirect(session: import("../types/solarsystem").SolarSystemSessionState | undefined): void {
+    if (!session) return;
+    const locId = session.dockedLocationId;
+    if (!locId) return;
+    const cap = this.computeCargoCapacity();
+    const used = this.computeCargoUsed(session.moduleInventory);
+    if (used >= cap) return;
+    const items = this.invHandler.panel === "ship"
+      ? this.getInventoryItems(session.moduleInventory)
+      : this.getInventoryItems(this.getStationHangar(locId));
+    const sel = this.invHandler.panel === "ship" ? this.invHandler.shipSel : this.invHandler.stationSel;
+    const item = items[sel];
+    if (!item || item.isHeader) return;
+    const result = this.shopManager.buyModule(locId, item.defId, session.solarCredits);
+    if (!result.ok) return;
+    session.solarCredits = result.newCredits;
+    session.moduleInventory.set(item.defId, (session.moduleInventory.get(item.defId) ?? 0) + 1);
+    this.persistSolarInventory(session.moduleInventory, session.solarCredits);
+  }
+
+  private moveAllEquipmentToStation(session: import("../types/solarsystem").SolarSystemSessionState | undefined): void {
+    if (!session) return;
+    const locId = session.dockedLocationId;
+    if (!locId) return;
+    const shipBag = session.moduleInventory;
+    const stationBag = this.getStationHangar(locId);
+    for (const [defId, qty] of Array.from(shipBag.entries())) {
+      if (qty <= 0) continue;
+      const def = SolarModuleRegistry.getModule(defId);
+      if (!def || def.type === "ammo") continue; // keep ammo on ship
+      stationBag.set(defId, (stationBag.get(defId) ?? 0) + qty);
+      shipBag.delete(defId);
+    }
+    this.invHandler.shipSel = 0;
+    this.persistSolarInventory(shipBag, session.solarCredits);
+  }
+
+  private buildSolarInventorySection(): { inventoryScreen?: InventoryScreenData } {
+    const session = this.solarSystem?.getSessionState();
+    if (!session) return {};
+    const locId = session.dockedLocationId;
+    const isDocked = !!locId;
+    const stationBag = locId ? this.getStationHangar(locId) : new Map<string, number>();
+    const shipItems = this.getInventoryItems(session.moduleInventory);
+    const stationItems = isDocked ? this.getInventoryItems(stationBag) : [];
+
+    const ctxOpts = this.invHandler.ctxOpen ? this.buildInventoryContextOptions() : null;
+
+    return {
+      inventoryScreen: {
+        stationItems,
+        shipItems,
+        activePanel: this.invHandler.panel,
+        stationSel: this.invHandler.stationSel,
+        shipSel: this.invHandler.shipSel,
+        stationScroll: this.invHandler.stationScroll,
+        shipScroll: this.invHandler.shipScroll,
+        contextMenu: ctxOpts
+          ? { options: ctxOpts, selection: this.invHandler.ctxSel }
+          : null,
+        isDocked,
+        locationName: locId
+          ? (session.currentSystem.locations.find(l => l.id === locId)?.name ?? locId)
+          : "",
+        playerCredits: session.solarCredits,
+        shipCargoUsed: this.computeCargoUsed(session.moduleInventory),
+        shipCargoCapacity: this.computeCargoCapacity(),
+      },
     };
   }
 
@@ -5045,6 +5718,7 @@ export class GameManager {
       turretCooldownMs: tmpl.turretCooldown,
       turretWeaponIdx: tmpl.turretWeaponIdx,
       lastTurretFireMs: 0,
+      turretAimAngleDeg: 0,
       sizeClass: tmpl.sizeClass,
       blueprintId: tmpl.blueprintId,
     };
@@ -5159,7 +5833,8 @@ export class GameManager {
       solarSystem:
         (state.screen === "solar-system" || state.screen === "solar-system-paused" ||
          state.screen === "docked" || state.screen === "solar-npc-talk" ||
-         state.screen === "solar-missions" || state.screen === "solar-mission-detail")
+         state.screen === "solar-missions" || state.screen === "solar-mission-detail" ||
+         state.screen === "solar-inventory")
           ? this.buildSolarSystemExtras()
           : null,
       solarShipBuilder: state.screen === "solar-shipyard"
@@ -5168,6 +5843,7 @@ export class GameManager {
             this.solarSystem?.getSessionState().solarCredits ?? 0,
             this.getShipyardShopEntries(),
             this.getSavedBlueprintSummaries(),
+            this.getDestroyedPlacedIds(),
           )
         : null,
       solarShop: state.screen === "solar-shop" ? this.buildShopRenderData() : null,
@@ -5182,6 +5858,132 @@ export class GameManager {
     const shop = this.shopManager.getShop(locId);
     if (!shop) return [];
     return shop.entries.map((e) => ({ moduleDefId: e.moduleDefId, stock: e.stock, price: e.price }));
+  }
+
+  private getDestroyedPlacedIds(): ReadonlySet<string> | undefined {
+    if (this.playerModuleHp.length === 0) return undefined;
+    const destroyed = this.playerModuleHp.filter(e => e.isDestroyed).map(e => e.placedId);
+    return destroyed.length > 0 ? new Set(destroyed) : undefined;
+  }
+
+  /** Auto-repair all destroyed modules: free from inventory, then buy from shop. */
+  private repairAllModules(): void {
+    const session = this.solarSystem?.getSessionState();
+    if (!session || !this.solarActiveBlueprintId) return;
+    const bp = this.solarSavedBlueprints.get(this.solarActiveBlueprintId);
+    if (!bp) return;
+
+    const destroyed = this.playerModuleHp.filter(e => e.isDestroyed);
+    if (destroyed.length === 0) return;
+
+    const shopMap = new Map(this.getShipyardShopEntries().map(e => [e.moduleDefId, e]));
+    const invSnapshot = new Map(session.moduleInventory);
+
+    // First pass: verify all repairable and compute cost
+    let totalCost = 0;
+    for (const entry of destroyed) {
+      const placed = bp.modules.find(m => m.placedId === entry.placedId);
+      if (!placed) continue;
+      const defId = placed.moduleDefId;
+      const owned = invSnapshot.get(defId) ?? 0;
+      if (owned > 0) {
+        invSnapshot.set(defId, owned - 1);
+      } else {
+        const shopEntry = shopMap.get(defId);
+        if (!shopEntry || shopEntry.stock <= 0) {
+          this.solarShipBuilderMgr.setStatus("MISSING PARTS — CHECK SHOP");
+          return;
+        }
+        totalCost += shopEntry.price;
+      }
+    }
+
+    if (totalCost > session.solarCredits) {
+      this.solarShipBuilderMgr.setStatus(`NEED ${totalCost.toLocaleString()} ¢`);
+      return;
+    }
+
+    // Second pass: execute repair
+    const invDeltas = new Map<string, number>();
+    for (const entry of destroyed) {
+      const placed = bp.modules.find(m => m.placedId === entry.placedId);
+      if (!placed) continue;
+      const defId = placed.moduleDefId;
+      const currentOwned = (session.moduleInventory.get(defId) ?? 0) + (invDeltas.get(defId) ?? 0);
+      if (currentOwned > 0) {
+        invDeltas.set(defId, (invDeltas.get(defId) ?? 0) - 1);
+      } else {
+        session.solarCredits -= shopMap.get(defId)!.price;
+      }
+    }
+
+    for (const [defId, delta] of invDeltas) {
+      this.adjustModuleInventory(defId, delta);
+    }
+
+    // Reset HP for all destroyed entries back to full
+    this.playerModuleHp = this.playerModuleHp.map(e =>
+      e.isDestroyed ? { ...e, hp: e.maxHp, isDestroyed: false } : e,
+    );
+
+    // Recompute effective stats now that all modules are live
+    this.solarPlayerBlueprintCache = null;
+    this.applyActiveSolarBlueprint();
+    this.persistSolarInventory(session.moduleInventory, session.solarCredits);
+    this.persistShipHpState();
+    this.solarShipBuilderMgr.setStatus("ALL MODULES REPAIRED");
+  }
+
+  /** True when all engine modules on the active blueprint are destroyed. */
+  private isPlayerStranded(): boolean {
+    if (this.playerModuleHp.length === 0) return false;
+    const bp = this.solarActiveBlueprintId
+      ? this.solarSavedBlueprints.get(this.solarActiveBlueprintId)
+      : null;
+    if (!bp) return false;
+    const defs = SolarModuleRegistry.getModuleMap();
+    return !ModuleHpSystem.hasEngine(bp, this.playerModuleHp, defs);
+  }
+
+  /** Dispatch a rescue ship from the nearest friendly station. */
+  private callRescue(): void {
+    if (this.solarRescuePending || !this.solarSystem) return;
+    const session = this.solarSystem.getSessionState();
+    const playerPos = session.playerPosition;
+
+    // Find nearest friendly (terran-federation) location in this system
+    let nearestLocId: string | null = null;
+    let nearestWorldPos: { x: number; y: number } | null = null;
+    let nearestDist = Infinity;
+    for (const loc of session.currentSystem.locations) {
+      if (loc.controllingFaction !== "terran-federation") continue;
+      const wp = this.solarSystem.getLocationWorldPosition(loc);
+      const d = Math.hypot(wp.x - playerPos.x, wp.y - playerPos.y);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestLocId = loc.id;
+        nearestWorldPos = wp;
+      }
+    }
+    if (!nearestLocId || !nearestWorldPos) return;
+
+    const rescueId = `rescue-${this.solarPlayerNextId++}`;
+    this.solarFriendlyShips.push({
+      id: rescueId,
+      position: { ...nearestWorldPos },
+      velocity: { x: 0, y: 0 },
+      heading: 0,
+      health: 200,
+      maxHealth: 200,
+      weaponCooldownMs: 0,
+      bravery: 1.0,
+      retreating: false,
+      role: "rescue",
+      rescueStationPos: nearestWorldPos,
+      rescueLocationId: nearestLocId,
+      rescueTowing: false,
+    });
+    this.solarRescuePending = true;
   }
 
   /**
@@ -5328,11 +6130,15 @@ export class GameManager {
           // Re-init module HP when the player equips a different blueprint
           if (this.playerModuleHpBlueprintId !== this.solarActiveBlueprintId) {
             const defs = SolarModuleRegistry.getModuleMap();
-            this.playerModuleHp = ModuleHpSystem.initModuleHp(activeBp, defs);
+            const saved = this.solarBlueprintStore.getShipHpState(this.solarActiveBlueprintId);
+            this.playerModuleHp = (saved && saved.length === activeBp.modules.length)
+              ? saved
+              : ModuleHpSystem.initModuleHp(activeBp, defs);
             this.playerEffectiveStats = ModuleHpSystem.computeEffectiveStats(
               activeBp, this.playerModuleHp, defs, this.solarPlayerScannerRangeKm,
             );
             this.playerModuleHpBlueprintId = this.solarActiveBlueprintId;
+            this.updatePlayerShipConfig();
           }
         }
         playerBlueprintModules = this.solarPlayerBlueprintCache.modules;
@@ -5520,6 +6326,7 @@ export class GameManager {
       ...(this.buildNpcTalkSection()),
       ...(this.buildMissionListSection()),
       ...(this.buildMissionDetailSection()),
+      ...(this.buildSolarInventorySection()),
       virtualControls: this.buildVirtualControlsState(),
       lockedTargets: Array.from(this.solarLockedIds)
         .map(id => this.solarEnemyShips.find(s => s.id === id))
@@ -5533,12 +6340,17 @@ export class GameManager {
         const label = z >= 10 ? `${Math.round(z)}x` : z >= 1 ? `${z.toFixed(1)}x` : `${z.toFixed(2)}x`;
         return { fraction: Math.max(0, Math.min(1, frac)), label };
       })(),
+      ...(this.isPlayerStranded() ? { playerStranded: true } : {}),
+      ...(this.solarRescuePending ? { rescuePending: true } : {}),
+      ...(this.solarWeaponStagger ? { weaponStaggerActive: true } : {}),
       friendlyShips: this.solarFriendlyShips.map(s => ({
         id: s.id,
         position: s.position,
         heading: s.heading,
         health: s.health,
         maxHealth: s.maxHealth,
+        isRescue: s.role === "rescue",
+        rescueTowing: s.rescueTowing,
       })),
       playerProjectiles: this.solarPlayerProjectiles.map(p => {
         const spd = Math.hypot(p.velocity.x, p.velocity.y) || 1;
@@ -5592,7 +6404,7 @@ export class GameManager {
   }
 
   private buildNpcTalkSection(): { npcTalk?: { npc: import("./data/NPCRegistry").NPCDefinition; menuItems: readonly string[]; menuSelection: number } } {
-    const npcId = this.activeTalkNpcId;
+    const npcId = this.npcHandler.activeTalkNpcId;
     if (!npcId) return {};
     const npc = NPCRegistry.getNPC(npcId);
     if (!npc) return {};
@@ -5600,7 +6412,7 @@ export class GameManager {
   }
 
   private buildMissionListSection(): { missionList?: { npc: import("./data/NPCRegistry").NPCDefinition; missions: Array<{ spec: import("../types/missions").MissionSpec; status: "available" | "active" | "completed" }>; menuSelection: number } } {
-    const npcId = this.activeTalkNpcId;
+    const npcId = this.npcHandler.activeTalkNpcId;
     if (!npcId) return {};
     const npc = NPCRegistry.getNPC(npcId);
     if (!npc) return {};
@@ -5609,7 +6421,7 @@ export class GameManager {
   }
 
   private buildMissionDetailSection(): { missionDetail?: { spec: import("../types/missions").MissionSpec; menuSelection: number } } {
-    const missionId = this.activeMissionDetailId;
+    const missionId = this.npcHandler.activeMissionDetailId;
     if (!missionId) return {};
     const spec = this.getMissionSpec(missionId);
     if (!spec) return {};

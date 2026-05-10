@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>R-Wipe Data Browser</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0a0a14;
+      --surface:  #13131f;
+      --border:   #2a2a3e;
+      --accent:   #4af;
+      --accent2:  #a4f;
+      --text:     #d0d4e8;
+      --muted:    #6b6f8a;
+      --row-alt:  #11111c;
+      --hover:    #1e1e30;
+      --good:     #4f8;
+      --warn:     #fa4;
+      --bad:      #f44;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, monospace;
+      font-size: 13px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────── */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px 0;
+      flex-shrink: 0;
+    }
+
+    header h1 {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--accent);
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 2px;
+      flex-wrap: wrap;
+    }
+
+    .tab {
+      padding: 6px 14px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      border-radius: 4px 4px 0 0;
+      font-size: 12px;
+      font-weight: 500;
+      transition: color 0.15s, background 0.15s;
+      white-space: nowrap;
+    }
+
+    .tab:hover { color: var(--text); background: var(--hover); }
+    .tab.active { color: var(--accent); background: var(--bg); border-bottom: 2px solid var(--accent); }
+
+    /* ── Toolbar ─────────────────────────────────────────────────── */
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+
+    .toolbar input[type="text"] {
+      flex: 1;
+      min-width: 180px;
+      max-width: 300px;
+      padding: 5px 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 12px;
+      outline: none;
+    }
+    .toolbar input[type="text"]:focus { border-color: var(--accent); }
+    .toolbar input[type="text"]::placeholder { color: var(--muted); }
+
+    .toolbar select {
+      padding: 5px 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 12px;
+      outline: none;
+      cursor: pointer;
+    }
+    .toolbar select:focus { border-color: var(--accent); }
+
+    .count-badge {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    /* ── Table ───────────────────────────────────────────────────── */
+    .table-wrap {
+      flex: 1;
+      overflow: auto;
+      padding: 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 7px 10px;
+      text-align: left;
+      font-weight: 600;
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      user-select: none;
+      cursor: pointer;
+    }
+    thead th:hover { color: var(--text); }
+    thead th.sorted { color: var(--accent); }
+    thead th .sort-arrow { margin-left: 4px; opacity: 0.6; }
+
+    tbody tr:nth-child(even) { background: var(--row-alt); }
+    tbody tr:hover { background: var(--hover); }
+
+    td {
+      padding: 5px 10px;
+      border-bottom: 1px solid rgba(42,42,62,0.4);
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    td.wrap { white-space: normal; max-width: 240px; }
+    td.mono { font-family: monospace; font-size: 11px; color: var(--muted); }
+
+    /* ── Badges ──────────────────────────────────────────────────── */
+    .badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+    }
+
+    .badge-weapon   { background: #3a1a1a; color: #f86; }
+    .badge-external { background: #1a2a3a; color: #6af; }
+    .badge-internal { background: #1a3a1a; color: #6f8; }
+    .badge-core     { background: #2a2a1a; color: #fa6; }
+    .badge-structure{ background: #2a1a3a; color: #a6f; }
+    .badge-converter{ background: #1a3a3a; color: #6ff; }
+    .badge-factory  { background: #3a2a1a; color: #fa8; }
+
+    .badge-earth    { background: #152540; color: #5af; }
+    .badge-mars     { background: #3a1510; color: #f75; }
+    .badge-pirate   { background: #1f1f1f; color: #aaa; }
+    .badge-mercenary{ background: #2a2010; color: #cb8; }
+    .badge-terran-federation { background: #152540; color: #5af; }
+    .badge-void-merchants    { background: #1a1a30; color: #88f; }
+    .badge-scavenger-clans   { background: #2a1510; color: #f87; }
+    .badge-nova-rebels       { background: #2a1020; color: #f5a; }
+    .badge-xeno-collective   { background: #102a10; color: #5f8; }
+
+    .badge-easy   { background: #153a15; color: #6f8; }
+    .badge-normal { background: #252515; color: #cc8; }
+    .badge-hard   { background: #3a1515; color: #f76; }
+
+    .badge-courier { background: #152535; color: #6bf; }
+    .badge-trade   { background: #25350a; color: #af5; }
+    .badge-kill    { background: #350a0a; color: #f55; }
+    .badge-explore { background: #250535; color: #b6f; }
+    .badge-away    { background: #202020; color: #aaa; }
+
+    .class-pip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 700;
+      background: #1a1a2e;
+      border: 1px solid var(--border);
+    }
+
+    .stat-row { color: var(--muted); font-size: 11px; }
+    .stat-val { color: var(--text); }
+    .stat-sep { margin: 0 3px; opacity: 0.3; }
+
+    .color-swatch {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      border: 1px solid rgba(255,255,255,0.15);
+      vertical-align: middle;
+      margin-right: 5px;
+    }
+
+    .empty-state {
+      padding: 48px;
+      text-align: center;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>⬡ R-Wipe Data Browser</h1>
+    <nav class="tabs" id="tabs"></nav>
+  </header>
+  <div class="toolbar" id="toolbar"></div>
+  <div class="table-wrap" id="table-wrap"></div>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

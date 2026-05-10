@@ -87,6 +87,20 @@ export class BlueprintEngine {
     if (trimmed) this.blueprint = { ...this.blueprint, name: trimmed };
   }
 
+  /** Rotate the core polygon by deltaRad, snapping to 5° increments and normalising to [0, 2π). */
+  rotateCore(deltaRad: number): void {
+    const TWO_PI = 2 * Math.PI;
+    const SNAP = Math.PI / 36; // 5°
+    const current = this.blueprint.coreRotationRad ?? 0;
+    const snapped = Math.round((current + deltaRad) / SNAP) * SNAP;
+    const normalized = ((snapped % TWO_PI) + TWO_PI) % TWO_PI;
+    this.blueprint = { ...this.blueprint, coreRotationRad: normalized };
+  }
+
+  getCoreRotationRad(): number {
+    return this.blueprint.coreRotationRad ?? 0;
+  }
+
   getBudget(): BudgetState {
     return this.computeBudget();
   }

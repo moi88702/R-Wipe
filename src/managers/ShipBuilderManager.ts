@@ -397,6 +397,15 @@ export class ShipBuilderManager {
     return this.engine?.getBlueprint().coreSideCount ?? 6;
   }
 
+  /** Rotate the core polygon by deltaRad (5° snap, normalised to [0, 2π)). */
+  rotateCore(deltaRad: number): void {
+    this.engine?.rotateCore(deltaRad);
+  }
+
+  getCoreRotationRad(): number {
+    return this.engine?.getCoreRotationRad() ?? 0;
+  }
+
   renameBlueprint(newName: string): void {
     this.engine?.rename(newName);
     // Invalidate the status so the new name is visible immediately
@@ -408,6 +417,7 @@ export class ShipBuilderManager {
     playerCredits: number,
     shopEntries?: ReadonlyArray<{ moduleDefId: string; stock: number; price: number }>,
     savedBlueprints?: ReadonlyArray<SavedBlueprintSummary>,
+    destroyedPlacedIds?: ReadonlySet<string>,
   ): SolarShipBuilderRenderData | null {
     if (!this.engine) return null;
     const blueprint = this.engine.getBlueprint();
@@ -416,6 +426,7 @@ export class ShipBuilderManager {
       blueprint.modules,
       defs,
       blueprint.coreSideCount,
+      blueprint.coreRotationRad ?? 0,
     );
 
     const modules = blueprint.modules.flatMap((m) => {
@@ -428,8 +439,33 @@ export class ShipBuilderManager {
             geom.rotationRad, m.ownSideIndex ?? undefined, def.shape.sides,
           )
         : geom.vertices;
-      return [{ placedId: m.placedId, vertices, worldX: geom.worldX, worldY: geom.worldY, moduleType: def.type, partKind: def.partKind, grade: def.sizeClass }];
+      const isDestroyed = destroyedPlacedIds?.has(m.placedId) ?? false;
+      return [{ placedId: m.placedId, vertices, worldX: geom.worldX, worldY: geom.worldY, moduleType: def.type, partKind: def.partKind, grade: def.sizeClass, isDestroyed }];
     });
+
+    // Compute repair cost for destroyed modules
+    const destroyedCount = destroyedPlacedIds?.size ?? 0;
+    let repairAllCost: number | null = 0;
+    if (destroyedCount > 0 && destroyedPlacedIds) {
+      const shopMap = new Map(shopEntries?.map(e => [e.moduleDefId, e]) ?? []);
+      const invSnapshot = new Map(inventory);
+      for (const placedId of destroyedPlacedIds) {
+        const placed = blueprint.modules.find(m => m.placedId === placedId);
+        if (!placed) continue;
+        const defId = placed.moduleDefId;
+        const owned = invSnapshot.get(defId) ?? 0;
+        if (owned > 0) {
+          invSnapshot.set(defId, owned - 1); // virtually consume from inventory
+        } else {
+          const shopEntry = shopMap.get(defId);
+          if (!shopEntry || shopEntry.stock <= 0) {
+            repairAllCost = null;
+            break;
+          }
+          repairAllCost = (repairAllCost ?? 0) + shopEntry.price;
+        }
+      }
+    }
 
     const openSnaps = GeometryEngine.getOpenSnapPoints(geometries, blueprint.modules, defs);
     const selectedDef = this.selectedDefId ? defs.get(this.selectedDefId) : undefined;
@@ -473,6 +509,7 @@ export class ShipBuilderManager {
       contextMenu: this.contextMenu,
       playerCredits,
       coreSideCount: blueprint.coreSideCount,
+      coreRotationDeg: Math.round(((blueprint.coreRotationRad ?? 0) * 180) / Math.PI),
       savedBlueprints: savedBlueprints ?? [],
       corePicker: this.corePicker ? this.getFilteredCorePicker() : null,
       corePickerScrollOffset: this.corePickerScrollOffset,
@@ -480,6 +517,8 @@ export class ShipBuilderManager {
       corePickerShowAll: this.corePickerShowAll,
       renameMode: this.renameMode,
       renameBuf: this.renameBuf,
+      destroyedCount,
+      repairAllCost,
     };
   }
 
@@ -534,7 +573,7 @@ export class ShipBuilderManager {
     if (!this.engine) return null;
     const blueprint = this.engine.getBlueprint();
     const defs = SolarModuleRegistry.getModuleMap();
-    const geometries = GeometryEngine.deriveAllGeometries(blueprint.modules, defs, blueprint.coreSideCount);
+    const geometries = GeometryEngine.deriveAllGeometries(blueprint.modules, defs, blueprint.coreSideCount, blueprint.coreRotationRad ?? 0);
     const openSnaps = GeometryEngine.getOpenSnapPoints(geometries, blueprint.modules, defs);
     const world = this.screenToWorld(this.cursorX, this.cursorY);
     return GeometryEngine.findNearestSnap(world.x, world.y, def, openSnaps, blueprint.coreSideCount);
@@ -544,7 +583,7 @@ export class ShipBuilderManager {
     if (!this.engine) return null;
     const blueprint = this.engine.getBlueprint();
     const defs = SolarModuleRegistry.getModuleMap();
-    const geometries = GeometryEngine.deriveAllGeometries(blueprint.modules, defs, blueprint.coreSideCount);
+    const geometries = GeometryEngine.deriveAllGeometries(blueprint.modules, defs, blueprint.coreSideCount, blueprint.coreRotationRad ?? 0);
     let nearest: string | null = null;
     let nearestDist = Infinity;
     for (const [placedId, geom] of geometries) {

@@ -34,6 +34,8 @@ export interface ShipEffectiveStats {
   readonly repairRatePerSec: number;
   /** Power/sec consumed when repairing. */
   readonly repairPowerCost: number;
+  /** Additive fractional bonus to base turn rate (0 = none). Hook for future gyro/RCS modules. */
+  readonly turnRateBoostFrac: number;
 }
 
 // ── Module HP system ──────────────────────────────────────────────────────────
@@ -137,6 +139,7 @@ export class ModuleHpSystem {
       damageReduction: ModuleHpSystem.stackedDamageReduction(armorValues),
       repairRatePerSec,
       repairPowerCost,
+      turnRateBoostFrac: 0, // reserved for future gyro/RCS modules
     };
   }
 

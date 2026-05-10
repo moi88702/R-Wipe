@@ -696,7 +696,8 @@ export type ScreenType =
   | "solar-my-ships"
   | "solar-npc-talk"
   | "solar-missions"
-  | "solar-mission-detail";
+  | "solar-mission-detail"
+  | "solar-inventory";
 
 /**
  * Dev-only cheat payload parsed from URL query params. Every field is optional

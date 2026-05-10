@@ -1,6 +1,7 @@
 import type { PlacedSolarModule, SolarShipBlueprint } from "../types/solarShipBuilder";
 import { VersionedSlot, defaultStorage } from "../services/LocalStorageService";
 import type { StorageBackend } from "../services/LocalStorageService";
+import type { ModuleHpEntry } from "../systems/ModuleHpSystem";
 
 export const SOLAR_BLUEPRINT_STORAGE_KEY = "rwipe.solar-ships.v1";
 
@@ -11,6 +12,10 @@ interface SolarBlueprintPayload {
   inventory: Record<string, number>;
   /** Persisted player credits. */
   credits?: number;
+  /** Per-ship damage state: blueprintId → ModuleHpEntry[]. */
+  shipHpStates?: Record<string, ModuleHpEntry[]>;
+  /** Per-station item storage: locationId → (moduleDefId → qty). */
+  stationHangars?: Record<string, Record<string, number>>;
 }
 
 function isPlacedSolarModule(raw: unknown): raw is PlacedSolarModule {
@@ -59,6 +64,8 @@ export class SolarBlueprintStore {
   private _activeId: string | null = null;
   private _inventory: Record<string, number> = {};
   private _credits: number | null = null;
+  private _shipHpStates: Record<string, ModuleHpEntry[]> = {};
+  private _stationHangars: Record<string, Record<string, number>> = {};
   private readonly slot: VersionedSlot<SolarBlueprintPayload>;
 
   constructor(storage?: StorageBackend | null) {
@@ -107,6 +114,33 @@ export class SolarBlueprintStore {
     this._credits = credits;
   }
 
+  /** Returns saved HP state for a blueprint, or null if none recorded. */
+  getShipHpState(blueprintId: string): ModuleHpEntry[] | null {
+    return this._shipHpStates[blueprintId] ?? null;
+  }
+
+  /** Records HP state for a blueprint (call save() to persist). */
+  setShipHpState(blueprintId: string, entries: ModuleHpEntry[]): void {
+    this._shipHpStates = { ...this._shipHpStates, [blueprintId]: entries };
+  }
+
+  /** Removes HP state for a deleted blueprint. */
+  removeShipHpState(blueprintId: string): void {
+    const next = { ...this._shipHpStates };
+    delete next[blueprintId];
+    this._shipHpStates = next;
+  }
+
+  /** Returns all persisted station hangars. */
+  getStationHangars(): Readonly<Record<string, Record<string, number>>> {
+    return this._stationHangars;
+  }
+
+  /** Overwrites all station hangars (call save() to persist). */
+  setStationHangars(hangars: Record<string, Record<string, number>>): void {
+    this._stationHangars = { ...hangars };
+  }
+
   upsert(bp: SolarShipBlueprint): void {
     const idx = this._blueprints.findIndex((b) => b.id === bp.id);
     if (idx < 0) {
@@ -124,6 +158,7 @@ export class SolarBlueprintStore {
     if (this._activeId === id) {
       this._activeId = this._blueprints[0]?.id ?? null;
     }
+    this.removeShipHpState(id);
     return this._blueprints.length < before;
   }
 
@@ -134,6 +169,8 @@ export class SolarBlueprintStore {
       inventory: this._inventory,
     };
     if (this._credits !== null) payload.credits = this._credits;
+    if (Object.keys(this._shipHpStates).length > 0) payload.shipHpStates = this._shipHpStates;
+    if (Object.keys(this._stationHangars).length > 0) payload.stationHangars = this._stationHangars;
     this.slot.save(payload);
   }
 
@@ -144,6 +181,8 @@ export class SolarBlueprintStore {
     this._activeId = raw.activeId;
     this._inventory = raw.inventory ?? {};
     this._credits = raw.credits ?? null;
+    this._shipHpStates = raw.shipHpStates ?? {};
+    this._stationHangars = raw.stationHangars ?? {};
     return true;
   }
 
@@ -156,5 +195,7 @@ export class SolarBlueprintStore {
     this._activeId = null;
     this._inventory = {};
     this._credits = null;
+    this._shipHpStates = {};
+    this._stationHangars = {};
   }
 }
