@@ -478,6 +478,7 @@ export interface SolarSystemRenderData {
   readonly cargoUsed?: number;
   /** Crew roster — only populated when screen === "solar-crew". */
   readonly solarCrew?: {
+    readonly mind: { readonly level: number; readonly xp: number };
     readonly crew: ReadonlyArray<{
       readonly id: string;
       readonly name: string;
@@ -6643,7 +6644,7 @@ export class GameRenderer {
 
   private drawSolarCrew(data: NonNullable<SolarSystemRenderData["solarCrew"]>): void {
     if (data.detail) {
-      this.drawSolarCrewDetail(data.detail);
+      this.drawSolarCrewDetail(data.detail, data.mind);
       return;
     }
 
@@ -6664,11 +6665,11 @@ export class GameRenderer {
     const CARD_PAD = 4;
     const LIST_Y = 70;
     const VISIBLE_CARDS = Math.floor((H - LIST_Y - 30) / (CARD_H + CARD_PAD));
-    const { crew, selection, scrollOffset } = data;
+    const { crew, selection, scrollOffset, mind } = data;
 
-    // labels needed: hint + per-card (name, personality, lean, traits, 6 skill labels)
+    // labels needed: hint + mind header + per-card (name, personality, lean, traits, 6 skill labels)
     const LABELS_PER_CARD = 10;
-    this.ensureTextPool(this.crewLabels, 1 + VISIBLE_CARDS * LABELS_PER_CARD, 14);
+    this.ensureTextPool(this.crewLabels, 2 + VISIBLE_CARDS * LABELS_PER_CARD, 14);
     let li = 0;
 
     const set = (t: Text, txt: string, x: number, y: number, col: number, size: number, ax = 0) => {
@@ -6677,6 +6678,8 @@ export class GameRenderer {
       t.anchor.set(ax, 0.5); t.visible = true;
     };
 
+    // Mind level in title bar (right-aligned)
+    set(this.crewLabels[li++]!, `THE MIND  ·  Level ${mind.level}`, W - 16, 30, 0x44aacc, 12, 1);
     // Hint
     set(this.crewLabels[li++]!, "↑↓ navigate   ↵ profile   ESC back", 16, H - 16, 0x446688, 11);
 
@@ -6753,7 +6756,10 @@ export class GameRenderer {
     }
   }
 
-  private drawSolarCrewDetail(d: NonNullable<NonNullable<SolarSystemRenderData["solarCrew"]>["detail"]>): void {
+  private drawSolarCrewDetail(
+    d: NonNullable<NonNullable<SolarSystemRenderData["solarCrew"]>["detail"]>,
+    mind: { readonly level: number; readonly xp: number },
+  ): void {
     const g = this.solarSystemGfx;
     g.clear();
     const W = this.width;
@@ -6784,10 +6790,12 @@ export class GameRenderer {
     this.solarBuilderTitleText.style.fill = nameCol;
     this.solarBuilderTitleText.visible = true;
 
-    // Personality + lean label (right-aligned)
+    // Mind level (top right)
+    set(this.crewLabels[li++]!, `THE MIND  ·  Level ${mind.level}`, W - 24, 14, 0x44aacc, 11, 1);
+    // Personality + lean label (right-aligned below)
     const leanLabel = d.adoptionLean >= 30 ? "Progressive"
       : d.adoptionLean <= -30 ? "Traditionalist" : "Neutral";
-    set(this.crewLabels[li++]!, `${d.personalityType.toUpperCase()}  ·  ${leanLabel}`, W - 24, 20, 0x5588aa, 13, 1);
+    set(this.crewLabels[li++]!, `${d.personalityType.toUpperCase()}  ·  ${leanLabel}`, W - 24, 30, 0x5588aa, 12, 1);
 
     // Adoption lean bar
     const BAR_X = 24; const BAR_Y = 52; const BAR_W = W - 48; const BAR_H = 8;

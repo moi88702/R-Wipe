@@ -531,7 +531,10 @@ export class GameManager {
   private readonly crewHandler = new SolarCrewHandler();
 
   // RPG layer — async-initialised via initRPG() called from main.ts
+  private rpgDb: import("../rpg/RPGDatabase").RPGDatabase | null = null;
   private crewSvc: CrewService | null = null;
+  private mindLevel = 1;
+  private mindXp = 0;
   private crewCache: Array<{
     bot: CrewBot;
     traitIds: string[];
@@ -631,11 +634,16 @@ export class GameManager {
     try {
       const { createGameDatabase } = await import("../rpg/CrewService");
       const g = await createGameDatabase();
+      this.rpgDb = g.rpg;
       this.crewSvc = g.crew;
 
       let pilot = await g.rpg.getPilot();
       if (!pilot) {
-        await g.rpg.createPilot("Mind", "earth");
+        pilot = await g.rpg.createPilot("Mind", "earth");
+      }
+      if (pilot) {
+        this.mindLevel = pilot.level;
+        this.mindXp = pilot.xp;
       }
       const existing = await g.crew.getLivingCrew(DEFAULT_PILOT_ID);
       if (existing.length === 0) {
@@ -2412,6 +2420,10 @@ export class GameManager {
         maxAgeMs: 900,
         scale: 1 + ship.sizeClass * 0.4,
       });
+      // Mind XP: player kills award XP scaled by ship size.
+      if (attackerFaction === "player") {
+        this.awardMindXp(5 + ship.sizeClass * 5);
+      }
       // Drop loot proportional to ship size class.
       this.spawnDrops(ship.position, Math.max(1, Math.floor(ship.sizeClass / 2)));
       this.solarLockedIds.delete(ship.id);
@@ -4468,6 +4480,14 @@ export class GameManager {
     this.solarBlueprintStore.save();
   }
 
+  /** Award XP to the Mind (fire-and-forget — updates sync cache on resolve). */
+  private awardMindXp(amount: number): void {
+    if (!this.rpgDb || this.e2eMode) return;
+    void this.rpgDb.awardXp(amount).then(profile => {
+      if (profile) { this.mindLevel = profile.level; this.mindXp = profile.xp; }
+    });
+  }
+
   /** Persist the active ship's current module HP state. */
   private persistShipHpState(): void {
     if (!this.solarActiveBlueprintId || this.e2eMode) return;
@@ -4585,6 +4605,7 @@ export class GameManager {
       }
     }
     return {
+      mind: { level: this.mindLevel, xp: this.mindXp },
       crew: this.crewCache.map(entry => ({
         id: entry.bot.id,
         name: entry.bot.name,
