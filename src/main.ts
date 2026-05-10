@@ -56,6 +56,9 @@ async function init(): Promise<void> {
     height: CANVAS_HEIGHT,
   });
 
+  // Initialise RPG database (IndexedDB) in the background — no await needed.
+  void game.initRPG();
+
   // Drag-to-move, hold-to-fire, double-tap-bomb, two-finger-pause.
   game.enableTouchControls(app.canvas);
   // Mouse pointer for menu screens (shipyard, starmap).

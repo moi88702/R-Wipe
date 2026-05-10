@@ -56,6 +56,11 @@ import { SolarInventoryHandler } from "./handlers/SolarInventoryHandler";
 import { SolarShopHandler } from "./handlers/SolarShopHandler";
 import { SolarMyShipsHandler } from "./handlers/SolarMyShipsHandler";
 import { NpcTalkMissionHandler } from "./handlers/NpcTalkMissionHandler";
+import { SolarCrewHandler } from "./handlers/SolarCrewHandler";
+import type { CrewService } from "../rpg/CrewService";
+import { DEFAULT_PILOT_ID } from "../rpg/schema";
+import type { CrewBot, BotSkillFamily } from "../rpg/bot-schema";
+import type { BotTraitRecord } from "../rpg/bot-schema";
 import type { SolarShipBlueprint, SavedBlueprintSummary, ShipTier } from "../types/solarShipBuilder";
 import type { ShipControlConfig } from "./solarsystem/ShipControlManager";
 import { DEFAULT_SHIP_CONTROL_CONFIG } from "../managers/SolarSystemSessionManager";
@@ -520,6 +525,15 @@ export class GameManager {
   private readonly missionLog = new MissionLogManager();
   private readonly npcHandler = new NpcTalkMissionHandler();
   private readonly invHandler = new SolarInventoryHandler();
+  private readonly crewHandler = new SolarCrewHandler();
+
+  // RPG layer — async-initialised via initRPG() called from main.ts
+  private crewSvc: CrewService | null = null;
+  private crewCache: Array<{
+    bot: CrewBot;
+    traitIds: string[];
+    skills: Record<BotSkillFamily, number>;
+  }> = [];
 
   private safeTimerMs = 0;
   private menuDebounceMs = 0;
@@ -604,6 +618,46 @@ export class GameManager {
     // Seed a sensible starter blueprint the first time campaign is opened
     // so the shipyard always has at least one option to equip.
     this.seedStarterBlueprintIfMissing();
+  }
+
+  /**
+   * Async RPG initialisation — call once from main.ts after constructing.
+   * Connects IndexedDB, creates a new pilot + crew on first run.
+   */
+  async initRPG(): Promise<void> {
+    try {
+      const { createGameDatabase } = await import("../rpg/CrewService");
+      const g = await createGameDatabase();
+      this.crewSvc = g.crew;
+
+      let pilot = await g.rpg.getPilot();
+      if (!pilot) {
+        await g.rpg.createPilot("Mind", "earth");
+      }
+      const existing = await g.crew.getLivingCrew(DEFAULT_PILOT_ID);
+      if (existing.length === 0) {
+        await g.crew.drawStartingCrew(DEFAULT_PILOT_ID);
+      }
+      await this.refreshCrewCache();
+    } catch (err) {
+      console.warn("RPG database unavailable:", err);
+    }
+  }
+
+  private async refreshCrewCache(): Promise<void> {
+    if (!this.crewSvc) return;
+    const bots = await this.crewSvc.getAllCrew(DEFAULT_PILOT_ID);
+    const cache: typeof this.crewCache = [];
+    for (const bot of bots) {
+      const [traitRecs, skillRecs] = await Promise.all([
+        this.crewSvc.getBotTraits(bot.id),
+        this.crewSvc.getBotSkills(bot.id),
+      ]);
+      const skills = {} as Record<BotSkillFamily, number>;
+      for (const s of skillRecs) skills[s.family] = s.level;
+      cache.push({ bot, traitIds: traitRecs.map((t: BotTraitRecord) => t.traitId), skills });
+    }
+    this.crewCache = cache;
   }
 
   /**
@@ -704,6 +758,8 @@ export class GameManager {
       this.updateMissionDetail(clamped);
     } else if (screen === "solar-inventory") {
       this.updateSolarInventory(clamped);
+    } else if (screen === "solar-crew") {
+      this.updateSolarCrew();
     }
 
     this.renderFrame(clamped);
@@ -3338,9 +3394,9 @@ export class GameManager {
     const escortItem = this.solarFriendlyShips.length < 3 ? ["Launch Escort"] : [];
     const cheatItems = isEarthStation ? ["Add 100k Credits"] : [];
     if (hasShipyard) {
-      return [...npcItems, "Inventory", "Repair Bay", ...cheatItems, ...escortItem, "Shop", "Shipyard", "My Ships", "Galaxy Map", "Undock"];
+      return [...npcItems, "Inventory", "Crew", "Repair Bay", ...cheatItems, ...escortItem, "Shop", "Shipyard", "My Ships", "Galaxy Map", "Undock"];
     }
-    return [...npcItems, "Inventory", "Repair Bay", ...escortItem, "Shop", "My Ships", "Galaxy Map", "Undock"];
+    return [...npcItems, "Inventory", "Crew", "Repair Bay", ...escortItem, "Shop", "My Ships", "Galaxy Map", "Undock"];
   }
 
   private getDockedNpc() {
@@ -3449,6 +3505,12 @@ export class GameManager {
     }
     if (item === "My Ships") {
       this.state.setScreen("solar-my-ships");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+    if (item === "Crew") {
+      this.crewHandler.reset();
+      this.state.setScreen("solar-crew");
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
       return;
     }
@@ -4452,6 +4514,43 @@ export class GameManager {
   private readonly myShipsHandler = new SolarMyShipsHandler();
 
   // ── My Ships screen ───────────────────────────────────────────────────────
+
+  private updateSolarCrew(): void {
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.state.setScreen("docked");
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+    const count = this.crewCache.length;
+    if (count === 0) return;
+    if (this.input.wasPressed("ArrowUp") && this.menuDebounceMs === 0) {
+      this.crewHandler.selection = (this.crewHandler.selection - 1 + count) % count;
+      this.menuDebounceMs = 150;
+    }
+    if (this.input.wasPressed("ArrowDown") && this.menuDebounceMs === 0) {
+      this.crewHandler.selection = (this.crewHandler.selection + 1) % count;
+      this.menuDebounceMs = 150;
+    }
+    this.crewHandler.selection = Math.min(this.crewHandler.selection, Math.max(0, count - 1));
+  }
+
+  private buildCrewRenderData(): NonNullable<import("../rendering/GameRenderer").SolarSystemRenderData["solarCrew"]> | undefined {
+    if (this.crewCache.length === 0) return undefined;
+    return {
+      crew: this.crewCache.map(entry => ({
+        id: entry.bot.id,
+        name: entry.bot.name,
+        personalityType: entry.bot.personalityType,
+        adoptionLean: entry.bot.adoptionLean,
+        isAlive: entry.bot.isAlive,
+        defectId: entry.bot.defectId,
+        traitIds: entry.traitIds,
+        skills: entry.skills as Record<string, number>,
+      })),
+      selection: this.crewHandler.selection,
+      scrollOffset: this.crewHandler.scrollOffset,
+    };
+  }
 
   private updateSolarMyShips(): void {
     const ships = this.getSavedBlueprintSummaries();
@@ -5844,13 +5943,17 @@ export class GameManager {
       bombCredits: this.player.getBombCredits(),
       starmap: state.screen === "starmap" ? this.buildStarmapExtras() : null,
       shipyard: state.screen === "shipyard" ? this.buildShipyardExtras() : null,
-      solarSystem:
-        (state.screen === "solar-system" || state.screen === "solar-system-paused" ||
-         state.screen === "docked" || state.screen === "solar-npc-talk" ||
-         state.screen === "solar-missions" || state.screen === "solar-mission-detail" ||
-         state.screen === "solar-inventory")
-          ? this.buildSolarSystemExtras()
-          : null,
+      solarSystem: (() => {
+        const isSolar = state.screen === "solar-system" || state.screen === "solar-system-paused" ||
+          state.screen === "docked" || state.screen === "solar-npc-talk" ||
+          state.screen === "solar-missions" || state.screen === "solar-mission-detail" ||
+          state.screen === "solar-inventory" || state.screen === "solar-crew";
+        if (!isSolar) return null;
+        const base = this.buildSolarSystemExtras();
+        if (!base || state.screen !== "solar-crew") return base;
+        const crew = this.buildCrewRenderData();
+        return crew !== undefined ? { ...base, solarCrew: crew } : base;
+      })(),
       solarShipBuilder: state.screen === "solar-shipyard"
         ? this.solarShipBuilderMgr.getRenderData(
             this.solarSystem?.getSessionState().moduleInventory ?? new Map(),

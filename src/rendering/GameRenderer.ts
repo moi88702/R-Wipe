@@ -476,6 +476,21 @@ export interface SolarSystemRenderData {
   readonly cargoCapacity?: number;
   /** Cargo used (total items in inventory). */
   readonly cargoUsed?: number;
+  /** Crew roster — only populated when screen === "solar-crew". */
+  readonly solarCrew?: {
+    readonly crew: ReadonlyArray<{
+      readonly id: string;
+      readonly name: string;
+      readonly personalityType: string;
+      readonly adoptionLean: number;
+      readonly isAlive: boolean;
+      readonly defectId: string | null;
+      readonly traitIds: readonly string[];
+      readonly skills: Readonly<Record<string, number>>; // family → level
+    }>;
+    readonly selection: number;
+    readonly scrollOffset: number;
+  };
   /** Inventory screen data — only populated when screen === "solar-inventory". */
   readonly weaponStaggerActive?: boolean;
   readonly inventoryScreen?: {
@@ -1461,6 +1476,7 @@ export class GameRenderer {
     const isSolarShipBuilder = screen === "solar-shipyard";
     const isSolarShop = screen === "solar-shop";
     const isSolarMyShips = screen === "solar-my-ships";
+    const isSolarCrew = screen === "solar-crew";
     const isInventory = screen === "solar-inventory";
     const isNpcTalk = screen === "solar-npc-talk";
     const isMissionList = screen === "solar-missions";
@@ -1470,7 +1486,7 @@ export class GameRenderer {
     const drawsEntities = isGameplay || isPause;
 
     const isSolarPaused = screen === "solar-system-paused";
-    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isAnyDockedScreen || isSolarShipBuilder || isSolarShop || isSolarMyShips || isInventory;
+    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isAnyDockedScreen || isSolarShipBuilder || isSolarShop || isSolarMyShips || isSolarCrew || isInventory;
     this.titleText.visible = isMenu;
     this.subtitleText.visible = isMenu;
     this.promptText.visible = isMenu || isPause || isSolarPaused;
@@ -1654,6 +1670,11 @@ export class GameRenderer {
 
     if (isSolarMyShips) {
       this.drawSolarMyShips(extras.solarMyShips ?? []);
+      return;
+    }
+
+    if (isSolarCrew && extras.solarSystem?.solarCrew) {
+      this.drawSolarCrew(extras.solarSystem.solarCrew);
       return;
     }
 
@@ -6603,6 +6624,115 @@ export class GameRenderer {
     // Hide unused labels
     for (let i = li; i < this.inventoryLabels.length; i++) {
       this.inventoryLabels[i]!.visible = false;
+    }
+  }
+
+  private readonly crewLabels: Text[] = [];
+
+  private drawSolarCrew(data: NonNullable<SolarSystemRenderData["solarCrew"]>): void {
+    const g = this.solarSystemGfx;
+    g.clear();
+    const W = this.width;
+    const H = this.height;
+
+    g.rect(0, 0, W, H).fill({ color: 0x080e18, alpha: 0.97 });
+
+    this.solarBuilderTitleText.text = "CREW ROSTER";
+    this.solarBuilderTitleText.x = W / 2;
+    this.solarBuilderTitleText.y = 30;
+    this.solarBuilderTitleText.visible = true;
+    g.rect(0, 56, W, 2).fill({ color: 0x2a466b, alpha: 0.9 });
+
+    const CARD_H = 84;
+    const CARD_PAD = 4;
+    const LIST_Y = 70;
+    const VISIBLE_CARDS = Math.floor((H - LIST_Y - 30) / (CARD_H + CARD_PAD));
+    const { crew, selection, scrollOffset } = data;
+
+    // labels needed: hint + per-card (name, personality, lean, traits, 6 skill labels)
+    const LABELS_PER_CARD = 10;
+    this.ensureTextPool(this.crewLabels, 1 + VISIBLE_CARDS * LABELS_PER_CARD, 14);
+    let li = 0;
+
+    const set = (t: Text, txt: string, x: number, y: number, col: number, size: number, ax = 0) => {
+      t.text = txt; t.x = x; t.y = y;
+      t.style.fill = col; t.style.fontSize = size;
+      t.anchor.set(ax, 0.5); t.visible = true;
+    };
+
+    // Hint
+    set(this.crewLabels[li++]!, "↑↓ navigate   ESC back", 16, H - 16, 0x446688, 11);
+
+    const SKILL_FAMILIES = ["combat", "survival", "engineering", "hacking", "command", "stealth"];
+    const SKILL_ABBREV   = ["CMB", "SRV", "ENG", "HAC", "CMD", "STL"];
+    const SKILL_COLORS   = [0xff6655, 0x55cc88, 0x55aaff, 0xcc88ff, 0xffcc44, 0x44ddcc];
+
+    for (let vi = 0; vi < VISIBLE_CARDS; vi++) {
+      const idx = scrollOffset + vi;
+      if (idx >= crew.length) break;
+      const entry = crew[idx]!;
+      const ty = LIST_Y + vi * (CARD_H + CARD_PAD);
+      const isSelected = idx === selection;
+
+      // Card background
+      const cardCol = entry.isAlive ? (isSelected ? 0x0e2240 : 0x0a1624) : 0x140a0a;
+      g.rect(8, ty, W - 16, CARD_H).fill({ color: cardCol, alpha: 0.95 });
+      if (isSelected) {
+        g.rect(8, ty, W - 16, CARD_H).stroke({ color: 0x44aaff, width: 1.5, alpha: 0.9 });
+      }
+      if (!entry.isAlive) {
+        g.rect(8, ty, 3, CARD_H).fill({ color: 0x882222, alpha: 1 });
+      } else {
+        // Adoption lean stripe: left = tradition (amber), right = progressive (cyan)
+        const leanFrac = (entry.adoptionLean + 100) / 200; // 0-1
+        const stripeCol = leanFrac > 0.5
+          ? Math.round(0x00aacc * (leanFrac - 0.5) * 2 + 0xccaa00 * (1 - (leanFrac - 0.5) * 2))
+          : 0xccaa00;
+        g.rect(8, ty, 3, CARD_H).fill({ color: stripeCol, alpha: 0.9 });
+      }
+
+      // Name + personality
+      const statusSuffix = !entry.isAlive ? "  [DEAD]" : (entry.defectId ? "  [RECOVERED]" : "");
+      const nameCol = entry.isAlive ? 0xddeeff : 0x664444;
+      set(this.crewLabels[li++]!, entry.name + statusSuffix, 20, ty + 13, nameCol, 14);
+
+      const personalityCol = 0x5588aa;
+      const leanLabel = entry.adoptionLean >= 30 ? "Progressive"
+        : entry.adoptionLean <= -30 ? "Traditionalist" : "Neutral";
+      set(this.crewLabels[li++]!, `${entry.personalityType.toUpperCase()}  ·  ${leanLabel}`, W - 16, ty + 13, personalityCol, 11, 1);
+
+      // Traits row
+      const traitStr = entry.traitIds.slice(0, 4).join("  ·  ");
+      set(this.crewLabels[li++]!, traitStr || "No traits", 20, ty + 30, 0x7799bb, 10);
+
+      // Skill bars — 6 skills in two rows of 3
+      for (let si = 0; si < 6; si++) {
+        const col = si < 3 ? si : si - 3;
+        const row = si < 3 ? 0 : 1;
+        const sx = 20 + col * 130;
+        const sy = ty + 50 + row * 18;
+        const level = entry.skills[SKILL_FAMILIES[si]!] ?? 0;
+        const barW = 60;
+
+        // Bar background
+        g.rect(sx + 32, sy - 5, barW, 8).fill({ color: 0x1a2a3a, alpha: 0.9 });
+        // Bar fill
+        if (level > 0) {
+          g.rect(sx + 32, sy - 5, Math.round(barW * level / 10), 8).fill({ color: SKILL_COLORS[si]!, alpha: 0.85 });
+        }
+
+        // Label
+        const lbl = this.crewLabels[li++]!;
+        lbl.text = `${SKILL_ABBREV[si]} ${level}`;
+        lbl.x = sx; lbl.y = sy;
+        lbl.style.fill = SKILL_COLORS[si]!; lbl.style.fontSize = 10;
+        lbl.anchor.set(0, 0.5); lbl.visible = true;
+      }
+    }
+
+    // Hide unused labels
+    while (li < this.crewLabels.length) {
+      this.crewLabels[li++]!.visible = false;
     }
   }
 
