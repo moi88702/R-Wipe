@@ -94,6 +94,7 @@ export class SolarSystemSessionManager {
       stationHangars: new Map(),
       carriedItems: new Map(),
       gameTimeMs: 0,
+      pois: [],
     };
   }
 

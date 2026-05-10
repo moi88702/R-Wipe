@@ -532,6 +532,17 @@ export interface SolarSystemRenderData {
     readonly selectedCount: number;
     readonly maxTeamSize: number;
   };
+  /** Points of interest in the current system (shown as markers on the solar map). */
+  readonly pois?: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly position: { x: number; y: number };
+    readonly triggerRadiusKm: number;
+    readonly completed: boolean;
+    readonly difficulty: 1 | 2 | 3;
+  }>;
+  /** Id of the POI the player is currently near (shows approach prompt). */
+  readonly nearbyPoiId?: string | null;
   /** Inventory screen data — only populated when screen === "solar-inventory". */
   readonly weaponStaggerActive?: boolean;
   readonly inventoryScreen?: {
@@ -549,6 +560,27 @@ export interface SolarSystemRenderData {
     readonly shipCargoUsed: number;
     readonly shipCargoCapacity: number;
   };
+}
+
+export interface TacticalRenderData {
+  readonly units: ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly isBot: boolean;
+    readonly isPlayerControlled: boolean;
+    readonly personalityType: string;
+    readonly position: { x: number; y: number };
+    readonly hp: number;
+    readonly maxHp: number;
+    readonly radius: number;
+    readonly isAlive: boolean;
+    readonly targetId: string | null;
+  }>;
+  readonly obstacles: ReadonlyArray<{ x: number; y: number; w: number; h: number }>;
+  readonly outcome: "in-progress" | "victory" | "defeat" | "withdrawn";
+  readonly outcomeMs: number;
+  readonly poiName: string;
+  readonly poiDifficulty: 1 | 2 | 3;
 }
 
 export interface GalaxyMapData {
@@ -821,6 +853,9 @@ export class GameRenderer {
   // Away-team selection screen.
   private readonly awaySelectGfx: Graphics = new Graphics();
   private readonly awaySelectLabels: Text[] = [];
+  private readonly tacticalGfx: Graphics = new Graphics();
+  private readonly tacticalLabels: Text[] = [];
+  private readonly solarPoiLabels: Text[] = [];
 
   private readonly isTouchDevice: boolean =
     typeof window !== "undefined" &&
@@ -1296,6 +1331,9 @@ export class GameRenderer {
     // Away-team selection screen overlay graphics.
     this.menuLayer.addChild(this.awaySelectGfx);
 
+    // Tactical combat screen overlay graphics.
+    this.menuLayer.addChild(this.tacticalGfx);
+
     // Docked screen — title + hint. Menu items live in a pool.
     this.dockedTitle = new Text({
       text: "",
@@ -1505,6 +1543,7 @@ export class GameRenderer {
       solarShop: ShopRenderData | null;
       solarMyShips: ReadonlyArray<SavedBlueprintSummary> | null;
       playerBlueprint: PlayerBlueprintVisual | null;
+      tacticalCombat?: TacticalRenderData | null;
     },
   ): void {
     this.warpBubbleTimeMs += deltaMs;
@@ -1533,12 +1572,13 @@ export class GameRenderer {
     const isMissionList = screen === "solar-missions";
     const isMissionDetail = screen === "solar-mission-detail";
     const isAwaySelect = screen === "solar-away-select";
+    const isTactical = screen === "tactical-combat";
     const isAnyDockedScreen = isDocked || isNpcTalk || isMissionList || isMissionDetail;
     // Gameplay entities stay visible behind the pause overlay.
     const drawsEntities = isGameplay || isPause;
 
     const isSolarPaused = screen === "solar-system-paused";
-    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isAnyDockedScreen || isSolarShipBuilder || isSolarShop || isSolarMyShips || isSolarCrew || isInventory || isAwaySelect;
+    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isAnyDockedScreen || isSolarShipBuilder || isSolarShop || isSolarMyShips || isSolarCrew || isInventory || isAwaySelect || isTactical;
     this.titleText.visible = isMenu;
     this.subtitleText.visible = isMenu;
     this.promptText.visible = isMenu || isPause || isSolarPaused;
@@ -1559,6 +1599,7 @@ export class GameRenderer {
     for (const t of this.solarGateLabels) t.visible = isSolarSystem;
     for (const t of this.solarEnemyLabels) t.visible = isSolarSystem;
     for (const t of this.solarEnemyStationLabels) t.visible = isSolarSystem;
+    for (const t of this.solarPoiLabels) t.visible = isSolarSystem;
     for (const t of this.zoomBarLabel) t.visible = isSolarSystem;
     // Galaxy-map labels visible only when galaxy map drawn (set in drawGalaxyMap).
     if (!isSolarSystem) for (const t of this.galaxySystemLabels) t.visible = false;
@@ -1646,6 +1687,11 @@ export class GameRenderer {
     if (!isAwaySelect) {
       this.awaySelectGfx.clear();
       for (const t of this.awaySelectLabels) t.visible = false;
+    }
+    // Tactical combat screen overlay toggles.
+    if (!isTactical) {
+      this.tacticalGfx.clear();
+      for (const t of this.tacticalLabels) t.visible = false;
     }
     // Menu list items: used by main-menu (3) and pause (3); hidden on stats / starmap.
     const showList = isMenu || isPause;
@@ -1737,6 +1783,11 @@ export class GameRenderer {
 
     if (isAwaySelect && extras.solarSystem?.awaySelect) {
       this.drawSolarAwaySelect(extras.solarSystem.awaySelect);
+      return;
+    }
+
+    if (isTactical && extras.tacticalCombat) {
+      this.drawTacticalCombat(extras.tacticalCombat);
       return;
     }
 
@@ -3301,6 +3352,47 @@ export class GameRenderer {
       this.solarGateLabels[i]!.visible = false;
     }
 
+    // ── Points of Interest ────────────────────────────────────────────────
+    if (data.pois && data.pois.length > 0) {
+      this.ensureTextPool(this.solarPoiLabels, data.pois.length, 11);
+      const DIFF_COLORS = [0xffee44, 0xffaa22, 0xff4422] as const;
+      for (let i = 0; i < data.pois.length; i++) {
+        const poi = data.pois[i]!;
+        const label = this.solarPoiLabels[i]!;
+        if (poi.completed) { label.visible = false; continue; }
+        const p = w2s(poi.position.x, poi.position.y);
+        const isNearby = data.nearbyPoiId === poi.id;
+        const col = isNearby ? 0xffffff : (DIFF_COLORS[poi.difficulty - 1] ?? 0xffee44);
+        const r = Math.max(8, poi.triggerRadiusKm * kmToPx);
+        // Diamond icon
+        g.moveTo(p.x, p.y - r * 0.7)
+          .lineTo(p.x + r * 0.5, p.y)
+          .lineTo(p.x, p.y + r * 0.7)
+          .lineTo(p.x - r * 0.5, p.y)
+          .closePath()
+          .stroke({ color: col, width: isNearby ? 2 : 1.5, alpha: isNearby ? 1 : 0.8 });
+        if (isNearby) {
+          g.moveTo(p.x, p.y - r * 0.7)
+            .lineTo(p.x + r * 0.5, p.y)
+            .lineTo(p.x, p.y + r * 0.7)
+            .lineTo(p.x - r * 0.5, p.y)
+            .closePath()
+            .fill({ color: col, alpha: 0.15 });
+        }
+        label.text = `${poi.name} [${"★".repeat(poi.difficulty)}]`;
+        label.x = p.x;
+        label.y = p.y + r * 0.7 + 6;
+        label.anchor.set(0.5, 0);
+        label.style.fill = col;
+        label.visible = true;
+      }
+      for (let i = data.pois.length; i < this.solarPoiLabels.length; i++) {
+        this.solarPoiLabels[i]!.visible = false;
+      }
+    } else {
+      for (const t of this.solarPoiLabels) t.visible = false;
+    }
+
     // ── Enemy stations ────────────────────────────────────────────────────
     this.ensureTextPool(this.solarEnemyStationLabels, data.enemyStations.length, 11);
     for (let i = 0; i < data.enemyStations.length; i++) {
@@ -4038,7 +4130,16 @@ export class GameRenderer {
     // ── HUD: system name banner + approach prompt ─────────────────────────
     this.solarSystemNameText.text = data.currentSystemName.toUpperCase();
 
-    if (data.nearbyLocations.length > 0) {
+    if (data.nearbyPoiId && data.pois) {
+      const poi = data.pois.find(p => p.id === data.nearbyPoiId);
+      if (poi && !poi.completed) {
+        this.solarApproachText.text = `[ENTER] AWAY MISSION — ${poi.name}`;
+        this.solarApproachText.style.fill = 0xffee44;
+        this.solarApproachText.visible = true;
+      } else {
+        this.solarApproachText.visible = false;
+      }
+    } else if (data.nearbyLocations.length > 0) {
       const id = data.nearbyLocations[0]!;
       const loc = data.locations.find((l) => l.id === id);
       this.solarApproachText.text = `[ENTER] DOCK — ${loc?.name ?? "STATION"}`;
@@ -8025,6 +8126,167 @@ export class GameRenderer {
       `TOP SCORE  ${all.topScore}`,
       `FURTHEST LEVEL  ${all.furthestLevel}`,
     ].join("\n");
+  }
+
+  private drawTacticalCombat(data: TacticalRenderData): void {
+    const g = this.tacticalGfx;
+    g.clear();
+    const W = this.width;
+    const H = this.height;
+
+    // Arena dimensions and offset to center it on screen
+    const AW = 960, AH = 540;
+    const AX = (W - AW) / 2;
+    const AY = (H - AH) / 2;
+
+    // Dark arena background
+    g.rect(0, 0, W, H).fill({ color: 0x050810, alpha: 1 });
+    g.rect(AX, AY, AW, AH).fill({ color: 0x0a1020, alpha: 1 });
+    g.rect(AX, AY, AW, AH).stroke({ color: 0x334466, width: 2, alpha: 0.9 });
+
+    // Grid lines (subtle)
+    const GRID = 80;
+    for (let x = GRID; x < AW; x += GRID) {
+      g.moveTo(AX + x, AY).lineTo(AX + x, AY + AH).stroke({ color: 0x1a2a3a, width: 1, alpha: 0.5 });
+    }
+    for (let y = GRID; y < AH; y += GRID) {
+      g.moveTo(AX, AY + y).lineTo(AX + AW, AY + y).stroke({ color: 0x1a2a3a, width: 1, alpha: 0.5 });
+    }
+
+    // Obstacles
+    for (const o of data.obstacles) {
+      g.rect(AX + o.x, AY + o.y, o.w, o.h)
+        .fill({ color: 0x223344, alpha: 0.9 })
+        .stroke({ color: 0x446688, width: 1.5, alpha: 0.8 });
+    }
+
+    // Units
+    for (const u of data.units) {
+      if (!u.isAlive) continue;
+      const sx = AX + u.position.x;
+      const sy = AY + u.position.y;
+      const r = u.radius;
+
+      let bodyColor: number;
+      let strokeColor: number;
+      if (u.isPlayerControlled) {
+        bodyColor = 0x00ffcc;
+        strokeColor = 0x44ffee;
+      } else if (u.isBot) {
+        bodyColor = GameRenderer.PERSONALITY_COLORS[u.personalityType] ?? 0x4488ff;
+        strokeColor = 0x88ccff;
+      } else {
+        // Enemies: diamond shape
+        bodyColor = 0xff3344;
+        strokeColor = 0xff7788;
+        g.moveTo(sx, sy - r)
+          .lineTo(sx + r * 0.8, sy)
+          .lineTo(sx, sy + r)
+          .lineTo(sx - r * 0.8, sy)
+          .closePath()
+          .fill({ color: bodyColor, alpha: 0.85 })
+          .stroke({ color: strokeColor, width: 1.5, alpha: 1 });
+        // HP bar
+        const hpFrac = u.hp / u.maxHp;
+        const barW = r * 2.5;
+        const barX = sx - barW / 2;
+        const barY = sy - r - 8;
+        g.rect(barX, barY, barW, 4).fill({ color: 0x330000, alpha: 0.8 });
+        g.rect(barX, barY, barW * hpFrac, 4).fill({ color: hpFrac > 0.5 ? 0xff4444 : 0xff8800, alpha: 1 });
+        continue;
+      }
+
+      // Circle for bots
+      g.circle(sx, sy, r)
+        .fill({ color: bodyColor, alpha: 0.85 })
+        .stroke({ color: strokeColor, width: u.isPlayerControlled ? 2.5 : 1.5, alpha: 1 });
+
+      // Player ring highlight
+      if (u.isPlayerControlled) {
+        g.circle(sx, sy, r + 4).stroke({ color: 0xffffff, width: 1, alpha: 0.4 });
+      }
+
+      // HP bar above unit
+      const hpFrac = u.hp / u.maxHp;
+      const barW = r * 2.5;
+      const barX = sx - barW / 2;
+      const barY = sy - r - 8;
+      g.rect(barX, barY, barW, 4).fill({ color: 0x001122, alpha: 0.8 });
+      g.rect(barX, barY, barW * hpFrac, 4)
+        .fill({ color: hpFrac > 0.5 ? 0x44ff88 : hpFrac > 0.25 ? 0xffaa22 : 0xff3333, alpha: 1 });
+    }
+
+    // Unit name labels
+    const aliveUnits = data.units.filter(u => u.isAlive);
+    this.ensureTextPool(this.tacticalLabels, aliveUnits.length + 8, 10);
+    let li = 0;
+
+    const set = (t: Text, text: string, x: number, y: number, fill: number, size = 10, ax = 0.5) => {
+      t.text = text;
+      t.x = x; t.y = y;
+      t.anchor.set(ax, 0.5);
+      t.style.fill = fill;
+      t.style.fontSize = size;
+      t.visible = true;
+    };
+
+    for (const u of aliveUnits) {
+      const label = this.tacticalLabels[li++];
+      if (!label) break;
+      const sx = AX + u.position.x;
+      const sy = AY + u.position.y;
+      const nameColor = u.isPlayerControlled ? 0xaaffee
+        : u.isBot ? 0x88bbdd
+        : 0xff9999;
+      set(label, u.name, sx, sy + u.radius + 12, nameColor, 9);
+    }
+
+    // Header
+    const headerLabel = this.tacticalLabels[li++];
+    if (headerLabel) {
+      set(headerLabel, `AWAY MISSION — ${data.poiName.toUpperCase()}  [${"★".repeat(data.poiDifficulty)}]`,
+        W / 2, AY - 22, 0xaaccff, 14);
+    }
+
+    // Controls hint
+    const hintLabel = this.tacticalLabels[li++];
+    if (hintLabel) {
+      set(hintLabel, "[WASD/ARROWS] MOVE   [SPACE] ATTACK   [ESC] WITHDRAW",
+        W / 2, AY + AH + 18, 0x445566, 10);
+    }
+
+    // Outcome overlay
+    if (data.outcome !== "in-progress") {
+      const alpha = Math.min(1, data.outcomeMs / 400);
+      const outcomeColor = data.outcome === "victory" ? 0x22ff88
+        : data.outcome === "defeat" ? 0xff2244
+        : 0xaaaaaa;
+      const outcomeText = data.outcome === "victory" ? "VICTORY"
+        : data.outcome === "defeat" ? "DEFEAT"
+        : "WITHDRAWN";
+
+      g.rect(AX, AY + AH / 2 - 40, AW, 80)
+        .fill({ color: 0x000000, alpha: 0.75 * alpha });
+      g.rect(AX, AY + AH / 2 - 40, AW, 80)
+        .stroke({ color: outcomeColor, width: 2, alpha: alpha });
+
+      const outcomeLabel = this.tacticalLabels[li++];
+      if (outcomeLabel) {
+        set(outcomeLabel, outcomeText, W / 2, H / 2, outcomeColor, 36);
+        outcomeLabel.alpha = alpha;
+      }
+      const subLabel = this.tacticalLabels[li++];
+      if (subLabel) {
+        set(subLabel, "Returning to space...", W / 2, H / 2 + 34, 0x778899, 13);
+        subLabel.alpha = alpha;
+      }
+    }
+
+    // Hide remaining label pool entries
+    for (let i = li; i < this.tacticalLabels.length; i++) {
+      const t = this.tacticalLabels[i];
+      if (t) t.visible = false;
+    }
   }
 }
 

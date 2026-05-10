@@ -58,6 +58,8 @@ import { SolarMyShipsHandler } from "./handlers/SolarMyShipsHandler";
 import { NpcTalkMissionHandler } from "./handlers/NpcTalkMissionHandler";
 import { SolarCrewHandler } from "./handlers/SolarCrewHandler";
 import { SolarAwaySelectHandler } from "./handlers/SolarAwaySelectHandler";
+import { TacticalCombatManager } from "./tactical/TacticalCombatManager";
+import type { PointOfInterest } from "../types/solarsystem";
 import type { CrewService } from "../rpg/CrewService";
 import { DEFAULT_PILOT_ID } from "../rpg/schema";
 import type { CrewBot, BotSkillFamily } from "../rpg/bot-schema";
@@ -537,6 +539,11 @@ export class GameManager {
   private currentAwayTeamIds: readonly string[] = [];
   private static readonly MAX_AWAY_TEAM = 4;
 
+  // ── Tactical combat ────────────────────────────────────────────────────────
+  private readonly tacticalMgr = new TacticalCombatManager();
+  /** POI id the player is currently near (for HUD prompt). */
+  private nearbyPoiId: string | null = null;
+
   // RPG layer — async-initialised via initRPG() called from main.ts
   private rpgDb: import("../rpg/RPGDatabase").RPGDatabase | null = null;
   private crewSvc: CrewService | null = null;
@@ -784,6 +791,8 @@ export class GameManager {
       this.updateSolarCrew();
     } else if (screen === "solar-away-select") {
       this.updateSolarAwaySelect();
+    } else if (screen === "tactical-combat") {
+      this.updateTacticalCombat(clamped);
     }
 
     this.renderFrame(clamped);
@@ -1591,6 +1600,9 @@ export class GameManager {
     }
     this.solarPlayerScannerRangeKm = this.computePlayerScannerRange();
 
+    // Populate POIs for the starting system.
+    sessionState.pois = this.getPoisForSystem("sol");
+
     sessionState.playerPosition = { x: 980, y: 30 }; // Earth Station world position (Earth 900,0 + offset 80,30)
     sessionState.playerVelocity = { x: 0, y: 0 };
     sessionState.playerHeading = 0;
@@ -1844,6 +1856,35 @@ export class GameManager {
     };
   }
 
+  private getPoisForSystem(systemId: string): PointOfInterest[] {
+    const poi = (
+      id: string, name: string, description: string,
+      type: PointOfInterest["type"], x: number, y: number,
+      difficulty: 1 | 2 | 3, missionType: PointOfInterest["missionType"] = "tactical",
+    ): PointOfInterest => ({
+      id, name, description, type, position: { x, y },
+      triggerRadiusKm: 60, missionType, difficulty, completed: false,
+    });
+
+    if (systemId === "sol") return [
+      poi("poi-sol-derelict-alpha",  "Derelict Station Alpha",  "An abandoned platform drifting near Mars. Signal anomalies detected.",           "wreck",   1520, 150, 1),
+      poi("poi-sol-scav-cache",      "Scavenger Cache",         "Salvage containers clustered in the asteroid belt. Armed escorts spotted.",       "cache",   1200, 600, 2),
+      poi("poi-sol-rebel-outpost",   "Rebel Forward Base",      "A hidden rebel installation in the outer system. Approach with caution.",         "outpost", 700, -500, 3),
+    ];
+
+    if (systemId === "kepler-442") return [
+      poi("poi-kepler-anomaly",      "Xeno Anomaly Site",       "Strange crystalline formations emitting energy pulses. Unknown hostiles nearby.", "anomaly", 1100, -300, 2),
+      poi("poi-kepler-wreck",        "Colonial Wreck",          "Remnants of an early colonial ship. Salvage — and danger — await.",              "wreck",   850, 400, 1),
+    ];
+
+    if (systemId === "proxima-centauri") return [
+      poi("poi-proxima-cache",       "Hidden Weapon Cache",     "Rebel arms dump in a dense nebula pocket. Well-guarded.",                        "cache",   700, -200, 3),
+      poi("poi-proxima-outpost",     "Frontier Listening Post", "A lone automated station broadcasting on rebel frequencies.",                     "outpost", 400, 300, 2),
+    ];
+
+    return [];
+  }
+
   private staticOrbit(parentId: string | null = null, semiMajorAxis = 0) {
     return {
       parentId,
@@ -2094,12 +2135,43 @@ export class GameManager {
       ? null
       : GateTeleportSystem.checkGateProximity(playerPos, gates as SystemGate[]);
 
-    // F key — dock at nearby station OR jump through a gate
+    // POI proximity detection
+    {
+      const pois = this.solarSystem.getSessionState().pois;
+      const nearPoi = pois.find(p =>
+        !p.completed &&
+        Math.hypot(p.position.x - playerPos.x, p.position.y - playerPos.y) <= p.triggerRadiusKm,
+      ) ?? null;
+      this.nearbyPoiId = nearPoi?.id ?? null;
+    }
+
+    // F key — dock at nearby station OR jump through a gate OR begin POI mission
     const warpBlocked = this.antiGravActive || this.warpDecayMs > 0 || this.warpDockCooldownMs > 0;
     if (input.dockPulse && this.menuDebounceMs === 0) {
       const nearbyStations = this.solarSystem.getNearbyLocations();
       const loc = nearbyStations[0];
-      if (loc && !warpBlocked) {
+      // Check if near a POI first (takes priority over gate jump when not blocked)
+      const poiId = this.nearbyPoiId;
+      const poi = poiId ? this.solarSystem.getSessionState().pois.find(p => p.id === poiId) : null;
+      if (poi && !warpBlocked) {
+        if (this.currentAwayTeamIds.length === 0) {
+          // Redirect player to select a team first
+          this.awaySelectHandler.reset();
+          this.awaySelectHandler.fromScreen = "solar-system";
+          this.awaySelectHandler.selectedBotIds = new Set(this.currentAwayTeamIds);
+          this.menuDebounceMs = MENU_DEBOUNCE_MS;
+          this.state.setScreen("solar-away-select");
+          return;
+        }
+        const bots = this.currentAwayTeamIds
+          .map(id => this.crewCache.find(e => e.bot.id === id))
+          .filter((e): e is NonNullable<typeof e> => !!e)
+          .map(e => ({ name: e.bot.name, personalityType: e.bot.personalityType }));
+        this.tacticalMgr.begin(poi, bots);
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+        this.state.setScreen("tactical-combat");
+        return;
+      } else if (loc && !warpBlocked) {
         if (this.solarSystem.dock(loc.id)) {
           soundManager.docking();
           this.checkExploreMissions(loc.id);
@@ -3343,6 +3415,9 @@ export class GameManager {
       soundManager.gateJump();
       this.currentSystemId = destSystemId;
       this.visitedSystems.add(destSystemId);
+      // Load POIs for the destination system.
+      this.solarSystem.getSessionState().pois = this.getPoisForSystem(destSystemId);
+      this.nearbyPoiId = null;
       // Prevent immediate re-trigger inside sister gate's radius.
       this.gateCooldownMs = 1500;
     }
@@ -4809,6 +4884,85 @@ export class GameManager {
     }
   }
 
+  private updateTacticalCombat(deltaMs: number): void {
+    const s = this.tacticalMgr.getState();
+    if (!s) {
+      this.state.setScreen("solar-system");
+      return;
+    }
+
+    // Tick the manager (runs AI, physics, outcome checks)
+    this.tacticalMgr.tick(deltaMs);
+
+    // Outcome auto-close after linger
+    if (s.outcome !== "in-progress" && s.outcomeMs >= TacticalCombatManager.OUTCOME_LINGER_MS) {
+      if (s.outcome === "victory") {
+        // Mark POI completed
+        const session = this.solarSystem?.getSessionState();
+        if (session) {
+          const poi = session.pois.find(p => p.id === s.poiId);
+          if (poi) poi.completed = true;
+        }
+        // XP award to bots — placeholder until CrewService exposes awardXp per bot
+      }
+      this.tacticalMgr.end();
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      this.state.setScreen("solar-system");
+      return;
+    }
+
+    // ESC — withdraw (stays until linger completes)
+    if (this.wasMenuBackPressed() && s.outcome === "in-progress" && this.menuDebounceMs === 0) {
+      this.tacticalMgr.withdraw();
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+
+    if (s.outcome !== "in-progress") return;
+
+    // WASD / Arrow movement for player-controlled bot
+    // moveLeft/Right/Up/Down = Arrow keys; thrustForward/Reverse/turnLeft/turnRight = WASD
+    const input = this.input.poll();
+    const iLeft  = input.moveLeft  || (input as any).turnLeft  === true;
+    const iRight = input.moveRight || (input as any).turnRight === true;
+    const iUp    = input.moveUp    || (input as any).thrustForward === true;
+    const iDown  = input.moveDown  || (input as any).thrustReverse === true;
+    this.tacticalMgr.movePlayer(
+      iLeft ? -1 : iRight ? 1 : 0,
+      iUp   ? -1 : iDown  ? 1 : 0,
+    );
+
+    // Space — attack
+    if (input.fire) {
+      this.tacticalMgr.playerAttack();
+    }
+  }
+
+  private buildTacticalRenderData(): import("../rendering/GameRenderer").TacticalRenderData | null {
+    const s = this.tacticalMgr.getState();
+    if (!s) return null;
+    return {
+      units: s.units.map(u => ({
+        id: u.id,
+        name: u.name,
+        isBot: u.isBot,
+        isPlayerControlled: u.isPlayerControlled,
+        personalityType: u.personalityType,
+        position: { x: u.position.x, y: u.position.y },
+        hp: u.hp,
+        maxHp: u.maxHp,
+        radius: u.radius,
+        isAlive: u.isAlive,
+        targetId: u.targetId,
+      })),
+      obstacles: s.obstacles.map(o => ({ x: o.x, y: o.y, w: o.w, h: o.h })),
+      outcome: s.outcome,
+      outcomeMs: s.outcomeMs,
+      poiName: s.poiName,
+      poiDifficulty: s.poiDifficulty,
+    };
+  }
+
   private buildAwaySelectRenderData(): NonNullable<import("../rendering/GameRenderer").SolarSystemRenderData["awaySelect"]> | undefined {
     const h = this.awaySelectHandler;
     const crewItems = this.crewCache.filter(e => e.bot.isAlive);
@@ -6246,6 +6400,9 @@ export class GameManager {
         }
         return base;
       })(),
+      tacticalCombat: state.screen === "tactical-combat"
+        ? this.buildTacticalRenderData()
+        : null,
       solarShipBuilder: state.screen === "solar-shipyard"
         ? this.solarShipBuilderMgr.getRenderData(
             this.solarSystem?.getSessionState().moduleInventory ?? new Map(),
@@ -6817,6 +6974,15 @@ export class GameManager {
           ageFrac: e.ageMs / GameManager.COMMS_MAX_AGE_MS,
         })),
       } : {}),
+      pois: sessionState.pois.map(p => ({
+        id: p.id,
+        name: p.name,
+        position: p.position,
+        triggerRadiusKm: p.triggerRadiusKm,
+        completed: p.completed,
+        difficulty: p.difficulty,
+      })),
+      nearbyPoiId: this.nearbyPoiId,
     };
   }
 

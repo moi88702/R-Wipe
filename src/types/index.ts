@@ -699,7 +699,8 @@ export type ScreenType =
   | "solar-mission-detail"
   | "solar-inventory"
   | "solar-crew"
-  | "solar-away-select";
+  | "solar-away-select"
+  | "tactical-combat";
 
 /**
  * Dev-only cheat payload parsed from URL query params. Every field is optional

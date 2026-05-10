@@ -176,6 +176,30 @@ export interface SolarSystemState {
   lastUpdatedAt: number;
 }
 
+// ── Points of Interest ───────────────────────────────────────────────────────
+
+export type PoiType = "wreck" | "outpost" | "cache" | "anomaly";
+export type PoiMissionType = "ship" | "tactical";
+
+/**
+ * A discoverable point of interest in a solar system.
+ * Approaching within `triggerRadiusKm` unlocks an away mission.
+ */
+export interface PointOfInterest {
+  id: string;
+  name: string;
+  description: string;
+  type: PoiType;
+  position: { x: number; y: number }; // world km
+  triggerRadiusKm: number;
+  missionType: PoiMissionType;
+  difficulty: 1 | 2 | 3;
+  /** If set, this POI only appears when this mission is in the log. */
+  linkedMissionId?: string;
+  /** True once the away mission here was won. */
+  completed: boolean;
+}
+
 // ── System Gates ─────────────────────────────────────────────────────────────
 
 /**
@@ -265,4 +289,6 @@ export interface SolarSystemSessionState {
   carriedItems: Map<string, number>;
   /** Cumulative real-time elapsed (ms) used to pace economy refresh cycles. */
   gameTimeMs: number;
+  /** Points of interest in the current system (pre-placed + mission-spawned). */
+  pois: PointOfInterest[];
 }
