@@ -490,6 +490,18 @@ export interface SolarSystemRenderData {
     }>;
     readonly selection: number;
     readonly scrollOffset: number;
+    readonly detail?: {
+      readonly botId: string;
+      readonly name: string;
+      readonly personalityType: string;
+      readonly adoptionLean: number;
+      readonly isAlive: boolean;
+      readonly hasBeenRecovered: boolean;
+      readonly backstory: string;
+      readonly traits: ReadonlyArray<{ readonly id: string; readonly name: string; readonly description: string }>;
+      readonly skills: ReadonlyArray<{ readonly family: string; readonly level: number }>;
+      readonly defectDescription: string | null;
+    };
   };
   /** Inventory screen data — only populated when screen === "solar-inventory". */
   readonly weaponStaggerActive?: boolean;
@@ -6630,6 +6642,11 @@ export class GameRenderer {
   private readonly crewLabels: Text[] = [];
 
   private drawSolarCrew(data: NonNullable<SolarSystemRenderData["solarCrew"]>): void {
+    if (data.detail) {
+      this.drawSolarCrewDetail(data.detail);
+      return;
+    }
+
     const g = this.solarSystemGfx;
     g.clear();
     const W = this.width;
@@ -6661,7 +6678,7 @@ export class GameRenderer {
     };
 
     // Hint
-    set(this.crewLabels[li++]!, "↑↓ navigate   ESC back", 16, H - 16, 0x446688, 11);
+    set(this.crewLabels[li++]!, "↑↓ navigate   ↵ profile   ESC back", 16, H - 16, 0x446688, 11);
 
     const SKILL_FAMILIES = ["combat", "survival", "engineering", "hacking", "command", "stealth"];
     const SKILL_ABBREV   = ["CMB", "SRV", "ENG", "HAC", "CMD", "STL"];
@@ -6734,6 +6751,153 @@ export class GameRenderer {
     while (li < this.crewLabels.length) {
       this.crewLabels[li++]!.visible = false;
     }
+  }
+
+  private drawSolarCrewDetail(d: NonNullable<NonNullable<SolarSystemRenderData["solarCrew"]>["detail"]>): void {
+    const g = this.solarSystemGfx;
+    g.clear();
+    const W = this.width;
+    const H = this.height;
+
+    g.rect(0, 0, W, H).fill({ color: 0x060c16, alpha: 0.98 });
+
+    // ── Ensure pool for detail labels (max ~30 lines) ───────────────────────
+    const MAX_DETAIL_LABELS = 32;
+    this.ensureTextPool(this.crewLabels, MAX_DETAIL_LABELS, 14);
+    let li = 0;
+
+    const set = (t: Text, txt: string, x: number, y: number, col: number, size: number, ax = 0) => {
+      t.text = txt; t.x = x; t.y = y;
+      t.style.fill = col; t.style.fontSize = size;
+      t.style.wordWrap = false;
+      t.anchor.set(ax, 0); t.visible = true;
+    };
+
+    // Header bar
+    const isAlive = d.isAlive;
+    const nameCol = isAlive ? 0xeef6ff : 0x664444;
+    const statusSuffix = !isAlive ? "  [DEAD]" : d.hasBeenRecovered ? "  [RECOVERED]" : "";
+    this.solarBuilderTitleText.text = d.name + statusSuffix;
+    this.solarBuilderTitleText.x = 24;
+    this.solarBuilderTitleText.y = 30;
+    this.solarBuilderTitleText.anchor.set(0, 0.5);
+    this.solarBuilderTitleText.style.fill = nameCol;
+    this.solarBuilderTitleText.visible = true;
+
+    // Personality + lean label (right-aligned)
+    const leanLabel = d.adoptionLean >= 30 ? "Progressive"
+      : d.adoptionLean <= -30 ? "Traditionalist" : "Neutral";
+    set(this.crewLabels[li++]!, `${d.personalityType.toUpperCase()}  ·  ${leanLabel}`, W - 24, 20, 0x5588aa, 13, 1);
+
+    // Adoption lean bar
+    const BAR_X = 24; const BAR_Y = 52; const BAR_W = W - 48; const BAR_H = 8;
+    g.rect(BAR_X, BAR_Y, BAR_W, BAR_H).fill({ color: 0x1a2a3a });
+    const leanFrac = (d.adoptionLean + 100) / 200;
+    const midX = BAR_X + BAR_W / 2;
+    if (leanFrac >= 0.5) {
+      const fillW = (leanFrac - 0.5) * 2 * (BAR_W / 2);
+      g.rect(midX, BAR_Y, fillW, BAR_H).fill({ color: 0x00aacc, alpha: 0.85 });
+    } else {
+      const fillW = (0.5 - leanFrac) * 2 * (BAR_W / 2);
+      g.rect(midX - fillW, BAR_Y, fillW, BAR_H).fill({ color: 0xccaa00, alpha: 0.85 });
+    }
+    g.rect(midX - 1, BAR_Y - 2, 2, BAR_H + 4).fill({ color: 0x446688 });
+    set(this.crewLabels[li++]!, "Traditionalist", BAR_X, BAR_Y + BAR_H + 4, 0x887744, 9);
+    set(this.crewLabels[li++]!, "Progressive", W - 24, BAR_Y + BAR_H + 4, 0x44aacc, 9, 1);
+
+    g.rect(0, 78, W, 1).fill({ color: 0x1e3050 });
+
+    // ── Backstory ────────────────────────────────────────────────────────────
+    let curY = 90;
+    set(this.crewLabels[li++]!, "BACKGROUND", 24, curY, 0x4477aa, 10);
+    curY += 16;
+    // Wrap backstory into ~80-char lines
+    const backstoryLines = this.wrapText(d.backstory, 80);
+    for (const line of backstoryLines.slice(0, 3)) {
+      set(this.crewLabels[li++]!, line, 24, curY, 0xaabbcc, 11);
+      curY += 15;
+    }
+
+    g.rect(0, curY + 6, W, 1).fill({ color: 0x1e3050 });
+    curY += 16;
+
+    // ── Two-column layout: Traits (left) | Skills (right) ───────────────────
+    const COL_MID = W / 2;
+    let traitY = curY;
+    let skillY = curY;
+
+    // Traits
+    set(this.crewLabels[li++]!, "TRAITS", 24, traitY, 0x4477aa, 10);
+    traitY += 16;
+    const SKILL_FAMILIES = ["combat", "survival", "engineering", "hacking", "command", "stealth"];
+    const SKILL_COLORS   = [0xff6655, 0x55cc88, 0x55aaff, 0xcc88ff, 0xffcc44, 0x44ddcc];
+    const SKILL_NAMES    = ["Combat", "Survival", "Engineering", "Hacking", "Command", "Stealth"];
+
+    for (const trait of d.traits.slice(0, 5)) {
+      set(this.crewLabels[li++]!, trait.name.toUpperCase(), 24, traitY, 0xddeeff, 11);
+      traitY += 13;
+      const descLines = this.wrapText(trait.description, 42);
+      for (const line of descLines.slice(0, 2)) {
+        set(this.crewLabels[li++]!, line, 24, traitY, 0x778899, 10);
+        traitY += 13;
+      }
+      traitY += 4;
+    }
+
+    // Skills
+    set(this.crewLabels[li++]!, "SKILLS", COL_MID + 16, skillY, 0x4477aa, 10);
+    skillY += 16;
+    for (let si = 0; si < 6; si++) {
+      const family = SKILL_FAMILIES[si]!;
+      const skillEntry = d.skills.find(s => s.family === family);
+      const level = skillEntry?.level ?? 0;
+      const barW = 80;
+      const bx = COL_MID + 16;
+      const by = skillY;
+
+      g.rect(bx + 88, by + 1, barW, 7).fill({ color: 0x1a2a3a });
+      if (level > 0) {
+        g.rect(bx + 88, by + 1, Math.round(barW * level / 10), 7).fill({ color: SKILL_COLORS[si]!, alpha: 0.85 });
+      }
+      set(this.crewLabels[li++]!, `${SKILL_NAMES[si]}`, bx, by, SKILL_COLORS[si]!, 11);
+      set(this.crewLabels[li++]!, `Lv ${level}`, bx + 170 + 12, by, 0x8899aa, 11);
+      skillY += 20;
+    }
+
+    // ── Defect (if recovered) ────────────────────────────────────────────────
+    const bottomY = Math.max(traitY, skillY) + 8;
+    if (d.defectDescription) {
+      g.rect(0, bottomY, W, 1).fill({ color: 0x1e3050 });
+      const dy = bottomY + 10;
+      set(this.crewLabels[li++]!, "RECOVERY DEFECT", 24, dy, 0xcc8833, 10);
+      const defLines = this.wrapText(d.defectDescription, 100);
+      for (const line of defLines.slice(0, 2)) {
+        set(this.crewLabels[li++]!, line, 24, dy + 14, 0xaa7733, 11);
+      }
+    }
+
+    // Hint
+    set(this.crewLabels[li++]!, "ESC  back to roster", 16, H - 16, 0x446688, 11);
+
+    while (li < this.crewLabels.length) {
+      this.crewLabels[li++]!.visible = false;
+    }
+  }
+
+  private wrapText(text: string, maxChars: number): string[] {
+    const words = text.split(" ");
+    const lines: string[] = [];
+    let current = "";
+    for (const word of words) {
+      if (current.length + word.length + (current ? 1 : 0) > maxChars) {
+        if (current) lines.push(current);
+        current = word;
+      } else {
+        current = current ? `${current} ${word}` : word;
+      }
+    }
+    if (current) lines.push(current);
+    return lines;
   }
 
   private drawSolarMyShips(ships: ReadonlyArray<SavedBlueprintSummary>): void {

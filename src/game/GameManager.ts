@@ -61,6 +61,9 @@ import type { CrewService } from "../rpg/CrewService";
 import { DEFAULT_PILOT_ID } from "../rpg/schema";
 import type { CrewBot, BotSkillFamily } from "../rpg/bot-schema";
 import type { BotTraitRecord } from "../rpg/bot-schema";
+import { getPoolEntry } from "../rpg/crew-pool";
+import { getTrait } from "../rpg/trait-pool";
+import { RECOVERY_DEFECTS } from "../rpg/bot-schema";
 import type { SolarShipBlueprint, SavedBlueprintSummary, ShipTier } from "../types/solarShipBuilder";
 import type { ShipControlConfig } from "./solarsystem/ShipControlManager";
 import { DEFAULT_SHIP_CONTROL_CONFIG } from "../managers/SolarSystemSessionManager";
@@ -4516,6 +4519,10 @@ export class GameManager {
   // ── My Ships screen ───────────────────────────────────────────────────────
 
   private updateSolarCrew(): void {
+    if (this.crewHandler.detailBotId !== null) {
+      this.updateSolarCrewDetail();
+      return;
+    }
     if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
       this.state.setScreen("docked");
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
@@ -4532,10 +4539,51 @@ export class GameManager {
       this.menuDebounceMs = 150;
     }
     this.crewHandler.selection = Math.min(this.crewHandler.selection, Math.max(0, count - 1));
+    if (this.wasMenuConfirmPressed() && this.menuDebounceMs === 0 && count > 0) {
+      const entry = this.crewCache[this.crewHandler.selection];
+      if (entry) {
+        this.crewHandler.detailBotId = entry.bot.id;
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      }
+    }
+  }
+
+  private updateSolarCrewDetail(): void {
+    if (this.wasMenuBackPressed() && this.menuDebounceMs === 0) {
+      this.crewHandler.detailBotId = null;
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+    }
   }
 
   private buildCrewRenderData(): NonNullable<import("../rendering/GameRenderer").SolarSystemRenderData["solarCrew"]> | undefined {
     if (this.crewCache.length === 0) return undefined;
+    let detail: NonNullable<import("../rendering/GameRenderer").SolarSystemRenderData["solarCrew"]>["detail"] | undefined;
+    if (this.crewHandler.detailBotId !== null) {
+      const entry = this.crewCache.find(e => e.bot.id === this.crewHandler.detailBotId);
+      if (entry) {
+        const poolEntry = getPoolEntry(entry.bot.poolId);
+        const traits = entry.traitIds.map(id => {
+          const t = getTrait(id);
+          return t ? { id: t.id, name: t.name, description: t.description } : null;
+        }).filter((t): t is { id: string; name: string; description: string } => t !== null);
+        const skills = (Object.entries(entry.skills) as [BotSkillFamily, number][]).map(([family, level]) => ({ family, level }));
+        const defect = entry.bot.defectId
+          ? (RECOVERY_DEFECTS.find(d => d.id === entry.bot.defectId)?.description ?? null)
+          : null;
+        detail = {
+          botId: entry.bot.id,
+          name: entry.bot.name,
+          personalityType: entry.bot.personalityType,
+          adoptionLean: entry.bot.adoptionLean,
+          isAlive: entry.bot.isAlive,
+          hasBeenRecovered: entry.bot.hasBeenRecovered,
+          backstory: poolEntry?.backstory ?? "",
+          traits,
+          skills,
+          defectDescription: defect,
+        };
+      }
+    }
     return {
       crew: this.crewCache.map(entry => ({
         id: entry.bot.id,
@@ -4549,6 +4597,7 @@ export class GameManager {
       })),
       selection: this.crewHandler.selection,
       scrollOffset: this.crewHandler.scrollOffset,
+      ...(detail !== undefined ? { detail } : {}),
     };
   }
 
