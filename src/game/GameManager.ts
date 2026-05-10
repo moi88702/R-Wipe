@@ -57,6 +57,7 @@ import { SolarShopHandler } from "./handlers/SolarShopHandler";
 import { SolarMyShipsHandler } from "./handlers/SolarMyShipsHandler";
 import { NpcTalkMissionHandler } from "./handlers/NpcTalkMissionHandler";
 import { SolarCrewHandler } from "./handlers/SolarCrewHandler";
+import { SolarAwaySelectHandler } from "./handlers/SolarAwaySelectHandler";
 import type { CrewService } from "../rpg/CrewService";
 import { DEFAULT_PILOT_ID } from "../rpg/schema";
 import type { CrewBot, BotSkillFamily } from "../rpg/bot-schema";
@@ -64,6 +65,8 @@ import type { BotTraitRecord } from "../rpg/bot-schema";
 import { getPoolEntry } from "../rpg/crew-pool";
 import { getTrait } from "../rpg/trait-pool";
 import { RECOVERY_DEFECTS } from "../rpg/bot-schema";
+import { ConversationService } from "../rpg/ConversationService";
+import type { ConversationContext } from "../rpg/ConversationService";
 import type { SolarShipBlueprint, SavedBlueprintSummary, ShipTier } from "../types/solarShipBuilder";
 import type { ShipControlConfig } from "./solarsystem/ShipControlManager";
 import { DEFAULT_SHIP_CONTROL_CONFIG } from "../managers/SolarSystemSessionManager";
@@ -529,12 +532,20 @@ export class GameManager {
   private readonly npcHandler = new NpcTalkMissionHandler();
   private readonly invHandler = new SolarInventoryHandler();
   private readonly crewHandler = new SolarCrewHandler();
+  private readonly awaySelectHandler = new SolarAwaySelectHandler();
+  /** The away team selection confirmed by the player (bot IDs, ordered). */
+  private currentAwayTeamIds: readonly string[] = [];
+  private static readonly MAX_AWAY_TEAM = 4;
 
   // RPG layer — async-initialised via initRPG() called from main.ts
   private rpgDb: import("../rpg/RPGDatabase").RPGDatabase | null = null;
   private crewSvc: CrewService | null = null;
   private mindLevel = 1;
   private mindXp = 0;
+  private readonly conversationSvc = new ConversationService();
+  private readonly commsLog: Array<{ botName: string; personalityType: string; line: string; ageMs: number }> = [];
+  private static readonly COMMS_MAX_AGE_MS = 8_000;
+  private static readonly COMMS_MAX_ENTRIES = 3;
   private crewCache: Array<{
     bot: CrewBot;
     traitIds: string[];
@@ -771,6 +782,8 @@ export class GameManager {
       this.updateSolarInventory(clamped);
     } else if (screen === "solar-crew") {
       this.updateSolarCrew();
+    } else if (screen === "solar-away-select") {
+      this.updateSolarAwaySelect();
     }
 
     this.renderFrame(clamped);
@@ -1895,6 +1908,21 @@ export class GameManager {
       }
     }
 
+    // Crew conversations — tick ambient timer, age existing log entries
+    if (this.crewCache.length > 0) {
+      const ctx = this.getConversationContext();
+      const bots = this.crewCache.map(e => ({
+        id: e.bot.id, name: e.bot.name, personalityType: e.bot.personalityType,
+        adoptionLean: e.bot.adoptionLean, traitIds: e.traitIds, isAlive: e.bot.isAlive,
+      }));
+      const ambient = this.conversationSvc.tick(deltaMs, bots, ctx);
+      if (ambient) this.pushCommsEntry(ambient);
+    }
+    for (const entry of this.commsLog) entry.ageMs += deltaMs;
+    while (this.commsLog.length > 0 && this.commsLog[0]!.ageMs >= GameManager.COMMS_MAX_AGE_MS) {
+      this.commsLog.shift();
+    }
+
     // Pause toggle (ESC / P)
     if (this.wasPausePressed() && this.menuDebounceMs === 0) {
       soundManager.setThrusterActive(false);
@@ -1910,6 +1938,16 @@ export class GameManager {
     // Map toggle (M)
     if (input.mapTogglePulse) {
       this.mapOpen = !this.mapOpen;
+    }
+
+    // Away team (T) — opens crew selection from anywhere in flight
+    if (this.input.wasPressed("KeyT") && !this.mapOpen && this.menuDebounceMs === 0) {
+      this.awaySelectHandler.reset();
+      this.awaySelectHandler.fromScreen = "solar-system";
+      this.awaySelectHandler.selectedBotIds = new Set(this.currentAwayTeamIds);
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      this.state.setScreen("solar-away-select");
+      return;
     }
 
     // Inventory (I) — opens ship hold screen in flight
@@ -2071,6 +2109,7 @@ export class GameManager {
           this.menuSelection = 0;
           this.state.setScreen("docked");
           this.menuDebounceMs = 350;
+          this.fireConversationTrigger("docked");
           return;
         }
       } else if (nearbyGate) {
@@ -2420,9 +2459,10 @@ export class GameManager {
         maxAgeMs: 900,
         scale: 1 + ship.sizeClass * 0.4,
       });
-      // Mind XP: player kills award XP scaled by ship size.
+      // Mind XP + crew reaction when player destroys a ship.
       if (attackerFaction === "player") {
         this.awardMindXp(5 + ship.sizeClass * 5);
+        this.fireConversationTrigger("enemy-destroyed");
       }
       // Drop loot proportional to ship size class.
       this.spawnDrops(ship.position, Math.max(1, Math.floor(ship.sizeClass / 2)));
@@ -3185,6 +3225,7 @@ export class GameManager {
         this.solarPlayerLastDamageTimeMs = this.solarSystem?.getSessionState().gameTimeMs ?? 0;
         soundManager.solarHit();
         this.solarDamageFlashMs = 300;
+        this.fireConversationTrigger("took-damage");
         if (this.solarPlayerHealth <= 0 && this.solarDeathTimerMs === 0) {
           this.solarDeathTimerMs = GameManager.SOLAR_DEATH_DURATION_MS;
           this.solarPlayerDead = true;
@@ -3409,9 +3450,9 @@ export class GameManager {
     const escortItem = this.solarFriendlyShips.length < 3 ? ["Launch Escort"] : [];
     const cheatItems = isEarthStation ? ["Add 100k Credits"] : [];
     if (hasShipyard) {
-      return [...npcItems, "Inventory", "Crew", "Repair Bay", ...cheatItems, ...escortItem, "Shop", "Shipyard", "My Ships", "Galaxy Map", "Undock"];
+      return [...npcItems, "Inventory", "Crew", "Away Team", "Repair Bay", ...cheatItems, ...escortItem, "Shop", "Shipyard", "My Ships", "Galaxy Map", "Undock"];
     }
-    return [...npcItems, "Inventory", "Crew", "Repair Bay", ...escortItem, "Shop", "My Ships", "Galaxy Map", "Undock"];
+    return [...npcItems, "Inventory", "Crew", "Away Team", "Repair Bay", ...escortItem, "Shop", "My Ships", "Galaxy Map", "Undock"];
   }
 
   private getDockedNpc() {
@@ -3450,6 +3491,7 @@ export class GameManager {
       this.solarSystem.undock();
       this.state.setScreen("solar-system");
       this.menuDebounceMs = 350;
+      this.fireConversationTrigger("undocked");
       return;
     }
 
@@ -3527,6 +3569,14 @@ export class GameManager {
       this.crewHandler.reset();
       this.state.setScreen("solar-crew");
       this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+    if (item === "Away Team") {
+      this.awaySelectHandler.reset();
+      this.awaySelectHandler.fromScreen = "docked";
+      this.awaySelectHandler.selectedBotIds = new Set(this.currentAwayTeamIds);
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      this.state.setScreen("solar-away-select");
       return;
     }
     if (item === "Talk to NPC") {
@@ -4483,9 +4533,63 @@ export class GameManager {
   /** Award XP to the Mind (fire-and-forget — updates sync cache on resolve). */
   private awardMindXp(amount: number): void {
     if (!this.rpgDb || this.e2eMode) return;
+    const prevLevel = this.mindLevel;
     void this.rpgDb.awardXp(amount).then(profile => {
-      if (profile) { this.mindLevel = profile.level; this.mindXp = profile.xp; }
+      if (profile) {
+        this.mindLevel = profile.level;
+        this.mindXp = profile.xp;
+        if (profile.level > prevLevel) {
+          this.fireConversationTrigger("mind-level-up");
+        }
+      }
     });
+  }
+
+  private getConversationContext(): ConversationContext {
+    const screen = this.state.getScreen();
+    if (screen === "docked" || screen === "solar-npc-talk" || screen === "solar-missions" ||
+        screen === "solar-mission-detail" || screen === "solar-inventory" || screen === "solar-crew" ||
+        screen === "solar-away-select") {
+      return "docked";
+    }
+    if (screen !== "solar-system" && screen !== "solar-system-paused") return "calm";
+    // In space: check for nearby enemies
+    const session = this.solarSystem?.getSessionState();
+    if (!session) return "calm";
+    const playerPos = session.playerPosition;
+    const scannerRange = this.solarPlayerScannerRangeKm;
+    const hasEnemies = this.solarEnemyShips.some(s => {
+      const d = Math.hypot(s.position.x - playerPos.x, s.position.y - playerPos.y);
+      return d <= scannerRange;
+    });
+    if (!hasEnemies) return "calm";
+    // Any enemy at combat range (< 40% of scanner) = combat context
+    const combatRange = scannerRange * 0.4;
+    const inCombat = this.solarEnemyShips.some(s => {
+      const d = Math.hypot(s.position.x - playerPos.x, s.position.y - playerPos.y);
+      return d <= combatRange;
+    });
+    return inCombat ? "combat" : "tense";
+  }
+
+  private pushCommsEntry(result: { botName: string; personalityType: string; line: string }): void {
+    this.commsLog.push({ ...result, ageMs: 0 });
+    while (this.commsLog.length > GameManager.COMMS_MAX_ENTRIES) {
+      this.commsLog.shift();
+    }
+  }
+
+  private fireConversationTrigger(trigger: import("../rpg/ConversationService").ConversationTrigger): void {
+    const bots = this.crewCache.map(e => ({
+      id: e.bot.id,
+      name: e.bot.name,
+      personalityType: e.bot.personalityType,
+      adoptionLean: e.bot.adoptionLean,
+      traitIds: e.traitIds,
+      isAlive: e.bot.isAlive,
+    }));
+    const result = this.conversationSvc.fireTrigger(trigger, this.getConversationContext(), bots);
+    if (result) this.pushCommsEntry(result);
   }
 
   /** Persist the active ship's current module HP state. */
@@ -4619,6 +4723,116 @@ export class GameManager {
       selection: this.crewHandler.selection,
       scrollOffset: this.crewHandler.scrollOffset,
       ...(detail !== undefined ? { detail } : {}),
+    };
+  }
+
+  private updateSolarAwaySelect(): void {
+    if (this.menuDebounceMs > 0) return;
+
+    const h = this.awaySelectHandler;
+    const crewItems = this.crewCache.filter(e => e.bot.isAlive);
+    const squads = this.solarBlueprintStore.getSquads();
+    const MAX = GameManager.MAX_AWAY_TEAM;
+
+    if (this.wasMenuBackPressed()) {
+      this.state.setScreen(h.fromScreen);
+      this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      return;
+    }
+
+    // Panel switch: Tab / ←→
+    if (this.input.wasPressed("Tab") || this.input.wasPressed("ArrowRight")) {
+      h.panel = h.panel === "crew" ? "squads" : h.panel === "squads" ? "confirm" : "crew";
+      this.menuDebounceMs = 150;
+      return;
+    }
+    if (this.input.wasPressed("ArrowLeft")) {
+      h.panel = h.panel === "confirm" ? "squads" : h.panel === "squads" ? "crew" : "confirm";
+      this.menuDebounceMs = 150;
+      return;
+    }
+
+    if (h.panel === "crew") {
+      const count = crewItems.length;
+      if (this.input.wasPressed("ArrowUp")) {
+        h.crewSel = count > 0 ? (h.crewSel - 1 + count) % count : 0;
+        this.menuDebounceMs = 120;
+      } else if (this.input.wasPressed("ArrowDown")) {
+        h.crewSel = count > 0 ? (h.crewSel + 1) % count : 0;
+        this.menuDebounceMs = 120;
+      } else if (this.wasMenuConfirmPressed() || this.input.wasPressed("Space")) {
+        const entry = crewItems[h.crewSel];
+        if (entry) {
+          const id = entry.bot.id;
+          if (h.selectedBotIds.has(id)) {
+            h.selectedBotIds.delete(id);
+          } else if (h.selectedBotIds.size < MAX) {
+            h.selectedBotIds.add(id);
+          }
+          this.menuDebounceMs = 150;
+        }
+      }
+    } else if (h.panel === "squads") {
+      if (this.input.wasPressed("ArrowUp")) {
+        h.squadSel = (h.squadSel - 1 + squads.length) % squads.length;
+        this.menuDebounceMs = 120;
+      } else if (this.input.wasPressed("ArrowDown")) {
+        h.squadSel = (h.squadSel + 1) % squads.length;
+        this.menuDebounceMs = 120;
+      } else if (this.wasMenuConfirmPressed()) {
+        // Load squad — set current selection to alive bots in this squad
+        const squad = squads[h.squadSel];
+        if (squad) {
+          const alive = new Set(crewItems.map(e => e.bot.id));
+          h.selectedBotIds = new Set(squad.botIds.filter(id => alive.has(id)).slice(0, MAX));
+          this.menuDebounceMs = 200;
+        }
+      } else if (this.input.wasPressed("KeyS")) {
+        // Save current selection to highlighted squad slot
+        const squad = squads[h.squadSel];
+        if (squad) {
+          this.solarBlueprintStore.setSquad(h.squadSel, {
+            name: squad.name,
+            botIds: Array.from(h.selectedBotIds),
+          });
+          this.solarBlueprintStore.save();
+          this.menuDebounceMs = 200;
+        }
+      }
+    } else {
+      // confirm panel
+      if (this.wasMenuConfirmPressed()) {
+        this.currentAwayTeamIds = Array.from(h.selectedBotIds);
+        this.state.setScreen(h.fromScreen);
+        this.menuDebounceMs = MENU_DEBOUNCE_MS;
+      }
+    }
+  }
+
+  private buildAwaySelectRenderData(): NonNullable<import("../rendering/GameRenderer").SolarSystemRenderData["awaySelect"]> | undefined {
+    const h = this.awaySelectHandler;
+    const crewItems = this.crewCache.filter(e => e.bot.isAlive);
+    const squads = this.solarBlueprintStore.getSquads();
+
+    return {
+      crewItems: crewItems.map(e => ({
+        id: e.bot.id,
+        name: e.bot.name,
+        personalityType: e.bot.personalityType,
+        isAlive: e.bot.isAlive,
+        isSelected: h.selectedBotIds.has(e.bot.id),
+      })),
+      squads: squads.map(s => ({
+        name: s.name,
+        botIds: s.botIds,
+        selectedCount: s.botIds.filter(id => h.selectedBotIds.has(id)).length,
+        totalCount: s.botIds.filter(id => crewItems.some(e => e.bot.id === id)).length,
+      })),
+      crewSel: Math.min(h.crewSel, Math.max(0, crewItems.length - 1)),
+      squadSel: h.squadSel,
+      activePanel: h.panel,
+      selectedCount: h.selectedBotIds.size,
+      maxTeamSize: GameManager.MAX_AWAY_TEAM,
     };
   }
 
@@ -6017,12 +6231,20 @@ export class GameManager {
         const isSolar = state.screen === "solar-system" || state.screen === "solar-system-paused" ||
           state.screen === "docked" || state.screen === "solar-npc-talk" ||
           state.screen === "solar-missions" || state.screen === "solar-mission-detail" ||
-          state.screen === "solar-inventory" || state.screen === "solar-crew";
+          state.screen === "solar-inventory" || state.screen === "solar-crew" ||
+          state.screen === "solar-away-select";
         if (!isSolar) return null;
         const base = this.buildSolarSystemExtras();
-        if (!base || state.screen !== "solar-crew") return base;
-        const crew = this.buildCrewRenderData();
-        return crew !== undefined ? { ...base, solarCrew: crew } : base;
+        if (!base) return null;
+        if (state.screen === "solar-crew") {
+          const crew = this.buildCrewRenderData();
+          return crew !== undefined ? { ...base, solarCrew: crew } : base;
+        }
+        if (state.screen === "solar-away-select") {
+          const awaySelect = this.buildAwaySelectRenderData();
+          return awaySelect !== undefined ? { ...base, awaySelect } : base;
+        }
+        return base;
       })(),
       solarShipBuilder: state.screen === "solar-shipyard"
         ? this.solarShipBuilderMgr.getRenderData(
@@ -6587,6 +6809,14 @@ export class GameManager {
       })),
       cargoCapacity: this.computeCargoCapacity(),
       cargoUsed: this.computeCargoUsed(sessionState.moduleInventory),
+      ...(this.commsLog.length > 0 ? {
+        commsLog: this.commsLog.map(e => ({
+          botName: e.botName,
+          personalityType: e.personalityType,
+          line: e.line,
+          ageFrac: e.ageMs / GameManager.COMMS_MAX_AGE_MS,
+        })),
+      } : {}),
     };
   }
 

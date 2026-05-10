@@ -5,6 +5,17 @@ import type { ModuleHpEntry } from "../systems/ModuleHpSystem";
 
 export const SOLAR_BLUEPRINT_STORAGE_KEY = "rwipe.solar-ships.v1";
 
+export interface SquadDefinition {
+  name: string;
+  botIds: string[];
+}
+
+const DEFAULT_SQUADS: SquadDefinition[] = [
+  { name: "ALPHA", botIds: [] },
+  { name: "BETA",  botIds: [] },
+  { name: "GAMMA", botIds: [] },
+];
+
 interface SolarBlueprintPayload {
   activeId: string | null;
   blueprints: SolarShipBlueprint[];
@@ -16,6 +27,8 @@ interface SolarBlueprintPayload {
   shipHpStates?: Record<string, ModuleHpEntry[]>;
   /** Per-station item storage: locationId → (moduleDefId → qty). */
   stationHangars?: Record<string, Record<string, number>>;
+  /** Named squad presets (always 3 slots). */
+  squads?: SquadDefinition[];
 }
 
 function isPlacedSolarModule(raw: unknown): raw is PlacedSolarModule {
@@ -66,6 +79,7 @@ export class SolarBlueprintStore {
   private _credits: number | null = null;
   private _shipHpStates: Record<string, ModuleHpEntry[]> = {};
   private _stationHangars: Record<string, Record<string, number>> = {};
+  private _squads: SquadDefinition[] = DEFAULT_SQUADS.map(s => ({ ...s }));
   private readonly slot: VersionedSlot<SolarBlueprintPayload>;
 
   constructor(storage?: StorageBackend | null) {
@@ -141,6 +155,19 @@ export class SolarBlueprintStore {
     this._stationHangars = { ...hangars };
   }
 
+  /** Returns the 3 named squad presets. */
+  getSquads(): readonly SquadDefinition[] {
+    return this._squads;
+  }
+
+  /** Overwrites a single squad slot (index 0-2) and keeps the 3-slot invariant. */
+  setSquad(index: number, squad: SquadDefinition): void {
+    const next = [...this._squads];
+    while (next.length < 3) next.push({ name: "SQUAD", botIds: [] });
+    if (index >= 0 && index < next.length) next[index] = { ...squad };
+    this._squads = next;
+  }
+
   upsert(bp: SolarShipBlueprint): void {
     const idx = this._blueprints.findIndex((b) => b.id === bp.id);
     if (idx < 0) {
@@ -171,6 +198,7 @@ export class SolarBlueprintStore {
     if (this._credits !== null) payload.credits = this._credits;
     if (Object.keys(this._shipHpStates).length > 0) payload.shipHpStates = this._shipHpStates;
     if (Object.keys(this._stationHangars).length > 0) payload.stationHangars = this._stationHangars;
+    if (this._squads.some(s => s.botIds.length > 0)) payload.squads = this._squads;
     this.slot.save(payload);
   }
 
@@ -183,6 +211,12 @@ export class SolarBlueprintStore {
     this._credits = raw.credits ?? null;
     this._shipHpStates = raw.shipHpStates ?? {};
     this._stationHangars = raw.stationHangars ?? {};
+    if (raw.squads && raw.squads.length >= 3) {
+      this._squads = raw.squads.slice(0, 3).map((s, i) => ({
+        name: s.name || DEFAULT_SQUADS[i]!.name,
+        botIds: Array.isArray(s.botIds) ? s.botIds : [],
+      }));
+    }
     return true;
   }
 
@@ -197,5 +231,6 @@ export class SolarBlueprintStore {
     this._credits = null;
     this._shipHpStates = {};
     this._stationHangars = {};
+    this._squads = DEFAULT_SQUADS.map(s => ({ ...s }));
   }
 }

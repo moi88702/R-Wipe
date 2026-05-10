@@ -511,6 +511,27 @@ export interface SolarSystemRenderData {
       readonly defectDescription: string | null;
     };
   };
+  /** Away-team selection — only populated when screen === "solar-away-select". */
+  readonly awaySelect?: {
+    readonly crewItems: ReadonlyArray<{
+      readonly id: string;
+      readonly name: string;
+      readonly personalityType: string;
+      readonly isAlive: boolean;
+      readonly isSelected: boolean;
+    }>;
+    readonly squads: ReadonlyArray<{
+      readonly name: string;
+      readonly botIds: ReadonlyArray<string>;
+      readonly selectedCount: number;
+      readonly totalCount: number;
+    }>;
+    readonly crewSel: number;
+    readonly squadSel: number;
+    readonly activePanel: "crew" | "squads" | "confirm";
+    readonly selectedCount: number;
+    readonly maxTeamSize: number;
+  };
   /** Inventory screen data — only populated when screen === "solar-inventory". */
   readonly weaponStaggerActive?: boolean;
   readonly inventoryScreen?: {
@@ -796,6 +817,10 @@ export class GameRenderer {
 
   // Crew comms feed (HUD overlay, 2 labels per entry: name + line).
   private readonly commsLabels: Text[] = [];
+
+  // Away-team selection screen.
+  private readonly awaySelectGfx: Graphics = new Graphics();
+  private readonly awaySelectLabels: Text[] = [];
 
   private readonly isTouchDevice: boolean =
     typeof window !== "undefined" &&
@@ -1268,6 +1293,9 @@ export class GameRenderer {
     // Inventory screen overlay graphics.
     this.menuLayer.addChild(this.solarInventoryGfx);
 
+    // Away-team selection screen overlay graphics.
+    this.menuLayer.addChild(this.awaySelectGfx);
+
     // Docked screen — title + hint. Menu items live in a pool.
     this.dockedTitle = new Text({
       text: "",
@@ -1504,12 +1532,13 @@ export class GameRenderer {
     const isNpcTalk = screen === "solar-npc-talk";
     const isMissionList = screen === "solar-missions";
     const isMissionDetail = screen === "solar-mission-detail";
+    const isAwaySelect = screen === "solar-away-select";
     const isAnyDockedScreen = isDocked || isNpcTalk || isMissionList || isMissionDetail;
     // Gameplay entities stay visible behind the pause overlay.
     const drawsEntities = isGameplay || isPause;
 
     const isSolarPaused = screen === "solar-system-paused";
-    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isAnyDockedScreen || isSolarShipBuilder || isSolarShop || isSolarMyShips || isSolarCrew || isInventory;
+    this.menuLayer.visible = isMenu || isGameOver || isPause || isStats || isStarmap || isShipyard || isSolarSystem || isAnyDockedScreen || isSolarShipBuilder || isSolarShop || isSolarMyShips || isSolarCrew || isInventory || isAwaySelect;
     this.titleText.visible = isMenu;
     this.subtitleText.visible = isMenu;
     this.promptText.visible = isMenu || isPause || isSolarPaused;
@@ -1613,6 +1642,11 @@ export class GameRenderer {
       this.solarInventoryGfx.clear();
       for (const t of this.inventoryLabels) t.visible = false;
     }
+    // Away-select screen overlay toggles.
+    if (!isAwaySelect) {
+      this.awaySelectGfx.clear();
+      for (const t of this.awaySelectLabels) t.visible = false;
+    }
     // Menu list items: used by main-menu (3) and pause (3); hidden on stats / starmap.
     const showList = isMenu || isPause;
     for (const t of this.menuItemTexts) t.visible = showList;
@@ -1698,6 +1732,11 @@ export class GameRenderer {
 
     if (isSolarCrew && extras.solarSystem?.solarCrew) {
       this.drawSolarCrew(extras.solarSystem.solarCrew);
+      return;
+    }
+
+    if (isAwaySelect && extras.solarSystem?.awaySelect) {
+      this.drawSolarAwaySelect(extras.solarSystem.awaySelect);
       return;
     }
 
@@ -6988,6 +7027,168 @@ export class GameRenderer {
     }
     if (current) lines.push(current);
     return lines;
+  }
+
+  private drawSolarAwaySelect(data: NonNullable<SolarSystemRenderData["awaySelect"]>): void {
+    const g = this.awaySelectGfx;
+    g.clear();
+    const W = this.width;
+    const H = this.height;
+
+    // Full-screen dim background
+    g.rect(0, 0, W, H).fill({ color: 0x040810, alpha: 0.97 });
+
+    // ── Layout constants ────────────────────────────────────────────────────
+    const CREW_X = 24;
+    const CREW_Y = 72;
+    const CREW_W = 620;
+    const SQUAD_X = 668;
+    const SQUAD_Y = 72;
+    const SQUAD_W = 564;
+    const CARD_H = 40;
+    const CARD_GAP = 3;
+    const SQUAD_CARD_H = 70;
+
+    // Label pool sizing: header + crew rows + squad header + squad rows + hints + confirm
+    const LABELS_NEEDED = 3 + data.crewItems.length * 2 + 2 + data.squads.length * 3 + 4 + 2;
+    this.ensureTextPool(this.awaySelectLabels, LABELS_NEEDED, 13);
+    let li = 0;
+
+    const set = (
+      t: Text | undefined,
+      text: string,
+      x: number,
+      y: number,
+      color: number,
+      size: number,
+      anchorX = 0,
+    ) => {
+      if (!t) return;
+      t.text = text;
+      t.style.fill = color;
+      t.style.fontSize = size;
+      t.anchor.set(anchorX, 0.5);
+      t.x = x;
+      t.y = y;
+      t.visible = true;
+    };
+
+    // ── Title ───────────────────────────────────────────────────────────────
+    set(this.awaySelectLabels[li++]!, "AWAY TEAM", W / 2, 32, 0x88ddff, 22, 0.5);
+
+    // ── Left panel header ────────────────────────────────────────────────────
+    const crewActive = data.activePanel === "crew";
+    g.roundRect(CREW_X, CREW_Y - 30, CREW_W, 26, 4)
+      .fill({ color: crewActive ? 0x0a1e30 : 0x060e18, alpha: 0.95 })
+      .stroke({ color: crewActive ? 0x44aaff : 0x334455, width: crewActive ? 1.5 : 1, alpha: 0.9 });
+    set(this.awaySelectLabels[li++]!, "CREW", CREW_X + 12, CREW_Y - 17, 0x66aacc, 12);
+
+    // ── Crew list ────────────────────────────────────────────────────────────
+    const VISIBLE_CREW = Math.min(data.crewItems.length, 11);
+    for (let i = 0; i < VISIBLE_CREW; i++) {
+      const entry = data.crewItems[i]!;
+      const cardY = CREW_Y + i * (CARD_H + CARD_GAP);
+      const isSel = i === data.crewSel && crewActive;
+      const isSelected = entry.isSelected;
+
+      // Card background
+      const cardBg = isSelected
+        ? (isSel ? 0x0d2a18 : 0x0a1e12)
+        : (isSel ? 0x0e2240 : 0x080e1a);
+      g.roundRect(CREW_X, cardY, CREW_W, CARD_H, 4)
+        .fill({ color: cardBg, alpha: 0.95 });
+
+      // Selection border
+      if (isSel) {
+        g.roundRect(CREW_X, cardY, CREW_W, CARD_H, 4)
+          .stroke({ color: 0x44aaff, width: 1.5, alpha: 0.9 });
+      }
+
+      // Checkbox / tick indicator
+      const tickColor = isSelected ? 0x44ff88 : 0x334455;
+      g.roundRect(CREW_X + 8, cardY + 10, 18, 18, 3)
+        .fill({ color: isSelected ? 0x0a2215 : 0x060e18, alpha: 1 })
+        .stroke({ color: tickColor, width: 1.5, alpha: 0.9 });
+      if (isSelected) {
+        // Draw a tick
+        g.moveTo(CREW_X + 12, cardY + 18)
+          .lineTo(CREW_X + 17, cardY + 24)
+          .lineTo(CREW_X + 25, cardY + 13)
+          .stroke({ color: 0x44ff88, width: 2, alpha: 1 });
+      }
+
+      // Bot name
+      const nameColor = entry.isAlive ? (isSelected ? 0x88ffaa : 0xddeeff) : 0x664444;
+      set(this.awaySelectLabels[li++]!, entry.name, CREW_X + 34, cardY + CARD_H / 2, nameColor, 14);
+
+      // Personality badge
+      const pColor = GameRenderer.PERSONALITY_COLORS[entry.personalityType] ?? 0x556677;
+      set(this.awaySelectLabels[li++]!, entry.personalityType.toUpperCase(), CREW_X + CREW_W - 12, cardY + CARD_H / 2, pColor, 11, 1);
+    }
+
+    // ── Right panel: Squads ──────────────────────────────────────────────────
+    const squadsActive = data.activePanel === "squads";
+    g.roundRect(SQUAD_X, SQUAD_Y - 30, SQUAD_W, 26, 4)
+      .fill({ color: squadsActive ? 0x0a1e30 : 0x060e18, alpha: 0.95 })
+      .stroke({ color: squadsActive ? 0x44aaff : 0x334455, width: squadsActive ? 1.5 : 1, alpha: 0.9 });
+    set(this.awaySelectLabels[li++]!, "SQUADS", SQUAD_X + 12, SQUAD_Y - 17, 0x66aacc, 12);
+
+    for (let i = 0; i < data.squads.length; i++) {
+      const sq = data.squads[i]!;
+      const cardY = SQUAD_Y + i * (SQUAD_CARD_H + CARD_GAP);
+      const isSel = i === data.squadSel && squadsActive;
+
+      g.roundRect(SQUAD_X, cardY, SQUAD_W, SQUAD_CARD_H, 4)
+        .fill({ color: isSel ? 0x0e2240 : 0x080e1a, alpha: 0.95 });
+      if (isSel) {
+        g.roundRect(SQUAD_X, cardY, SQUAD_W, SQUAD_CARD_H, 4)
+          .stroke({ color: 0x44aaff, width: 1.5, alpha: 0.9 });
+      }
+
+      set(this.awaySelectLabels[li++]!, sq.name, SQUAD_X + 12, cardY + 20, isSel ? 0xddeeff : 0x99aacc, 15);
+      const countStr = sq.totalCount === 0 ? "EMPTY" : `${sq.totalCount} BOT${sq.totalCount !== 1 ? "S" : ""}`;
+      set(this.awaySelectLabels[li++]!, countStr, SQUAD_X + 12, cardY + 44, 0x556677, 11);
+      // "↵ Load  S Save" hint on selected row
+      if (isSel) {
+        set(this.awaySelectLabels[li++]!, "↵ LOAD   S SAVE", SQUAD_X + SQUAD_W - 12, cardY + CARD_GAP + SQUAD_CARD_H / 2, 0x446688, 11, 1);
+      } else {
+        // Still advance li even if hidden so the pool stays consistent
+        const t = this.awaySelectLabels[li++];
+        if (t) t.visible = false;
+      }
+    }
+
+    // ── Bottom: status + confirm ─────────────────────────────────────────────
+    const statusY = H - 100;
+    const confirmActive = data.activePanel === "confirm";
+
+    // Selected count
+    const selStr = `SELECTED: ${data.selectedCount} / ${data.maxTeamSize}`;
+    set(this.awaySelectLabels[li++]!, selStr, W / 2, statusY, data.selectedCount > 0 ? 0x88ffaa : 0x556677, 14, 0.5);
+
+    // Confirm button
+    const btnW = 340;
+    const btnH = 44;
+    const btnX = (W - btnW) / 2;
+    const btnY = H - 64;
+    const btnBg = confirmActive ? 0x0a2215 : 0x060e10;
+    const btnBorder = confirmActive ? 0x44ff88 : 0x225533;
+    g.roundRect(btnX, btnY, btnW, btnH, 6)
+      .fill({ color: btnBg, alpha: 0.95 })
+      .stroke({ color: btnBorder, width: confirmActive ? 2 : 1, alpha: 0.9 });
+    set(this.awaySelectLabels[li++]!, data.selectedCount > 0 ? "CONFIRM AWAY TEAM" : "SELECT CREW FIRST", W / 2, btnY + btnH / 2, confirmActive && data.selectedCount > 0 ? 0x66ffaa : 0x334455, 15, 0.5);
+
+    // Hint bar
+    const hintStr = "↑↓ Navigate   Tab/← → Switch panel   Space Toggle   ↵ Confirm   ESC Back";
+    set(this.awaySelectLabels[li++]!, hintStr, W / 2, H - 16, 0x334455, 10, 0.5);
+
+    // Selected total in corner
+    set(this.awaySelectLabels[li++]!, `T — Away Team   (${data.selectedCount} selected)`, CREW_X, H - 16, 0x334455, 10);
+
+    // Hide unused pool entries
+    for (let i = li; i < this.awaySelectLabels.length; i++) {
+      this.awaySelectLabels[i]!.visible = false;
+    }
   }
 
   private drawSolarMyShips(ships: ReadonlyArray<SavedBlueprintSummary>): void {
