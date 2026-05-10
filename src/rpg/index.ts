@@ -55,3 +55,7 @@ export { CREW_POOL, ENGINEER_POOL_IDS, ALL_POOL_IDS, getPoolEntry } from "./crew
 export { TRAIT_POOL, ALL_TRAIT_IDS, getTrait, PERSONALITY_TRAIT_WEIGHTS } from "./trait-pool";
 export { CrewService, createGameDatabase, createTestGameDatabase } from "./CrewService";
 export type { XpDriveItem, InstallDriveResult, DrawStartingCrewResult } from "./CrewService";
+export { ConversationService } from "./ConversationService";
+export type { CommsBot, CommsTriggerResult, ConversationContext, ConversationTrigger } from "./ConversationService";
+export { CONVERSATION_POOL } from "./conversation-pool";
+export type { ConversationEntry } from "./conversation-pool";
