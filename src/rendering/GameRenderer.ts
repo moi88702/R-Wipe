@@ -476,6 +476,13 @@ export interface SolarSystemRenderData {
   readonly cargoCapacity?: number;
   /** Cargo used (total items in inventory). */
   readonly cargoUsed?: number;
+  /** Crew comms feed — up to 3 entries, each fades over 8s (ageFrac 0→1). */
+  readonly commsLog?: ReadonlyArray<{
+    readonly botName: string;
+    readonly personalityType: string;
+    readonly line: string;
+    readonly ageFrac: number;
+  }>;
   /** Crew roster — only populated when screen === "solar-crew". */
   readonly solarCrew?: {
     readonly mind: { readonly level: number; readonly xp: number };
@@ -786,6 +793,9 @@ export class GameRenderer {
   // Inventory screen overlay.
   private readonly solarInventoryGfx: Graphics = new Graphics();
   private readonly inventoryLabels: Text[] = [];
+
+  // Crew comms feed (HUD overlay, 2 labels per entry: name + line).
+  private readonly commsLabels: Text[] = [];
 
   private readonly isTouchDevice: boolean =
     typeof window !== "undefined" &&
@@ -4075,6 +4085,78 @@ export class GameRenderer {
     // ── Virtual touch controls (touch devices only) ───────────────────────
     if (!data.mapOpen && this.isTouchDevice) {
       this.drawSolarVirtualControls(g, data.virtualControls);
+    }
+
+    // ── HUD: crew comms feed (bottom-left, stacked above health bars) ──────
+    this.drawCommsLog(g, data.commsLog);
+  }
+
+  private static readonly PERSONALITY_COLORS: Record<string, number> = {
+    brawler:   0xff5544,
+    warden:    0x4488ff,
+    medic:     0x44ff88,
+    ghost:     0x99aabb,
+    engineer:  0xff9944,
+    tactician: 0xcc66ff,
+  };
+
+  private drawCommsLog(
+    g: Graphics,
+    log?: ReadonlyArray<{ botName: string; personalityType: string; line: string; ageFrac: number }>,
+  ): void {
+    if (!log || log.length === 0) {
+      for (const lbl of this.commsLabels) lbl.visible = false;
+      return;
+    }
+
+    const LABELS_PER = 2; // [0] bot name, [1] dialogue line
+    const cardW = 320;
+    const cardH = 34;
+    const cardGap = 3;
+    const cardX = 16;
+    // Anchor bottom of stack just above the health/shield bars
+    const baseY = this.height - 68;
+
+    this.ensureTextPool(this.commsLabels, log.length * LABELS_PER, 11);
+
+    for (let i = 0; i < log.length; i++) {
+      const entry = log[i]!;
+      // Oldest (index 0) at top, newest (last index) at bottom.
+      const cardY = baseY - (log.length - 1 - i) * (cardH + cardGap);
+      const alpha = Math.max(0, 1 - entry.ageFrac);
+
+      // Semi-transparent background card
+      g.roundRect(cardX, cardY, cardW, cardH, 4)
+        .fill({ color: 0x000814, alpha: alpha * 0.78 });
+
+      // Bot name label
+      const nameLabel = this.commsLabels[i * LABELS_PER]!;
+      const nameColor = GameRenderer.PERSONALITY_COLORS[entry.personalityType] ?? 0xaabbcc;
+      nameLabel.text = entry.botName.toUpperCase();
+      nameLabel.style.fontSize = 10;
+      nameLabel.style.fill = nameColor;
+      nameLabel.alpha = alpha;
+      nameLabel.anchor.set(0, 0.5);
+      nameLabel.x = cardX + 8;
+      nameLabel.y = cardY + 10;
+      nameLabel.visible = true;
+
+      // Dialogue line label
+      const lineLabel = this.commsLabels[i * LABELS_PER + 1]!;
+      const maxChars = 44;
+      lineLabel.text = entry.line.length > maxChars ? entry.line.slice(0, maxChars - 1) + "…" : entry.line;
+      lineLabel.style.fontSize = 11;
+      lineLabel.style.fill = 0xddeeff;
+      lineLabel.alpha = alpha;
+      lineLabel.anchor.set(0, 0.5);
+      lineLabel.x = cardX + 8;
+      lineLabel.y = cardY + 24;
+      lineLabel.visible = true;
+    }
+
+    // Hide unused pool labels
+    for (let i = log.length * LABELS_PER; i < this.commsLabels.length; i++) {
+      this.commsLabels[i]!.visible = false;
     }
   }
 
