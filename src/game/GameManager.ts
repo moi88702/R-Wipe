@@ -2210,6 +2210,20 @@ export class GameManager {
       const intervalMs = 1000 / w.rateHz;
       this.solarWeaponCooldowns.set(w.placedId, intervalMs);
 
+      // Cascade stagger: delay any subsequent ready weapons so they fire in sequence.
+      if (this.solarWeaponStagger) {
+        const STAGGER_MS = 300;
+        let nextDelay = STAGGER_MS;
+        for (let j = wi + 1; j < weapons.length; j++) {
+          const wj = weapons[j]!;
+          const cd = this.solarWeaponCooldowns.get(wj.placedId) ?? 0;
+          if (cd === 0) {
+            this.solarWeaponCooldowns.set(wj.placedId, nextDelay);
+            nextDelay += STAGGER_MS;
+          }
+        }
+      }
+
       // Spawn origin: use blueprint weapon position if available, else ship centre.
       const spawnPos = weaponPositions[wi] ?? { ...from };
 
